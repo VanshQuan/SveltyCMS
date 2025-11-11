@@ -15,8 +15,8 @@ All dynamic CMS settings organized into logical groups
 	import { onMount } from 'svelte';
 	import { writable } from 'svelte/store';
 	import PageTitle from '@components/PageTitle.svelte';
-	import { getModalStore } from '@skeletonlabs/skeleton';
-	import type { ModalSettings } from '@skeletonlabs/skeleton';
+	import { getModalStore } from '$lib/skeleton-compat';
+	import type { ModalSettings } from '$lib/skeleton-compat';
 	import { logger } from '@utils/logger';
 
 	// Import settings structure
@@ -157,7 +157,7 @@ All dynamic CMS settings organized into logical groups
 </p>
 
 {#if unconfiguredCount > 0}
-	<div class="alert variant-filled-error mb-6">
+	<div class="alert bg-error-500 text-white mb-6">
 		<div class="alert-message">
 			<strong
 				>⚠️ Action Required: {unconfiguredCount}
@@ -201,7 +201,7 @@ All dynamic CMS settings organized into logical groups
 								<span class="text-lg text-warning-500" title="Needs configuration">⚠️</span>
 							{/if}
 							{#if group.requiresRestart}
-								<span class="variant-soft-warning badge text-xs">Restart</span>
+								<span class="bg-warning-100 text-warning-900 dark:bg-warning-900 dark:text-warning-100 badge text-xs">Restart</span>
 							{/if}
 						</div>
 					</div>
@@ -276,37 +276,44 @@ All dynamic CMS settings organized into logical groups
 
 <style lang="postcss">
 	.alert {
-		@apply rounded-container-token;
+		border-radius: 0.5rem;
 	}
 	.alert-message p {
-		@apply text-sm opacity-90;
+		font-size: 0.875rem;
+		line-height: 1.25rem;
+		opacity: 0.9;
 	}
 
 	/* Sidebar navigation styles */
 	.group-nav-item {
-		@apply cursor-pointer transition-all;
+		cursor: pointer;
+		transition-property: all;
+		transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+		transition-duration: 150ms;
 	}
 	.group-nav-item:not(.active):hover {
-		@apply bg-surface-200;
+		background-color: var(--color-surface-200);
 	}
 	:global(.dark) .group-nav-item:not(.active):hover {
-		@apply bg-surface-700;
+		background-color: var(--color-surface-700);
 	}
 	.group-nav-item.active {
-		@apply bg-primary-500 font-semibold text-white;
+		background-color: var(--color-primary-500);
+		font-weight: 600;
+		color: rgb(255 255 255);
 	}
 	.group-nav-item.active:hover {
-		@apply bg-primary-600;
+		background-color: var(--color-primary-600);
 	}
 
 	/* Settings panel */
 	.settings-panel-container {
-		@apply overflow-hidden;
+		overflow: hidden;
 		max-height: calc(100vh - 400px);
 		min-height: 500px;
 	}
 	.settings-panel {
-		@apply overflow-y-auto;
+		overflow-y: auto;
 		height: 100%;
 	}
 </style>

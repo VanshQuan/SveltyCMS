@@ -25,8 +25,8 @@ Manages actions (edit, delete, block, unblock) with debounced submissions.
 	import { storeListboxValue } from '@stores/store.svelte';
 
 	// Skeleton
-	import type { ModalComponent, ModalSettings, PopupSettings } from '@skeletonlabs/skeleton';
-	import { ListBox, ListBoxItem, popup } from '@skeletonlabs/skeleton';
+	import type { ModalComponent, ModalSettings, PopupSettings } from '$lib/skeleton-compat';
+	import { ListBox, ListBoxItem, popup } from '$lib/skeleton-compat';
 	import { showModal } from '@utils/modalUtils';
 	import { showToast } from '@utils/toast';
 	import ModalEditForm from './ModalEditForm.svelte';
@@ -234,7 +234,7 @@ Manages actions (edit, delete, block, unblock) with debounced submissions.
 			endpoint: () => (type === 'user' ? '/api/user/batch' : '/api/token/batch'),
 			method: () => 'POST',
 			toastMessage: () => `${type === 'user' ? 'Users' : 'Tokens'} Deleted`,
-			toastBackground: 'variant-filled-success'
+			toastBackground: 'bg-success-500 text-white'
 		},
 		block: {
 			buttonClass: 'gradient-pink',
@@ -273,7 +273,7 @@ Manages actions (edit, delete, block, unblock) with debounced submissions.
 			endpoint: () => (type === 'user' ? '/api/user/batch' : '/api/token/batch'),
 			method: () => 'POST',
 			toastMessage: () => `${type === 'user' ? 'Users' : 'Tokens'} Blocked`,
-			toastBackground: 'variant-filled-success'
+			toastBackground: 'bg-success-500 text-white'
 		},
 		unblock: {
 			buttonClass: 'gradient-yellow',
@@ -312,7 +312,7 @@ Manages actions (edit, delete, block, unblock) with debounced submissions.
 			endpoint: () => (type === 'user' ? '/api/user/batch' : '/api/token/batch'),
 			method: () => 'POST',
 			toastMessage: () => `${type === 'user' ? 'Users' : 'Tokens'} Unblocked`,
-			toastBackground: 'variant-filled-success'
+			toastBackground: 'bg-success-500 text-white'
 		}
 	});
 
@@ -406,7 +406,7 @@ Manages actions (edit, delete, block, unblock) with debounced submissions.
 			}),
 			...(action === 'unblock' && {
 				buttonTextConfirm: 'Unblock',
-				meta: { buttonConfirmClasses: 'variant-filled-warning' }
+				meta: { buttonConfirmClasses: 'bg-warning-500 text-white' }
 			}),
 			...(isEdit && { component: modalComponent }),
 			response: async (r: ModalResponse | boolean) => {
@@ -548,7 +548,7 @@ Manages actions (edit, delete, block, unblock) with debounced submissions.
 
 <!-- Dropdown/Listbox -->
 <div class="overflow-hiddens card z-10 w-48 rounded-sm bg-surface-500 text-white" data-popup="Combobox" role="menu" aria-label="Available actions">
-	<ListBox rounded="rounded-sm" active="variant-filled-primary" hover="hover:bg-surface-700" class="divide-y">
+	<ListBox rounded="rounded-sm" active="bg-primary-500 text-white" hover="hover:bg-surface-700" class="divide-y">
 		{#each filteredActions as action (action)}
 			{@const actionKey = action as ActionType}
 			{@const config = actionConfig[actionKey]}
@@ -556,7 +556,7 @@ Manages actions (edit, delete, block, unblock) with debounced submissions.
 				bind:group={listboxValue}
 				name="medium"
 				value={action}
-				active="variant-filled-primary"
+				active="bg-primary-500 text-white"
 				hover="hover:bg-surface-700"
 				role="menuitem"
 			>

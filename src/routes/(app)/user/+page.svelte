@@ -34,8 +34,8 @@
 	import PermissionGuard from '@components/PermissionGuard.svelte';
 	import AdminArea from './components/AdminArea.svelte';
 	// Skeleton
-	import type { ModalComponent, ModalSettings } from '@skeletonlabs/skeleton';
-	import { Avatar } from '@skeletonlabs/skeleton';
+	import type { ModalComponent, ModalSettings } from '$lib/skeleton-compat';
+	import { Avatar } from '$lib/skeleton-compat';
 	import { setCollection } from '@src/stores/collectionStore.svelte';
 	import { showConfirm, showModal } from '@utils/modalUtils';
 	import { showToast } from '@utils/toast';
@@ -205,7 +205,7 @@
 				</div>
 				<!-- Two-Factor Authentication Status -->
 				{#if is2FAEnabledGlobal}
-					<button onclick={open2FAModal} class="variant-ghost-surface btn-sm w-full max-w-xs">
+					<button onclick={open2FAModal} class="bg-surface-500/10 text-surface-500 hover:bg-surface-500/20 btn-sm w-full max-w-xs">
 						<div class="flex w-full items-center justify-between">
 							<span>Two-Factor Auth</span>
 							<div class="flex items-center gap-1">

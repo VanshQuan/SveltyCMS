@@ -31,7 +31,7 @@ with quick access to main sections: Home, User, Collections, Config, etc.
 	import { toggleUIElement } from '@stores/UIStore.svelte';
 
 	// Skeleton UI
-	import { getModalStore, popup } from '@skeletonlabs/skeleton';
+	import { getModalStore, popup } from '$lib/skeleton-compat';
 
 	const modalStore = getModalStore();
 
@@ -434,9 +434,9 @@ with quick access to main sections: Home, User, Collections, Config, etc.
 </script>
 
 <!-- Tooltip -->
-<div class="card variant-filled-surface z-[99999999] p-2" data-popup={NAV_POPUP_ID}>
+<div class="card bg-surface-500 text-white z-[99999999] p-2" data-popup={NAV_POPUP_ID}>
 	{activeTooltipText}
-	<div class="variant-filled-surface arrow"></div>
+	<div class="bg-surface-500 text-white arrow"></div>
 </div>
 
 <!-- Main navigation button -->

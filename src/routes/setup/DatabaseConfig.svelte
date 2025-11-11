@@ -4,7 +4,7 @@
 Provides DB type, host, port, name, user, password inputs, validation display, test button, and change warning.
 -->
 <script lang="ts">
-	import { popup, type PopupSettings } from '@skeletonlabs/skeleton';
+	import { popup, type PopupSettings } from '$lib/skeleton-compat';
 	import * as m from '@src/paraglide/messages';
 	import { logger } from '@utils/logger';
 	import type { DbConfig, ValidationErrors } from '@stores/setupStore.svelte';
@@ -562,7 +562,7 @@ Provides DB type, host, port, name, user, password inputs, validation display, t
 				type="submit"
 				disabled={isLoading}
 				aria-label={isLoading ? 'Testing database connection, please wait' : 'Test database connection'}
-				class="variant-filled-tertiary btn w-full dark:variant-filled-primary"
+				class="bg-tertiary-500 text-white btn w-full dark:bg-primary-500 text-white"
 			>
 				{#if isLoading}
 					<div

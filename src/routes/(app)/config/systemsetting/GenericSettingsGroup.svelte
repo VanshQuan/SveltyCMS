@@ -16,8 +16,8 @@ Handles all field types and validation automatically
 	import type { Writable } from 'svelte/store';
 	import type { SettingGroup, SettingField } from './settingsGroups';
 	import { showToast } from '@utils/toast';
-	import { getModalStore } from '@skeletonlabs/skeleton';
-	import type { ModalSettings } from '@skeletonlabs/skeleton';
+	import { getModalStore } from '$lib/skeleton-compat';
+	import type { ModalSettings } from '$lib/skeleton-compat';
 	import iso6391 from '@utils/iso639-1.json';
 	import { getLanguageName } from '@utils/languageUtils';
 	import { logger } from '@utils/logger';
@@ -456,7 +456,7 @@ Handles all field types and validation automatically
 
 	<!-- Restart Warning -->
 	{#if group.requiresRestart}
-		<div class="alert variant-filled-warning mb-4">
+		<div class="alert bg-warning-500 text-white mb-4">
 			<div class="alert-message">
 				<strong>⚠️ Restart Required</strong>
 				<p>Changes to these settings require a server restart to take effect.</p>
@@ -466,7 +466,7 @@ Handles all field types and validation automatically
 
 	<!-- Default Values Notice -->
 	{#if hasEmptyRequiredFields}
-		<div class="bordered alert variant-filled-error mb-4">
+		<div class="bordered alert bg-error-500 text-white mb-4">
 			<div class="alert-message">
 				<strong>ℹ️ Default Values Detected</strong>
 				<p>
@@ -479,13 +479,13 @@ Handles all field types and validation automatically
 
 	<!-- Loading State -->
 	{#if loading}
-		<div class="card variant-soft-surface p-6 text-center">
+		<div class="card bg-surface-100 text-surface-900 dark:bg-surface-900 dark:text-surface-100 p-6 text-center">
 			<p>Loading settings...</p>
 		</div>
 	{:else}
 		<!-- Error Message -->
 		{#if error}
-			<div class="alert variant-filled-error mb-4">
+			<div class="alert bg-error-500 text-white mb-4">
 				<div class="alert-message">
 					<strong>Error</strong>
 					<p>{error}</p>
@@ -573,7 +573,7 @@ Handles all field types and validation automatically
 										>
 											{#if (values[availableLangsField.key] as string[])?.length > 0}
 												{#each values[availableLangsField.key] as string[] as langCode}
-													<span class="group variant-ghost-tertiary badge inline-flex items-center gap-1 rounded-full dark:variant-ghost-primary">
+													<span class="group bg-tertiary-500/10 text-tertiary-500 hover:bg-tertiary-500/20 badge inline-flex items-center gap-1 rounded-full dark:bg-primary-500/10 text-primary-500 hover:bg-primary-500/20">
 														{displayLanguage(langCode)} ({langCode})
 														{#if !availableLangsField.readonly}
 															<button
@@ -594,7 +594,7 @@ Handles all field types and validation automatically
 											{#if !availableLangsField.readonly}
 												<button
 													type="button"
-													class="variant-filled-surface badge absolute right-2 top-2 rounded-full"
+													class="bg-surface-500 text-white badge absolute right-2 top-2 rounded-full"
 													onclick={() => {
 														showLanguagePicker[availableLangsField.key] = true;
 														languageSearch[availableLangsField.key] = '';
@@ -733,7 +733,7 @@ Handles all field types and validation automatically
 										>
 											{#if (values[localesField.key] as string[])?.length > 0}
 												{#each values[localesField.key] as string[] as langCode}
-													<span class="group variant-ghost-tertiary badge inline-flex items-center gap-1 rounded-full dark:variant-ghost-primary">
+													<span class="group bg-tertiary-500/10 text-tertiary-500 hover:bg-tertiary-500/20 badge inline-flex items-center gap-1 rounded-full dark:bg-primary-500/10 text-primary-500 hover:bg-primary-500/20">
 														{displayLanguage(langCode)} ({langCode})
 														{#if !localesField.readonly}
 															<button
@@ -762,7 +762,7 @@ Handles all field types and validation automatically
 											{#if !localesField.readonly}
 												<button
 													type="button"
-													class="variant-filled-surface badge absolute right-2 top-2 rounded-full"
+													class="bg-surface-500 text-white badge absolute right-2 top-2 rounded-full"
 													onclick={() => {
 														showLanguagePicker[localesField.key] = true;
 														languageSearch[localesField.key] = '';
@@ -988,7 +988,7 @@ Handles all field types and validation automatically
 									>
 										{#if (values[field.key] as string[])?.length > 0}
 											{#each values[field.key] as string[] as langCode}
-												<span class="group variant-ghost-tertiary badge inline-flex items-center gap-1 rounded-full dark:variant-ghost-primary">
+												<span class="group bg-tertiary-500/10 text-tertiary-500 hover:bg-tertiary-500/20 badge inline-flex items-center gap-1 rounded-full dark:bg-primary-500/10 text-primary-500 hover:bg-primary-500/20">
 													{displayLanguage(langCode)} ({langCode})
 													{#if !field.readonly}
 														<button
@@ -1009,7 +1009,7 @@ Handles all field types and validation automatically
 										{#if !field.readonly}
 											<button
 												type="button"
-												class="variant-filled-surface badge absolute right-2 top-2 rounded-full"
+												class="bg-surface-500 text-white badge absolute right-2 top-2 rounded-full"
 												onclick={() => {
 													showLanguagePicker[field.key] = true;
 													languageSearch[field.key] = '';
@@ -1078,7 +1078,7 @@ Handles all field types and validation automatically
 									>
 										{#if (values[field.key] as LogLevel[])?.length > 0}
 											{#each values[field.key] as LogLevel[] as level}
-												<span class="group variant-ghost-tertiary badge inline-flex items-center gap-1 rounded-full dark:variant-ghost-primary">
+												<span class="group bg-tertiary-500/10 text-tertiary-500 hover:bg-tertiary-500/20 badge inline-flex items-center gap-1 rounded-full dark:bg-primary-500/10 text-primary-500 hover:bg-primary-500/20">
 													{level}
 													{#if !field.readonly}
 														<button
@@ -1099,7 +1099,7 @@ Handles all field types and validation automatically
 										{#if !field.readonly}
 											<button
 												type="button"
-												class="variant-filled-surface badge absolute right-2 top-2 rounded-full"
+												class="bg-surface-500 text-white badge absolute right-2 top-2 rounded-full"
 												onclick={() => (showLogLevelPicker[field.key] = true)}
 												aria-haspopup="dialog"
 												aria-expanded={showLogLevelPicker[field.key]}
@@ -1157,12 +1157,12 @@ Handles all field types and validation automatically
 
 			<!-- Actions -->
 			<div class="actions-container flex flex-col justify-between gap-2 pt-4 sm:flex-row">
-				<button type="button" class="variant-filled-surface btn w-full sm:w-auto" onclick={resetToDefaults} disabled={saving}>
+				<button type="button" class="bg-surface-500 text-white btn w-full sm:w-auto" onclick={resetToDefaults} disabled={saving}>
 					<span>🔄</span>
 					<span>Reset to Defaults</span>
 				</button>
 
-				<button type="submit" class="variant-filled-primary btn w-full sm:w-auto" disabled={saving}>
+				<button type="submit" class="bg-primary-500 text-white btn w-full sm:w-auto" disabled={saving}>
 					{#if saving}
 						<span>Saving...</span>
 					{:else}
@@ -1177,36 +1177,70 @@ Handles all field types and validation automatically
 
 <style lang="postcss">
 	.generic-settings-group {
-		@apply space-y-4;
 		/* Prevent horizontal overflow */
 		max-width: 100%;
 		overflow-x: hidden;
 	}
+	.generic-settings-group > * + * {
+		margin-top: 1rem;
+	}
 
 	.header h2 {
-		@apply text-xl md:text-2xl;
+		font-size: 1.25rem;
+		line-height: 1.75rem;
+	}
+	@media (min-width: 768px) {
+		.header h2 {
+			font-size: 1.5rem;
+			line-height: 2rem;
+		}
 	}
 
 	.alert {
-		@apply p-3 rounded-container-token md:p-4;
+		padding: 0.75rem;
+		border-radius: 0.5rem;
+	}
+	@media (min-width: 768px) {
+		.alert {
+			padding: 1rem;
+		}
 	}
 
 	.alert-message strong {
-		@apply mb-1 block text-sm md:text-base;
+		margin-bottom: 0.25rem;
+		display: block;
+		font-size: 0.875rem;
+		line-height: 1.25rem;
+	}
+	@media (min-width: 768px) {
+		.alert-message strong {
+			font-size: 1rem;
+			line-height: 1.5rem;
+		}
 	}
 
 	.alert-message p {
-		@apply text-xs md:text-sm;
+		font-size: 0.75rem;
+		line-height: 1rem;
+	}
+	@media (min-width: 768px) {
+		.alert-message p {
+			font-size: 0.875rem;
+			line-height: 1.25rem;
+		}
 	}
 
 	.form-field {
-		@apply space-y-2;
 		/* Prevent input overflow */
 		max-width: 100%;
 	}
+	.form-field > * + * {
+		margin-top: 0.5rem;
+	}
 
 	.label {
-		@apply mb-2 block;
+		margin-bottom: 0.5rem;
+		display: block;
 	}
 
 	/* Tooltip styling */
@@ -1251,7 +1285,7 @@ Handles all field types and validation automatically
 
 	.input,
 	.select {
-		@apply w-full;
+		width: 100%;
 		/* Better touch targets on mobile */
 		min-height: 44px;
 		/* Prevent overflow */
@@ -1259,7 +1293,7 @@ Handles all field types and validation automatically
 	}
 
 	.checkbox {
-		@apply w-auto;
+		width: auto;
 		/* Better touch target */
 		min-width: 20px;
 		min-height: 20px;
@@ -1274,29 +1308,42 @@ Handles all field types and validation automatically
 
 	.actions-container button {
 		/* Ensure buttons don't shrink too much */
-		@apply min-w-fit px-4;
+		min-width: fit-content;
+		padding-left: 1rem;
+		padding-right: 1rem;
 	}
 
 	/* Touch-friendly spacing for mobile */
 	@media (max-width: 640px) {
-		.form-field {
-			@apply space-y-3;
+		.form-field > * + * {
+			margin-top: 0.75rem;
 		}
 
 		.actions-container button {
 			/* Full width on mobile for easier tapping */
-			@apply min-h-[48px];
+			min-height: 48px;
 		}
 	}
 
 	/* Input group responsiveness */
 	.input-group {
-		@apply flex-col sm:flex-row;
+		display: flex;
+		flex-direction: column;
 		/* Prevent overflow */
 		max-width: 100%;
 	}
+	@media (min-width: 640px) {
+		.input-group {
+			flex-direction: row;
+		}
+	}
 
 	.input-group-shim {
-		@apply text-center sm:text-left;
+		text-align: center;
+	}
+	@media (min-width: 640px) {
+		.input-group-shim {
+			text-align: left;
+		}
 	}
 </style>
