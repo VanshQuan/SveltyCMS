@@ -54,6 +54,7 @@ import ToastContainer from "@src/components/toast-container.svelte";
 		setLocale,
 		getTextDirection,
 	} from "@src/paraglide/runtime";
+import { locale } from "@src/stores/locale-store.svelte";
 import CookieConsent from "@src/plugins/cookie-consent/cookie-consent.svelte";
 import { initWebMCP } from "@src/plugins/webmcp/init";
 // Global Settings
@@ -192,7 +193,7 @@ $effect(() => {
 // Initialization
 // ============================================================================
 
-import { setContentStructure } from "@src/stores/collection-store.svelte";
+import { applyRemoteContentStructure } from "@src/stores/collection-store.svelte";
 import { initializeContent } from "@src/content";
 	import Button from '@components/ui/button.svelte';
 
@@ -222,7 +223,19 @@ $effect(() => {
 			if (page.data.navigationStructure) {
 				if (page.data.navigationStructure !== lastAppliedNavigationStructure) {
 					lastAppliedNavigationStructure = page.data.navigationStructure;
-					setContentStructure(page.data.navigationStructure);
+					// `navigationStructure` is the LAZY nav tree (maxDepth 1 — deeper nodes are
+					// omitted and only flagged via `hasChildren`). The collection store holds the
+					// COMPLETE FLAT node list, which is what the Collection Builder board and the
+					// sidebar tree rebuild their hierarchy from. Feeding them the truncated tree
+					// dropped every nested node, so a collection dragged into a category vanished
+					// on refresh. `contentNodes` is the full flat list from the same load; fall
+					// back to the nav tree only when it is absent (e.g. login/setup routes).
+					const flatNodes = page.data.contentNodes;
+					applyRemoteContentStructure(
+						Array.isArray(flatNodes) && flatNodes.length > 0
+							? flatNodes
+							: page.data.navigationStructure,
+					);
 					// Initialize the modern content system with hydration data
 					initializeContent(page.data as any);
 				}
@@ -251,9 +264,9 @@ onMount(() => {
 	if (
 		urlLocale &&
 		availableLocales.includes(urlLocale as any) &&
-		app.systemLanguage !== urlLocale
+		locale.systemLanguage !== urlLocale
 	) {
-		app.systemLanguage = urlLocale as any;
+		locale.systemLanguage = urlLocale as any;
 		currentLocale = urlLocale;
 	}
 
@@ -339,7 +352,7 @@ $effect(() => {
 			return;
 		}
 
-		const desired = app.systemLanguage;
+		const desired = locale.systemLanguage;
 		const current = untrack(() => currentLocale);
 
 		// Only update if there's an actual change

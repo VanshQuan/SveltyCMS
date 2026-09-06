@@ -23,6 +23,7 @@ import {
   addInputField,
   collectionSlugCandidates,
   createPersistedCategory,
+  goToWidgetsTab,
   openCollectionEntries,
   openNewCollectionEditor,
   saveCollectionSchema,
@@ -89,12 +90,12 @@ test.describe("Collection Builder (Testing 2026 — shell + golden)", () => {
     const fixture = uniqueCollectionFixture("SoftHmr");
     await openNewCollectionEditor(page);
 
-    // Soft-refresh only needs a successful save — not the widget wizard.
     const nameInput = page.getByTestId("collection-name-input");
     await nameInput.click();
     await nameInput.fill(fixture.name);
     await nameInput.blur();
-    // Wait for define step + store sync so Save enables (name !== "new")
+    await addInputField(page, { label: "Title", fieldName: "title" });
+    // Wait for define step + store sync so Save enables (name !== "new" and fields.length > 0)
     await expect(
       page.locator('[data-testid="save-collection-button"]:not([disabled])').first(),
     ).toBeVisible({ timeout: 15_000 });
@@ -198,15 +199,21 @@ test.describe("Collection Builder (Testing 2026 — shell + golden)", () => {
           `[E2E-DIAG] entry list never rendered\nURL: ${url}\nBody (first 1200 chars):\n${String(body).slice(0, 1200)}\n\nOriginal error: ${(err as Error).message}`,
         );
       });
-    await createBtn.click({ timeout: 10_000 });
-
     const titleBox = page
       .getByRole("textbox", { name: /^title$/i })
       .or(page.getByLabel(/^title$/i))
       .or(page.getByTestId("widget-input-title"))
       .or(page.locator('input[name="title"], textarea[name="title"]').first())
       .first();
-    await expect(titleBox, "Title field on entry form").toBeVisible({ timeout: 20_000 });
+
+    // Guard against SSR hydration race where early click on Create button is a silent no-op
+    await expect(async () => {
+      if (!(await titleBox.isVisible())) {
+        await createBtn.click({ timeout: 5_000 });
+      }
+      await expect(titleBox, "Title field on entry form").toBeVisible({ timeout: 3_000 });
+    }).toPass({ timeout: 20_000, intervals: [1_000, 2_000] });
+
     await titleBox.click();
     await titleBox.fill("Golden Entry");
     await titleBox.blur();
@@ -269,5 +276,170 @@ test.describe("Collection Builder (Testing 2026 — shell + golden)", () => {
       // Default status is unpublish; accept draft synonyms if product renames later
       expect(["unpublish", "unpublished", "draft"]).toContain(String(entry.status).toLowerCase());
     }).toPass({ timeout: 35_000, intervals: [1_500, 2_500, 4_000] });
+  });
+
+  /**
+   * Smart Quick-Add & Code Split-View — natural-language inference & live reactive schema code.
+   */
+  test("smart quick-add & split-view: natural language inference & live TS code", async ({
+    page,
+  }) => {
+    test.setTimeout(90_000);
+    const fixture = uniqueCollectionFixture("Split");
+    await openNewCollectionEditor(page);
+    const nameInput = page.getByTestId("collection-name-input");
+    await nameInput.click();
+    await nameInput.fill(fixture.name);
+    await nameInput.blur();
+
+    await goToWidgetsTab(page);
+
+    // Quick-Add field using natural-language input
+    const quickInput = page.getByTestId("quick-add-field-input");
+    await expect(quickInput).toBeVisible({ timeout: 10_000 });
+    await quickInput.click();
+    await quickInput.fill("contact_email");
+
+    // Inferred badge should appear
+    await expect(page.getByText(/email/i).first()).toBeVisible({ timeout: 5_000 });
+
+    // Click Add Field
+    const quickAddBtn = page.getByTestId("quick-add-field-button");
+    await expect(quickAddBtn).toBeEnabled({ timeout: 5_000 });
+    await quickAddBtn.click();
+
+    // Field row should be in canvas
+    await expect(
+      page.getByTestId("widget-field-row").filter({ hasText: /contact_email/i }),
+    ).toBeVisible({ timeout: 10_000 });
+
+    // Switch to Split View
+    const splitBtn = page.getByTestId("view-mode-split");
+    await expect(splitBtn).toBeVisible({ timeout: 5_000 });
+    await splitBtn.click();
+
+    // Code pane should be visible with generated TypeScript schema
+    const codePane = page.getByTestId("collection-code-pane");
+    await expect(codePane).toBeVisible({ timeout: 10_000 });
+    await expect(codePane).toContainText("contact_email");
+    await expect(codePane).toContainText("defineCollection");
+
+    // Switch to full TypeScript code view
+    const codeModeBtn = page.getByTestId("view-mode-code");
+    await codeModeBtn.click();
+    await expect(codePane).toBeVisible({ timeout: 5_000 });
+    // Visual canvas is hidden in full code mode
+    await expect(page.getByTestId("widget-fields-list")).not.toBeVisible();
+
+    // Switch back to Canvas mode
+    const canvasModeBtn = page.getByTestId("code-view-mode-canvas");
+    await canvasModeBtn.click();
+    await expect(page.getByTestId("widget-fields-list")).toBeVisible({ timeout: 5_000 });
+    await expect(codePane).not.toBeVisible();
+  });
+
+  /**
+   * Database Schema Ingestion & Introspection — DDL SQL reverse-engineering into collections.
+   */
+  test("schema ingestion: introspect DDL SQL to new collection", async ({ page }) => {
+    test.setTimeout(90_000);
+    await page.goto("/config/collectionbuilder", { waitUntil: "domcontentloaded" });
+    await expect(page).not.toHaveURL(/\/login/, { timeout: 15_000 });
+
+    const ingestBtn = page
+      .getByTestId("introspect-schema-button")
+      .or(page.getByTestId("open-schema-ingestion-button"))
+      .first();
+    await expect(ingestBtn).toBeVisible({ timeout: 15_000 });
+    await ingestBtn.click();
+
+    const modal = page.getByTestId("modal-schema-ingestion");
+    await expect(modal).toBeVisible({ timeout: 10_000 });
+
+    // Load example SQL DDL
+    const loadExampleBtn = page.getByTestId("ingest-load-sql-example");
+    await expect(loadExampleBtn).toBeVisible({ timeout: 5_000 });
+    await loadExampleBtn.click();
+
+    // Submit ingestion
+    const submitBtn = page.getByTestId("ingest-submit-button");
+    await expect(submitBtn).toBeEnabled({ timeout: 5_000 });
+    await submitBtn.click();
+
+    // Should redirect to new collection editor
+    await expect(page).toHaveURL(/\/config\/collectionbuilder\/new/, { timeout: 15_000 });
+
+    // Collection name should be pre-populated
+    const nameInput = page.getByTestId("collection-name-input");
+    await expect(nameInput).toBeVisible({ timeout: 10_000 });
+    await expect(nameInput).toHaveValue(/products/i);
+
+    // Go to widgets tab and verify ingested fields exist
+    await goToWidgetsTab(page);
+    const fieldsList = page.getByTestId("widget-fields-list");
+    await expect(fieldsList).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId("widget-field-row").first()).toBeVisible({ timeout: 10_000 });
+  });
+
+  /**
+   * Unified Favorites & Tagging Workflow — star & tag in builder reflects in filters and sidebar.
+   */
+  test("favorites & tagging: mark favorite and tag in builder reflects in filters", async ({
+    page,
+  }) => {
+    test.setTimeout(90_000);
+    await page.goto("/config/collectionbuilder", { waitUntil: "domcontentloaded" });
+    await expect(page).not.toHaveURL(/\/login/, { timeout: 15_000 });
+
+    const treeBoard = page.getByTestId("collection-builder-board");
+    await expect(treeBoard).toBeVisible({ timeout: 20_000 });
+
+    // Verify the sidebar quick-add link exists
+    const sidebarLink = page.getByTestId("sidebar-collection-builder-link");
+    await expect(sidebarLink).toBeVisible({ timeout: 10_000 });
+
+    // Look for any tree item
+    const firstItem = page.locator(".tree-item").first();
+    await expect(firstItem).toBeVisible({ timeout: 15_000 });
+
+    // Find and click the favorite star button on the row
+    const starBtn = firstItem.getByRole("button", { name: /favorite/i }).first();
+    await expect(starBtn).toBeVisible({ timeout: 5_000 });
+    await starBtn.click();
+
+    // Verify favorite icon has active warning-500 fill
+    const starIcon = starBtn.locator("iconify-icon");
+    await expect(starIcon).toHaveAttribute("icon", "bi:star-fill");
+
+    // Click "Manage Tags" button on the row
+    const tagBtn = firstItem.getByRole("button", { name: /manage tags/i }).first();
+    await expect(tagBtn).toBeVisible({ timeout: 5_000 });
+    await tagBtn.click();
+
+    // Fill tag in modal
+    const tagDialog = page.getByRole("dialog");
+    await expect(tagDialog).toBeVisible({ timeout: 5_000 });
+
+    const tagInput = tagDialog
+      .getByPlaceholder(/news, blog/i)
+      .or(tagDialog.getByRole("textbox"))
+      .first();
+    await expect(tagInput).toBeVisible({ timeout: 5_000 });
+    await tagInput.fill("alpha-tag");
+
+    // Click Save inside the dialog
+    const saveTagBtn = tagDialog.getByRole("button", { name: "Save" });
+    await saveTagBtn.click();
+
+    // Tag badge should be visible on the node
+    await expect(firstItem.getByText("alpha-tag")).toBeVisible({ timeout: 5_000 });
+
+    // Click Favorites filter chip in toolbar
+    const favFilterBtn = page.getByRole("button", { name: /filter by favorites/i });
+    await expect(favFilterBtn).toBeVisible({ timeout: 5_000 });
+    await favFilterBtn.click();
+
+    // Favorited item remains visible
+    await expect(firstItem).toBeVisible({ timeout: 5_000 });
   });
 });

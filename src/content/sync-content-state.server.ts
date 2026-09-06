@@ -31,7 +31,11 @@ import {
   setOrganizationalManifest,
   type StructureNodeSnapshot,
 } from "@utils/collection-order.server";
-import { getCollectionsPath, getCompiledCollectionsPath } from "@utils/tenant.server";
+import {
+  getCollectionFilePath,
+  getCollectionsPath,
+  getCompiledCollectionsPath,
+} from "@utils/tenant.server";
 import { contentStore } from "@stores/content-registry.svelte";
 import { deepClone } from "@utils/native-utils";
 import { shouldRequireLayoutInvalidate } from "./content-hmr";
@@ -587,7 +591,40 @@ async function applyGuiStructureSave(
     return op;
   });
 
+  const deletedPaths = new Set(
+    normalized.filter((op) => op.type === "delete").map((op) => op.node.path),
+  );
+  const collectionFilesToDelete: string[] = [];
+  const compiledFilesToDelete: string[] = [];
+  if (deletedPaths.size > 0) {
+    const current = (await contentService.getContentStructureFromDatabase(
+      "flat",
+      tenantId,
+      _adapter,
+    )) as ContentNode[];
+    const compiledBase = getCompiledCollectionsPath(tenantId);
+    for (const node of current) {
+      if (node.nodeType === "collection" && deletedPaths.has(node.path ?? "")) {
+        collectionFilesToDelete.push(getCollectionFilePath(node.name, tenantId));
+        if (node.name) {
+          const safeName = path.basename(node.name, ".ts");
+          compiledFilesToDelete.push(path.join(compiledBase, `${safeName}.js`));
+        }
+      }
+    }
+  }
+
   await contentService.upsertContentNodes(normalized, tenantId, _adapter);
+  for (const collectionFile of collectionFilesToDelete) {
+    await fs.unlink(collectionFile).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    });
+  }
+  for (const compiledFile of compiledFilesToDelete) {
+    await fs.unlink(compiledFile).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    });
+  }
   const updated = (await contentService.getContentStructureFromDatabase(
     "flat",
     tenantId,
