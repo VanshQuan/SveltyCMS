@@ -1,0 +1,1659 @@
+/**
+ * @file src/databases/db-interface.ts
+ * @description
+ * High-performance, database-agnostic interface contracts for SveltyCMS.
+ * This contract defines a truly agnostic data layer with these key principles:
+ * 1. Single Database Call Optimization: Minimize round trips.
+ * 2. Standardized DatabaseResult<T>: Consistent error handling without exceptions.
+ * 3. Batch Operations First: Prefer bulk operations over individual calls.
+ * 4. Query Optimization: Built-in hints and strategies.
+ * 5. Connection Pooling Ready: Supports pooling patterns.
+ * 6. Cache-Friendly: Designed to work with caching layers.
+ *
+ * features:
+ * - agnostic adapter contracts
+ * - batch operation optimization
+ * - cursor-based pagination
+ * - streaming support
+ * - standardized error handling
+ * - performance telemetry
+ */
+
+import type {
+  BaseEntity,
+  ContentNode as ContentNodeType,
+  DatabaseId,
+  ISODateString,
+  Schema,
+  WebsiteToken,
+} from "../content/types";
+import type { ApiKey, Role, Session, Token, User } from "./auth/types";
+import { BaseAdapter } from "./core/base-adapter";
+import type { SystemTenantScope } from "./system-tenant-scope";
+export type { SystemScopeReason, SystemTenantScope } from "./system-tenant-scope";
+export {
+  createSystemTenantScope,
+  hasTenantBypass,
+  isSystemTenantScope,
+  withSystemScope,
+} from "./system-tenant-scope";
+
+/** * Utility Types for DRY CRUD Operations
+ * Strips managed fields from entities when creating or updating.
+ */
+export type EntityCreate<T> = Omit<T, "_id" | "createdAt" | "updatedAt">;
+export type EntityUpdate<T> = Partial<EntityCreate<T>>;
+
+// ============================================================================
+// Tenant & Core Types
+// ============================================================================
+
+export interface TenantQuota {
+  maxApiRequestsPerMonth: number;
+  maxCollections: number;
+  maxStorageBytes: number;
+  maxUsers: number;
+}
+
+export interface TenantUsage {
+  apiRequestsMonth: number;
+  collectionsCount: number;
+  lastUpdated: Date;
+  storageBytes: number;
+  usersCount: number;
+}
+
+export interface Tenant extends BaseEntity {
+  _id: DatabaseId;
+  name: string;
+  ownerId: DatabaseId;
+  plan: "free" | "pro" | "enterprise";
+  quota: TenantQuota;
+  settings?: Record<string, unknown>;
+  status: "active" | "suspended" | "archived";
+  usage: TenantUsage;
+}
+
+export type {
+  BaseEntity,
+  ContentNodeType as ContentNode,
+  DatabaseId,
+  ISODateString,
+  Schema,
+  User,
+  Session,
+  Token,
+  Role,
+  WebsiteToken,
+  ApiKey,
+};
+
+/**
+ * Pagination and Sorting Options
+ * @deprecated Use PaginationOptions (plural) for new code. Kept for backwards compatibility.
+ */
+type SortOption = { [key: string]: "asc" | "desc" } | [string, "asc" | "desc"][];
+export interface PaginationOption {
+  filter?: Record<string, unknown>;
+  limit?: number;
+  offset?: number;
+  sort?: SortOption;
+}
+
+export interface PaginationOptions {
+  cursor?: string; // For cursor-based pagination (base64-encoded last item ID + sort value)
+  cursorDirection?: "after" | "before";
+  includeTotalCount?: boolean; // Option to skip expensive total count calculation (default: false)
+  page?: number; // fallback to offset-based
+  pageSize?: number;
+  sortDirection?: "asc" | "desc";
+  sortField?: string;
+  user?: User; // Optional user for ownership-based filtering
+  filter?: Record<string, any>; // For filtering support
+  /**
+   * Gallery JSON-path expression (e.g. `metadata.camera = Canon`).
+   * SQL/Mongo adapters push `metadata.*` clauses into native JSON queries;
+   * in-memory post-filter still applies for non-native clauses.
+   */
+  jsonPath?: string;
+  limit?: number; // fallback for pageSize
+  offset?: number; // fallback for page
+  sort?: SortOption; // fallback for sortField/sortDirection
+}
+
+export interface PaginatedResult<T> {
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+  items: T[];
+  nextCursor?: string;
+  page?: number;
+  pageSize: number;
+  previousCursor?: string;
+  total?: number; // Optional based on includeTotalCount
+}
+
+// ============================================================================
+// Performance, Telemetry & Caching
+// ============================================================================
+
+export interface BaseQueryOptions {
+  tenantId?: DatabaseId | null;
+  /**
+   * Branded system capability — only from `createSystemTenantScope` / `withSystemScope`.
+   * Prefer this over `bypassTenantCheck` for MULTI_TENANT system paths.
+   */
+  systemScope?: SystemTenantScope;
+  /**
+   * @deprecated Use `systemScope: createSystemTenantScope(reason)` or `withSystemScope(reason)`.
+   * Bare boolean is a forgeable escape hatch; lint bans new product use.
+   */
+  bypassTenantCheck?: boolean;
+  includeDeleted?: boolean;
+  bypassSafeQuery?: boolean; // 🚀 ULTRA FAST PATH: Skip all security and allocation checks
+  silent?: boolean; // Useful for skipping trigger/audit logs
+  skipMeta?: boolean; // 🚀 PERFORMANCE: Skip executionTime/meta object allocation
+  suppressErrorLog?: boolean; // 🚀 SECURITY/PERF: Mute error logging for expected failures
+  cache?: CacheOptions; // 🚀 ADAPTIVE CACHING: Control caching at the query level
+  bypassCache?: boolean; // 🚀 PERFORMANCE: Force bypass of all caching layers
+  hints?: QueryOptimizationHints;
+  transaction?: any; // Database-specific transaction object
+  /** No-read-back write: reconstruct the row client-side (full-doc callers). See WritePolicy.readBack. */
+  skipReturning?: boolean;
+  /** Skip post-write side effects (invalidation, outbox, pubsub, hooks). See WritePolicy.sideEffects. */
+  skipSideEffects?: boolean;
+  /** Skip the JSON `data` blob conversion (projection-only reads). See ReadPolicy.skipJson. */
+  skipJson?: boolean;
+  /** Convert rows in place when possible. See ReadPolicy.inPlace. */
+  inPlace?: boolean;
+  /** MariaDB: JSON columns arrive double-parsed (string) — parse again. */
+  mariaDoubleParseJson?: boolean;
+  filter?: any; // 🚀 FLEXIBILITY: Allow arbitrary filters for structure/bulk queries
+  /**
+   * Media only: when true under MULTI_TENANT, include documents with missing/null tenantId
+   * alongside the scoped tenant (legacy untenanted rows). Default false (fail-closed).
+   */
+  includeLegacyUntenanted?: boolean;
+  /**
+   * User attribute writes only: allow role / isAdmin / roleIds / permissions.
+   * Default false (fail-closed) — privilege escalation defense-in-depth beneath API handlers.
+   * Set true only for admin-managed updates, testing seeds, or trusted system paths.
+   */
+  allowPrivilegeEscalation?: boolean;
+}
+
+/**
+ * Aggregated usage statistics for an API key write.
+ * Carried by the api-key usage accumulator so each key is written ONCE per
+ * flush interval instead of once per authenticated request. When omitted,
+ * adapters keep the historical per-request behavior (`+1` at the current time).
+ */
+export interface ApiKeyUsageUpdate {
+  /** Total request count accumulated for the key (replaces the default `+1`). */
+  usageCount?: number;
+  /** Timestamp of the most recent request (replaces the default "now"). */
+  lastUsedAt?: Date;
+}
+
+/**
+ * Build a last-arg options bag with tenantId.
+ * Prefer this over positional tenantId (options-last contract for all adapters).
+ *
+ * @example
+ * await media.files.getByHash(hash, withTenant(tenantId));
+ * await system.virtualFolder.getAll(withTenant(tenantId, { includeDeleted: true }));
+ */
+export function withTenant(
+  tenantId?: DatabaseId | null,
+  extra?: Omit<BaseQueryOptions, "tenantId">,
+): BaseQueryOptions {
+  return { ...extra, tenantId };
+}
+
+/**
+ * Media list/query options — always last-arg options bag (no positional tenantId).
+ * Extends pagination so getByFolder/search share one options type.
+ */
+export type MediaQueryOptions = BaseQueryOptions &
+  PaginationOptions & {
+    recursive?: boolean;
+    search?: string;
+  };
+
+export interface FindOptions<T> extends BaseQueryOptions {
+  limit?: number;
+  offset?: number;
+  fields?: (keyof T)[];
+  sort?: SortOption;
+  populate?: string[];
+  includeDeleted?: boolean;
+  hints?: QueryOptimizationHints;
+}
+
+/**
+ * Count accuracy mode (shared by all adapters).
+ * - `exact` — true cardinality (always scan/index count)
+ * - `estimate` — metadata/stats when filter is empty & untenanted; else exact
+ * - `auto` — estimate when safe, otherwise exact (default)
+ */
+export type CountMode = "exact" | "estimate" | "auto";
+
+export type CountOptions = BaseQueryOptions & {
+  includeDeleted?: boolean;
+  /** Accuracy mode. Default `auto`. */
+  mode?: CountMode;
+};
+
+/**
+ * Page fetch without mandatory COUNT(*).
+ * Fetches `limit + 1` rows to set `hasMore`; total is opt-in.
+ */
+export type FindPageTotalMode = "none" | CountMode;
+
+export interface FindPageOptions<T> extends FindOptions<T> {
+  /**
+   * Include total row count with this accuracy.
+   * Default `none` — list UIs should use `hasMore` only.
+   */
+  total?: FindPageTotalMode;
+  /**
+   * Opaque keyset cursor from a previous `FindPageResult.nextCursor`.
+   * Prefer over `offset` for deep pages (O(1) seek vs OFFSET scan).
+   * When set, `offset` is ignored.
+   */
+  cursor?: string;
+}
+
+export interface FindPageResult<T> {
+  items: T[];
+  /** True when at least one more page exists (from limit+1 fetch). */
+  hasMore: boolean;
+  pageSize: number;
+  /**
+   * Opaque keyset cursor for the next page (encode of id + optional sort field).
+   * Pass as `options.cursor` on the next `findPage` call.
+   */
+  nextCursor?: string;
+  /** Present only when `total` was not `"none"`. */
+  total?: number;
+  /** True when `total` came from an estimate path. */
+  totalEstimated?: boolean;
+}
+
+export interface QueryOptimizationHints {
+  /** Max documents to return in a single batch */
+  batchSize?: number;
+  /** Max execution time in milliseconds before the query is aborted */
+  maxExecutionTime?: number;
+  /** Adapter-specific hints for the MongoDB adapter. Ignored by SQL adapters. */
+  mongo?: {
+    readPreference?: "primary" | "secondary" | "nearest";
+    readConcern?: "local" | "majority" | "snapshot" | "linearizable" | "available";
+    writeConcern?: "majority" | number | { w: "majority" | number; wtimeout?: number; j?: boolean };
+  };
+  /** Enable streaming (cursor-based) result retrieval */
+  streaming?: boolean;
+  /** Specific indexes to hint for the query planner */
+  useIndex?: string[];
+}
+
+export interface ConnectionPoolOptions {
+  connectionTimeout?: number;
+  idleTimeout?: number;
+  maxConnections?: number;
+  minConnections?: number;
+  retryAttempts?: number;
+}
+
+export interface DatabaseCapabilities {
+  maxBatchSize: number;
+  maxQueryComplexity: number;
+  supportsAggregation: boolean;
+  supportsFullTextSearch: boolean;
+  supportsIndexing: boolean;
+  supportsPartitioning: boolean;
+  supportsStreaming: boolean;
+  supportsTransactions: boolean;
+  supportsSavepoints?: boolean;
+  supportsTransactionTimeout?: boolean;
+  // Capability-based Hybrid CRUD flags
+  nativeUpsert?: boolean;
+  upsertByQuery?: boolean;
+  supportsConflictTargets?: boolean;
+}
+
+export interface IDialectProvider {
+  /** Apply database-specific performance pragmas or settings */
+  applyOptimizations(): Promise<void>;
+
+  /** Handle dialect-specific schema/migration tweaks */
+  normalizeSchema(schema: any): any;
+
+  /** Execute raw commands with dialect-specific syntax (e.g. pragma vs set) */
+  executeTuningCommand(cmd: string): Promise<void>;
+}
+
+export interface PerformanceMetrics {
+  averageQueryTime: number;
+  cacheHitRate: number;
+  connectionPoolUsage: number;
+  queryCount: number;
+  slowQueries: Array<{ query: string; duration: number; timestamp: Date }>;
+}
+
+export interface CacheOptions {
+  enabled?: boolean;
+  key?: string;
+  tags?: string[];
+  ttl?: number; // TTL in seconds
+}
+
+export interface ConnectionPoolStats {
+  active: number;
+  avgConnectionTime: number;
+  idle: number;
+  total: number;
+  waiting: number;
+}
+
+// ============================================================================
+// Database Result & Queries
+// ============================================================================
+
+export interface DatabaseError {
+  code: string;
+  details?: unknown;
+  message: string;
+  stack?: string;
+  statusCode?: number;
+  originalCode?: string | number;
+}
+
+export interface QueryMeta {
+  cached?: boolean;
+  executionTime?: number;
+  indexesUsed?: string[];
+  recordsExamined?: number;
+}
+
+export interface ExplainPlan {
+  raw: unknown; // database specific raw output
+  executionStats?: {
+    executionTimeMillis?: number;
+    totalDocsExamined?: number;
+    totalKeysExamined?: number;
+  };
+  queryPlanner?: {
+    winningPlan?: unknown;
+    indexFilterSet?: boolean;
+  };
+}
+
+export type DatabaseResult<T> =
+  | { success: true; data: T; meta?: QueryMeta }
+  | { success: false; message: string; error: DatabaseError };
+
+export type RecordObject = Record<string, unknown>;
+
+/**
+ * Database-agnostic query operator type.
+ *
+ * The `$` prefix is a **namespace delimiter** (not MongoDB-specific).
+ * Every adapter translates these operators to its native syntax:
+ *   MongoDB  → passes through natively
+ *   MariaDB  → $ne → !=, $in → IN (...), $regex → REGEXP
+ *   PostgreSQL → $ne → !=, $in → IN (...), $regex → ~
+ *   SQLite   → $ne → !=, $in → IN (...), $regex → REGEXP
+ *
+ * This shared DSL keeps query construction database-agnostic across all
+ * hooks, services, and handler layers without leaking SQL/MQL specifics.
+ */
+export type QueryOperator<T> =
+  | T
+  | {
+      $ne?: T;
+      $exists?: boolean;
+      $eq?: T;
+      $gt?: T;
+      $gte?: T;
+      $lt?: T;
+      $lte?: T;
+      $in?: NonNullable<T>[];
+      $nin?: NonNullable<T>[];
+      $regex?: string;
+      $options?: string;
+    };
+
+/**
+ * Database-agnostic query filter type.
+ * Logical operators ($or, $and, $not, $nor) follow the same `$`-prefix
+ * convention as field operators — translated per adapter in `mapQuery()`.
+ */
+export type QueryFilter<T> = {
+  [K in keyof T]?: QueryOperator<T[K]>;
+} & {
+  $or?: QueryFilter<T>[];
+  $and?: QueryFilter<T>[];
+  $not?: QueryFilter<T>;
+  $nor?: QueryFilter<T>[];
+};
+
+export interface BatchOperation<T> {
+  collection: string;
+  data?: Partial<T>;
+  id?: DatabaseId;
+  operation: "insert" | "update" | "delete" | "upsert";
+  query?: QueryFilter<T>;
+}
+
+export interface BatchResult<T> {
+  errors: DatabaseError[];
+  results: DatabaseResult<T>[];
+  success: boolean;
+  totalProcessed: number;
+}
+
+// ============================================================================
+// Domain Entities
+// ============================================================================
+
+export interface CollectionModel {
+  aggregate: <R = unknown>(pipeline: Record<string, unknown>[]) => Promise<R[]>;
+  findOne: <R = unknown>(query: Record<string, unknown>) => Promise<R | null>;
+}
+
+export interface NestedContentNode extends ContentNodeType {
+  children: NestedContentNode[];
+  path: string;
+}
+
+export interface ContentDraft<T = unknown> extends BaseEntity {
+  authorId: DatabaseId;
+  contentId: DatabaseId;
+  data: T;
+  status: "draft" | "review" | "archived";
+  version: number;
+}
+
+export interface ContentRevision extends BaseEntity {
+  authorId: DatabaseId;
+  commitMessage?: string;
+  contentId: DatabaseId;
+  data: unknown;
+  version: number;
+}
+
+export interface ThemeConfig {
+  assetsPath: string;
+  tailwindConfigPath: string;
+  [key: string]: unknown;
+}
+
+export interface Theme extends BaseEntity {
+  _id: DatabaseId;
+  config: ThemeConfig;
+  customCss?: string;
+  isActive: boolean;
+  isDefault: boolean;
+  name: string;
+  path: string;
+  previewImage?: string;
+}
+
+export interface Widget extends BaseEntity {
+  dependencies: string[];
+  instances: Record<string, unknown>;
+  isActive: boolean;
+  name: string;
+}
+
+export interface CmsMediaMetadata {
+  advancedMetadata?: Record<string, unknown>;
+  aiTags?: string[];
+  /** ATAG 2.0 B.2.1: Accessible alternative text for screen readers and accessibility tools */
+  altText?: string;
+  author?: string;
+  camera?: string;
+  codec?: string;
+  copyright?: string;
+  description?: string;
+  dominantColor?: string;
+  placeholder?: string;
+  duration?: number;
+  exif?: Record<string, unknown>;
+  focalPoint?: { x: number; y: number };
+  format?: string;
+  hasAlpha?: boolean;
+  hasProfile?: boolean;
+  height?: number;
+  iptc?: Record<string, unknown>;
+  keywords?: string[];
+  location?: { latitude?: number; longitude?: number; altitude?: number };
+  originalFilename?: string;
+  processingTimeMs?: number;
+  software?: string;
+  tags?: string[];
+  title?: string;
+  uploadTimestamp?: string;
+  uploadedBy?: string;
+  watermarkApplied?: boolean;
+  width?: number;
+  xmp?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface MediaItem extends BaseEntity {
+  access?: "public" | "private" | "protected";
+  createdBy: DatabaseId;
+  filename: string;
+  folderId?: DatabaseId | null;
+  hash: string;
+  metadata: CmsMediaMetadata;
+  mimeType: string;
+  originalFilename: string;
+  originalId?: DatabaseId | null;
+  path: string;
+  size: number;
+  thumbnails: Record<string, { url: string; width: number; height: number } | undefined>;
+  updatedBy: DatabaseId;
+  versions?: Array<{
+    version: number;
+    url: string;
+    path?: string;
+    hash?: string;
+    size?: number;
+    createdAt: ISODateString;
+    createdBy: DatabaseId;
+    action?: string;
+  }>;
+}
+
+export interface MediaFolder extends BaseEntity {
+  icon?: string;
+  name: string;
+  order: number;
+  parentId?: DatabaseId;
+  path: string;
+}
+
+export interface SystemPreferences extends BaseEntity {
+  key: string;
+  scope: "user" | "system" | "widget";
+  userId?: DatabaseId;
+  value: unknown;
+  visibility: "public" | "private";
+}
+
+export interface SystemVirtualFolder extends BaseEntity {
+  _id: DatabaseId;
+  icon?: string;
+  metadata?: unknown;
+  name: string;
+  order: number;
+  parentId?: DatabaseId | null;
+  path: string;
+  type: "folder" | "collection";
+}
+
+export interface Job extends BaseEntity {
+  _id: DatabaseId;
+  taskType: string;
+  payload: Record<string, unknown>;
+  status: "pending" | "running" | "completed" | "failed";
+  progress?: number;
+  metadata?: Record<string, unknown>;
+  attempts: number;
+  maxAttempts: number;
+  nextRunAt: Date | ISODateString;
+  lastError?: string;
+  tenantId?: DatabaseId;
+}
+
+// ============================================================================
+// Query Builder Interface
+// ============================================================================
+
+export interface QueryBuilder<T = unknown> {
+  count(): Promise<DatabaseResult<number>>;
+  deleteMany(): Promise<DatabaseResult<{ deletedCount: number }>>;
+  distinct<K extends keyof T>(field?: K): this;
+  exclude<K extends keyof T>(fields: K[]): this;
+  execute(): Promise<DatabaseResult<T[]>>;
+  exists(): Promise<DatabaseResult<boolean>>;
+  explain?(): Promise<DatabaseResult<unknown>>;
+  findOne(): Promise<DatabaseResult<T | null>>;
+  findOneOrFail(): Promise<DatabaseResult<T>>;
+  groupBy<K extends keyof T>(field: K): this;
+  hint(hints: QueryOptimizationHints): this;
+  limit(value: number): this;
+  orderBy<K extends keyof T>(sorts: Array<{ field: K; direction: "asc" | "desc" }>): this;
+  paginate(options: PaginationOptions): this;
+  search(query: string, fields?: (keyof T)[]): this;
+  select<K extends keyof T>(fields: K[]): this;
+  skip(value: number): this;
+  sort<K extends keyof T>(field: K, direction: "asc" | "desc"): this;
+  stream(): Promise<DatabaseResult<AsyncIterable<T>>>;
+  timeout(milliseconds: number): this;
+  updateMany(data: Partial<T>): Promise<DatabaseResult<{ modifiedCount: number }>>;
+  where(conditions: Partial<T> | ((item: T) => boolean)): this;
+  whereBetween<K extends keyof T>(field: K, min: T[K], max: T[K]): this;
+  whereIn<K extends keyof T>(field: K, values: NonNullable<T[K]>[]): this;
+  whereNotIn<K extends keyof T>(field: K, values: NonNullable<T[K]>[]): this;
+  whereNotNull<K extends keyof T>(field: K): this;
+  whereNull<K extends keyof T>(field: K): this;
+}
+
+// ============================================================================
+// Query IR Types (inlined from removed core/query-ir.ts for slimming the abstraction layer)
+// These types are kept here as they are part of the public IDBAdapter contract surface
+// (referenced by mapQuery in ISqlAdapter and Mongo adapter).
+// The heavy QueryTranslator is now inlined into the two mapQuery consumers.
+// ============================================================================
+
+export type Operator =
+  | "$eq"
+  | "$ne"
+  | "$gt"
+  | "$gte"
+  | "$lt"
+  | "$lte"
+  | "$in"
+  | "$nin"
+  | "$contains"
+  | "$regex"
+  | "$like"
+  | "$exists"
+  | "$or"
+  | "$and"
+  | "$not";
+
+export interface QueryCondition {
+  field: string;
+  operator: Operator;
+  value: any;
+}
+
+export interface LogicalGroup {
+  operator: "$or" | "$and" | "$not";
+  conditions: (QueryCondition | LogicalGroup)[];
+}
+
+export interface QueryIR {
+  collection: string;
+  filter: LogicalGroup;
+  limit?: number;
+  offset?: number;
+  sort?: Array<{ field: string; direction: "asc" | "desc" }>;
+}
+
+export interface DatabaseTransaction {
+  commit(): Promise<DatabaseResult<void>>;
+  rollback(): Promise<DatabaseResult<void>>;
+  /** Tx-scoped raw handle (postgres.js instance on PG, mysql2 connection on Maria) — lets raw fast paths participate in the transaction instead of deferring to Drizzle. */
+  sql?: any;
+  /** mysql2 alias for the tx-scoped raw handle. */
+  conn?: any;
+}
+
+// ============================================================================
+// Domain-Specific Adapters
+// ============================================================================
+
+export interface IAuthAdapter {
+  blockTokens(
+    tokenIds: DatabaseId[],
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<{ modifiedCount: number }>>;
+  blockUsers(
+    userIds: DatabaseId[],
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<{ modifiedCount: number }>>;
+  cleanupRotatedSessions?(): Promise<DatabaseResult<number>>;
+  consumeToken(
+    token: string,
+    userId?: DatabaseId,
+    type?: string,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<{ status: boolean; message: string; code?: string }>>;
+  createRole(role: Role, options?: BaseQueryOptions): Promise<DatabaseResult<Role>>;
+  createSession(
+    sessionData: {
+      user_id: DatabaseId;
+      expires: ISODateString;
+      tenantId?: DatabaseId | null;
+      /** Captured at login for device grouping in account Security tab */
+      userAgent?: string;
+      /** Stable per-device id (client-generated, localStorage) — precise device grouping */
+      deviceId?: string;
+      ipAddress?: string;
+    },
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<Session>>;
+  createToken(
+    data: {
+      user_id: DatabaseId;
+      email: string;
+      expires: ISODateString;
+      type: string;
+      tenantId?: DatabaseId | null;
+      role?: string;
+    },
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<string>>;
+  createUser(userData: Partial<User>, options?: BaseQueryOptions): Promise<DatabaseResult<User>>;
+  createUserAndSession(
+    userData: Partial<User>,
+    sessionData: { expires: ISODateString; tenantId?: DatabaseId | null },
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<{ user: User; session: Session }>>;
+  createApiKey(
+    apiKeyData: Partial<ApiKey>,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<ApiKey>>;
+  deleteExpiredSessions(): Promise<DatabaseResult<number>>;
+  deleteExpiredTokens(): Promise<DatabaseResult<number>>;
+  deleteRole(roleId: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<void>>;
+  deleteSession(sessionId: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<void>>;
+  deleteTokens(
+    tokenIds: DatabaseId[],
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<{ deletedCount: number }>>;
+  deleteUser(userId: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<void>>;
+  deleteUserAndSessions(
+    userId: DatabaseId,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<{ deletedUser: boolean; deletedSessionCount: number }>>;
+  deleteUsers(
+    userIds: DatabaseId[],
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<{ deletedCount: number }>>;
+  getActiveSessions(
+    userId: DatabaseId,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<Session[]>>;
+  getApiKey(hash: string, options?: BaseQueryOptions): Promise<DatabaseResult<ApiKey | null>>;
+  getApiKeyById(id: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<ApiKey | null>>;
+  listApiKeys(
+    filter?: { userId?: DatabaseId; tenantId?: DatabaseId | null },
+    options?: { limit?: number; skip?: number },
+  ): Promise<DatabaseResult<ApiKey[]>>;
+  getAllActiveSessions(options?: BaseQueryOptions): Promise<DatabaseResult<Session[]>>;
+  getAllRoles(options?: BaseQueryOptions): Promise<Role[]>;
+  getAllTokens(filter?: Record<string, unknown>): Promise<DatabaseResult<Token[]>>;
+  getAllUsers(
+    options?: PaginationOptions,
+    dbOptions?: BaseQueryOptions,
+  ): Promise<DatabaseResult<User[]>>;
+  getRoleById(roleId: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<Role | null>>;
+  getRoleCount(
+    filter?: Record<string, unknown>,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<number>>;
+  getSessionTokenData(
+    sessionId: DatabaseId,
+  ): Promise<DatabaseResult<{ expiresAt: ISODateString; user_id: DatabaseId } | null>>;
+  getTokenByValue(token: string, options?: BaseQueryOptions): Promise<DatabaseResult<Token | null>>;
+  getTokenById(
+    tokenId: DatabaseId,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<Token | null>>;
+  getTokenData(
+    token: string,
+    userId?: DatabaseId,
+    type?: string,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<Token | null>>;
+  getUserByEmail(
+    criteria: { email: string; tenantId?: DatabaseId | null },
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<User | null>>;
+  getUserById(userId: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<User | null>>;
+  getUserCount(
+    filter?: Record<string, unknown>,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<number>>;
+  invalidateAllUserSessions(
+    userId: DatabaseId,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<void>>;
+  revokeApiKey(id: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<void>>;
+  rotateToken(oldToken: string, expires: ISODateString): Promise<DatabaseResult<string>>;
+  setupAuthModels(options?: BaseQueryOptions): Promise<void>;
+  unblockTokens(
+    tokenIds: DatabaseId[],
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<{ modifiedCount: number }>>;
+  unblockUsers(
+    userIds: DatabaseId[],
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<{ modifiedCount: number }>>;
+  updateRole(
+    roleId: DatabaseId,
+    roleData: Partial<Role>,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<Role>>;
+  /**
+   * Aggregated usage statistics for an API key. When omitted, adapters keep the
+   * historical per-request behavior (`$inc 1` at the current time).
+   */
+  updateApiKeyUsage(
+    id: DatabaseId,
+    ip?: string,
+    options?: BaseQueryOptions,
+    usage?: ApiKeyUsageUpdate,
+  ): Promise<DatabaseResult<void>>;
+  updateSessionExpiry(
+    sessionId: DatabaseId,
+    newExpiry: ISODateString,
+  ): Promise<DatabaseResult<Session>>;
+  updateToken(
+    tokenId: DatabaseId,
+    tokenData: Partial<Token>,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<Token>>;
+  updateUserAttributes(
+    userId: DatabaseId,
+    userData: Partial<User>,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<User>>;
+  validateSession(
+    sessionId: DatabaseId,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<User | null>>;
+  validateToken(
+    token: string,
+    userId?: DatabaseId,
+    type?: string,
+    options?: BaseQueryOptions,
+  ): Promise<
+    DatabaseResult<{
+      success: boolean;
+      message: string;
+      email?: string;
+      details?: Token;
+    }>
+  >;
+}
+
+export interface ICrudAdapter {
+  aggregate<R>(
+    collection: string,
+    pipeline: unknown[],
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<R[]>>;
+  count<T extends BaseEntity>(
+    collection: string,
+    query?: QueryFilter<T>,
+    options?: CountOptions,
+  ): Promise<DatabaseResult<number>>;
+  /**
+   * List page with hasMore (limit+1) — avoids COUNT(*) on default list UIs.
+   * Optional `total` mode for dashboards that need a number.
+   */
+  findPage<T extends BaseEntity>(
+    collection: string,
+    query?: QueryFilter<T>,
+    options?: FindPageOptions<T>,
+  ): Promise<DatabaseResult<FindPageResult<T>>>;
+  delete(
+    collection: string,
+    id: DatabaseId,
+    options?: BaseQueryOptions & { permanent?: boolean; userId?: DatabaseId },
+  ): Promise<DatabaseResult<void>>;
+  deleteMany<T extends BaseEntity>(
+    collection: string,
+    query: QueryFilter<T>,
+    options?: BaseQueryOptions & { permanent?: boolean; userId?: DatabaseId },
+  ): Promise<DatabaseResult<{ deletedCount: number }>>;
+  restore(
+    collection: string,
+    id: DatabaseId,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<void>>;
+  exists<T extends BaseEntity>(
+    collection: string,
+    query: QueryFilter<T>,
+    options?: BaseQueryOptions & { includeDeleted?: boolean },
+  ): Promise<DatabaseResult<boolean>>;
+  findByIds<T extends BaseEntity>(
+    collection: string,
+    ids: DatabaseId[],
+    options?: FindOptions<T>,
+  ): Promise<DatabaseResult<T[]>>;
+  findMany<T extends BaseEntity>(
+    collection: string,
+    query: QueryFilter<T>,
+    options?: FindOptions<T>,
+  ): Promise<DatabaseResult<T[]>>;
+  streamMany<T extends BaseEntity>(
+    collection: string,
+    query: QueryFilter<T>,
+    options?: FindOptions<T>,
+  ): Promise<DatabaseResult<AsyncIterable<T>>>;
+  findOne<T extends BaseEntity>(
+    collection: string,
+    query: QueryFilter<T>,
+    options?: FindOptions<T>,
+  ): Promise<DatabaseResult<T | null>>;
+  find<T extends BaseEntity>(
+    collection: string,
+    query: QueryFilter<T>,
+    options?: FindOptions<T> & {
+      rawSql?: boolean;
+      sql?: string;
+      params?: Record<string, any>;
+    },
+  ): Promise<DatabaseResult<T[]>>;
+  insert<T extends BaseEntity>(
+    collection: string,
+    data: EntityCreate<T>,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<T>>;
+  insertMany<T extends BaseEntity>(
+    collection: string,
+    data: EntityCreate<T>[],
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<T[]>>;
+  update<T extends BaseEntity>(
+    collection: string,
+    id: DatabaseId,
+    data: EntityUpdate<T>,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<T>>;
+  updateMany<T extends BaseEntity>(
+    collection: string,
+    query: QueryFilter<T>,
+    data: EntityUpdate<T>,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<{ modifiedCount: number }>>;
+  upsert<T extends BaseEntity>(
+    collection: string,
+    query: QueryFilter<T>,
+    data: EntityCreate<T>,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<T>>;
+  upsertMany<T extends BaseEntity>(
+    collection: string,
+    items: Array<{ query: QueryFilter<T>; data: EntityCreate<T> }>,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<T[] | { upsertedCount: number; modifiedCount: number }>>;
+  /**
+   * Atomically increments a numeric field on a document by `amount`.
+   * Uses native DB-level operators ($inc / SET col = col + n) to prevent
+   * lost-update races under concurrent writes.
+   * Returns the updated document on success.
+   */
+  atomicIncrement?(
+    collection: string,
+    id: DatabaseId,
+    field: string,
+    amount: number,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<Record<string, unknown>>>;
+}
+
+export interface IFtsAdapter {
+  search(
+    collection: string,
+    query: string,
+    options?: {
+      columns?: Array<{ name: string; weight?: "A" | "B" | "C" | "D" }>;
+      limit?: number;
+      offset?: number;
+      tenantId?: string | null;
+      language?: string;
+      filters?: Record<string, unknown>;
+    },
+  ): Promise<DatabaseResult<{ items: any[]; total: number }>>;
+}
+
+export interface IMediaAdapter {
+  files: {
+    /** Last arg is always options (tenantId lives on BaseQueryOptions — never positional). */
+    upload(
+      file: EntityCreate<MediaItem>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<MediaItem>>;
+    getByHash(hash: string, options?: BaseQueryOptions): Promise<DatabaseResult<MediaItem | null>>;
+    uploadMany(
+      files: EntityCreate<MediaItem>[],
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<MediaItem[]>>;
+    restore(fileId: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<void>>;
+    delete(fileId: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<void>>;
+    deleteMany(
+      fileIds: DatabaseId[],
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<{ deletedCount: number }>>;
+    getByFolder(
+      folderId?: DatabaseId,
+      options?: MediaQueryOptions,
+    ): Promise<DatabaseResult<PaginatedResult<MediaItem>>>;
+    search(
+      query: string,
+      options?: MediaQueryOptions,
+    ): Promise<DatabaseResult<PaginatedResult<MediaItem>>>;
+    getMetadata(
+      fileIds: DatabaseId[],
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<Record<string, CmsMediaMetadata>>>;
+    updateMetadata(
+      fileId: DatabaseId,
+      metadata: Partial<CmsMediaMetadata>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<MediaItem>>;
+    move(
+      fileIds: DatabaseId[],
+      targetFolderId?: DatabaseId | null,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<{ movedCount: number }>>;
+    duplicate(
+      fileId: DatabaseId,
+      newName?: string,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<MediaItem>>;
+  };
+  folders: {
+    create(
+      folder: EntityCreate<MediaFolder>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<MediaFolder>>;
+    createMany(
+      folders: EntityCreate<MediaFolder>[],
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<MediaFolder[]>>;
+    delete(folderId: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<void>>;
+    deleteMany(
+      folderIds: DatabaseId[],
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<{ deletedCount: number }>>;
+    getTree(maxDepth?: number, options?: BaseQueryOptions): Promise<DatabaseResult<MediaFolder[]>>;
+    getFolderContents(
+      folderId?: DatabaseId,
+      options?: MediaQueryOptions,
+    ): Promise<
+      DatabaseResult<{
+        folders: MediaFolder[];
+        files: MediaItem[];
+        totalCount: number;
+      }>
+    >;
+    move(
+      folderId: DatabaseId,
+      targetParentId?: DatabaseId | null,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<MediaFolder>>;
+  };
+  setupMediaModels(): Promise<void>;
+}
+
+export interface IContentAdapter {
+  drafts: {
+    create(draft: EntityCreate<ContentDraft>): Promise<DatabaseResult<ContentDraft>>;
+    createMany(drafts: EntityCreate<ContentDraft>[]): Promise<DatabaseResult<ContentDraft[]>>;
+    update(draftId: DatabaseId, data: unknown): Promise<DatabaseResult<ContentDraft>>;
+    publish(draftId: DatabaseId): Promise<DatabaseResult<void>>;
+    publishMany(draftIds: DatabaseId[]): Promise<DatabaseResult<{ publishedCount: number }>>;
+    getForContent(
+      contentId: DatabaseId,
+      options?: PaginationOptions,
+    ): Promise<DatabaseResult<PaginatedResult<ContentDraft>>>;
+    restore(draftId: DatabaseId): Promise<DatabaseResult<void>>;
+    delete(draftId: DatabaseId): Promise<DatabaseResult<void>>;
+    deleteMany(draftIds: DatabaseId[]): Promise<DatabaseResult<{ deletedCount: number }>>;
+  };
+  nodes: {
+    getStructure(
+      mode: "flat" | "nested",
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<ContentNodeType[]>>;
+    upsertContentStructureNode(
+      node: EntityCreate<ContentNodeType>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<ContentNodeType>>;
+    create(
+      node: EntityCreate<ContentNodeType>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<ContentNodeType>>;
+    createMany(
+      nodes: EntityCreate<ContentNodeType>[],
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<ContentNodeType[]>>;
+    update(
+      path: string,
+      changes: Partial<ContentNodeType>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<ContentNodeType>>;
+    bulkUpdate(
+      updates: {
+        path: string;
+        id?: string;
+        changes: Partial<ContentNodeType>;
+      }[],
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<ContentNodeType[]>>;
+    fixMismatchedNodeIds?(
+      nodes: {
+        path: string;
+        expectedId: string;
+        changes: Partial<ContentNodeType>;
+      }[],
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<{ fixed: number }>>;
+    delete(path: string, options?: BaseQueryOptions): Promise<DatabaseResult<void>>;
+    deleteMany(
+      paths: string[],
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<{ deletedCount: number }>>;
+    reorder(
+      nodeUpdates: Array<{ path: string; newOrder: number }>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<ContentNodeType[]>>;
+    reorderStructure(
+      items: Array<{
+        id: string;
+        parentId: string | null;
+        order: number;
+        path: string;
+      }>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<void>>;
+  };
+  revisions: {
+    create(revision: EntityCreate<ContentRevision>): Promise<DatabaseResult<ContentRevision>>;
+    getHistory(
+      contentId: DatabaseId,
+      options?: PaginationOptions,
+    ): Promise<DatabaseResult<PaginatedResult<ContentRevision>>>;
+    restore(revisionId: DatabaseId): Promise<DatabaseResult<void>>;
+    delete(revisionId: DatabaseId): Promise<DatabaseResult<void>>;
+    deleteMany(revisionIds: DatabaseId[]): Promise<DatabaseResult<{ deletedCount: number }>>;
+    cleanup(
+      contentId: DatabaseId,
+      keepLatest: number,
+    ): Promise<DatabaseResult<{ deletedCount: number }>>;
+  };
+}
+
+export interface ISystemAdapter {
+  preferences: {
+    get<T>(
+      key: string,
+      options?: {
+        scope?: "user" | "system";
+        userId?: DatabaseId;
+        tenantId?: DatabaseId | null;
+      },
+    ): Promise<DatabaseResult<T | null>>;
+    getMany<T>(
+      keys: string[],
+      options?: {
+        scope?: "user" | "system";
+        userId?: DatabaseId;
+        tenantId?: DatabaseId | null;
+      },
+    ): Promise<DatabaseResult<Record<string, T>>>;
+    getByCategory<T>(
+      category: string,
+      options?: {
+        scope?: "user" | "system";
+        userId?: DatabaseId;
+        tenantId?: DatabaseId | null;
+      },
+    ): Promise<DatabaseResult<Record<string, T>>>;
+    set<T>(
+      key: string,
+      value: T,
+      options?: {
+        scope?: "user" | "system";
+        userId?: DatabaseId;
+        category?: string;
+        tenantId?: DatabaseId | null;
+      },
+    ): Promise<DatabaseResult<void>>;
+    setMany<T>(
+      preferences: Array<{
+        key: string;
+        value: T;
+        scope?: "user" | "system";
+        userId?: DatabaseId;
+        category?: string;
+      }>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<void>>;
+    delete(
+      key: string,
+      options?: {
+        scope?: "user" | "system";
+        userId?: DatabaseId;
+        tenantId?: DatabaseId | null;
+      },
+    ): Promise<DatabaseResult<void>>;
+    deleteMany(
+      keys: string[],
+      options?: {
+        scope?: "user" | "system";
+        userId?: DatabaseId;
+        tenantId?: DatabaseId | null;
+      },
+    ): Promise<DatabaseResult<void>>;
+    clear(options?: {
+      scope?: "user" | "system";
+      userId?: DatabaseId;
+      tenantId?: DatabaseId | null;
+    }): Promise<DatabaseResult<void>>;
+  };
+  virtualFolder: {
+    /** Last arg is always options (tenantId on BaseQueryOptions). */
+    create(
+      folder: EntityCreate<SystemVirtualFolder>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<SystemVirtualFolder>>;
+    getById(
+      folderId: DatabaseId,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<SystemVirtualFolder | null>>;
+    getByParentId(
+      parentId: DatabaseId | null,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<SystemVirtualFolder[]>>;
+    getAll(options?: BaseQueryOptions): Promise<DatabaseResult<SystemVirtualFolder[]>>;
+    update(
+      folderId: DatabaseId,
+      updateData: Partial<SystemVirtualFolder>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<SystemVirtualFolder>>;
+    addToFolder(
+      contentId: DatabaseId,
+      folderPath: string,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<void>>;
+    getContents(
+      folderPath: string,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<{ folders: SystemVirtualFolder[]; files: MediaItem[] }>>;
+    ensure(
+      folder: EntityCreate<SystemVirtualFolder>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<SystemVirtualFolder>>;
+    delete(folderId: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<void>>;
+    exists(path: string, options?: BaseQueryOptions): Promise<DatabaseResult<boolean>>;
+  };
+  tenants: {
+    create(tenant: EntityCreate<Tenant> & { _id?: DatabaseId }): Promise<DatabaseResult<Tenant>>;
+    getById(tenantId: DatabaseId): Promise<DatabaseResult<Tenant | null>>;
+    update(
+      tenantId: DatabaseId,
+      data: Partial<EntityCreate<Tenant>>,
+    ): Promise<DatabaseResult<Tenant>>;
+    delete(tenantId: DatabaseId): Promise<DatabaseResult<void>>;
+    list(options?: PaginationOption): Promise<DatabaseResult<Tenant[]>>;
+  };
+  themes: {
+    setupThemeModels(options?: BaseQueryOptions): Promise<void>;
+    getActive(options?: BaseQueryOptions): Promise<DatabaseResult<Theme | null>>;
+    setDefault(themeId: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<void>>;
+    install(theme: EntityCreate<Theme>, options?: BaseQueryOptions): Promise<DatabaseResult<Theme>>;
+    uninstall(themeId: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<void>>;
+    update(
+      themeId: DatabaseId,
+      theme: Partial<EntityCreate<Theme>>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<Theme>>;
+    getAllThemes(options?: BaseQueryOptions): Promise<Theme[]>;
+    storeThemes(themes: Theme[], options?: BaseQueryOptions): Promise<void>;
+    ensure(theme: EntityCreate<Theme>, options?: BaseQueryOptions): Promise<Theme>;
+    getDefaultTheme(options?: BaseQueryOptions): Promise<DatabaseResult<Theme | null>>;
+  };
+  websiteTokens: {
+    create(
+      token: Omit<WebsiteToken, "_id" | "createdAt">,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<WebsiteToken>>;
+    getAll(
+      options?: BaseQueryOptions & {
+        limit?: number;
+        skip?: number;
+        sort?: string;
+        order?: string;
+      },
+    ): Promise<DatabaseResult<{ data: WebsiteToken[]; total: number }>>;
+    getByName(
+      name: string,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<WebsiteToken | null>>;
+    getByToken(
+      token: string,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<WebsiteToken | null>>;
+    getByTokenHash(
+      tokenHash: string,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<WebsiteToken | null>>;
+    getById(
+      tokenId: DatabaseId,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<WebsiteToken | null>>;
+    delete(tokenId: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<void>>;
+  };
+  jobs: {
+    create(job: EntityCreate<Job>, options?: BaseQueryOptions): Promise<DatabaseResult<Job>>;
+    getById(jobId: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<Job | null>>;
+    getNextReady(limit?: number, options?: BaseQueryOptions): Promise<DatabaseResult<Job[]>>;
+    list(
+      options?: PaginationOption & BaseQueryOptions & { status?: string; taskType?: string },
+    ): Promise<DatabaseResult<Job[]>>;
+    count(
+      filter?: Record<string, unknown>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<number>>;
+    update(
+      jobId: DatabaseId,
+      data: Partial<EntityCreate<Job>>,
+      options?: BaseQueryOptions & { filter?: Record<string, unknown> },
+    ): Promise<DatabaseResult<Job>>;
+    delete(jobId: DatabaseId, options?: BaseQueryOptions): Promise<DatabaseResult<void>>;
+    cleanup(olderThan: Date, options?: BaseQueryOptions): Promise<DatabaseResult<number>>;
+  };
+  widgets: {
+    setupWidgetModels(): Promise<void>;
+    register(widget: EntityCreate<Widget>): Promise<DatabaseResult<Widget>>;
+    findAll(): Promise<DatabaseResult<Widget[]>>;
+    getActiveWidgets(): Promise<DatabaseResult<Widget[]>>;
+    activate(widgetId: DatabaseId): Promise<DatabaseResult<void>>;
+    deactivate(widgetId: DatabaseId): Promise<DatabaseResult<void>>;
+    update(
+      widgetId: DatabaseId,
+      widget: Partial<EntityCreate<Widget>>,
+    ): Promise<DatabaseResult<Widget>>;
+    delete(widgetId: DatabaseId): Promise<DatabaseResult<void>>;
+  };
+}
+
+export interface IMonitoringAdapter {
+  cache: {
+    get<T>(key: string): Promise<DatabaseResult<T | null>>;
+    set<T>(key: string, value: T, options?: CacheOptions): Promise<DatabaseResult<void>>;
+    delete(key: string): Promise<DatabaseResult<void>>;
+    clear(tags?: string[]): Promise<DatabaseResult<void>>;
+    invalidateCollection(
+      collection: string,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<void>>;
+    invalidateCategory(category: string, options?: BaseQueryOptions): Promise<DatabaseResult<void>>;
+    /** Content version for tenant (options.tenantId) or system-wide. */
+    getVersion(options?: BaseQueryOptions): Promise<DatabaseResult<number>>;
+    /** Atomically increments content version; returns new version. */
+    incrementVersion(options?: BaseQueryOptions): Promise<DatabaseResult<number>>;
+  };
+  getConnectionPoolStats?(): Promise<DatabaseResult<ConnectionPoolStats>>;
+  performance: {
+    getMetrics(): Promise<DatabaseResult<PerformanceMetrics>>;
+    clearMetrics(): Promise<DatabaseResult<void>>;
+    enableProfiling(enabled: boolean): Promise<DatabaseResult<void>>;
+    getSlowQueries(
+      limit?: number,
+    ): Promise<
+      DatabaseResult<Array<{ query: string; duration: number; timestamp: ISODateString }>>
+    >;
+  };
+}
+
+// ============================================================================
+// Main Root Database Adapter
+// ============================================================================
+
+export interface IBatchAdapter {
+  execute<T>(operations: BatchOperation<T>[]): Promise<DatabaseResult<BatchResult<T>>>;
+  bulkInsert<T extends BaseEntity>(
+    collection: string,
+    items: EntityCreate<T>[],
+  ): Promise<DatabaseResult<T[]>>;
+  bulkUpdate<T extends BaseEntity>(
+    collection: string,
+    updates: Array<{ id: DatabaseId; data: Partial<T> }>,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<{ modifiedCount: number }>>;
+  bulkDelete(
+    collection: string,
+    ids: DatabaseId[],
+  ): Promise<DatabaseResult<{ deletedCount: number }>>;
+  bulkUpsert<T extends BaseEntity>(
+    collection: string,
+    items: Array<Partial<T> & { id?: DatabaseId }>,
+  ): Promise<DatabaseResult<T[]>>;
+}
+
+export interface ICollectionAdapter {
+  getModel(id: string): Promise<CollectionModel>;
+  createModel(schema: Schema, force?: boolean, options?: BaseQueryOptions): Promise<void>;
+  updateModel(schema: Schema, options?: BaseQueryOptions): Promise<void>;
+  deleteModel(id: string, options?: BaseQueryOptions): Promise<void>;
+  createIndexes?(collectionId: string, schema: Schema): Promise<DatabaseResult<void>>;
+  getSchema(
+    collectionName: string,
+    tenantId?: DatabaseId | null,
+  ): Promise<DatabaseResult<Schema | null>>;
+  getSchemaById(
+    collectionId: string,
+    tenantId?: DatabaseId | null,
+  ): Promise<DatabaseResult<Schema | null>>;
+  listSchemas(
+    tenantId?: DatabaseId | null,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<Schema[]>>;
+  getNativeDriverModel?<TNative = any>(collectionId: string): Promise<TNative>;
+}
+
+export interface ISqlAdapter extends BaseAdapter {
+  type: string;
+  schema: any;
+  db: any;
+  getTable(collection: string): any;
+  getColumn(table: any, name: string, forcePhysical?: boolean): any;
+  getPhysicalSelection(table: any): any;
+  prepareValues(
+    table: any,
+    data: any,
+    id: DatabaseId | undefined,
+    now: Date | string,
+    options: any,
+  ): any;
+  mapQuery(table: any, query: any, options?: any): any;
+  applyOrderBy(builder: any, table: any, options: any): any;
+  isSystemTable(collection: string): boolean;
+  upsertNative?(
+    table: any,
+    values: any,
+    conflictTarget: any[],
+    options?: BaseQueryOptions,
+  ): Promise<void>;
+  rawBulkUpdate(
+    table: any,
+    collection: string,
+    updates: Array<{ id: DatabaseId; data: Partial<Record<string, unknown>> }>,
+    now: Date,
+    options: BaseQueryOptions,
+  ): Promise<{ modifiedCount: number } | null>;
+  withWriteLock<T>(fn: () => T | Promise<T>): Promise<T>;
+  transaction<T>(
+    fn: (transaction: DatabaseTransaction) => Promise<DatabaseResult<T>>,
+    options?: { timeout?: number; isolationLevel?: string; isWrite?: boolean },
+  ): Promise<DatabaseResult<T>>;
+  raw: {
+    execute: (sql: string, params?: any[]) => Promise<any>;
+    client: any;
+  };
+}
+
+/** Database-agnostic Full-Text Search adapter. Each DB adapter implements its native FTS. */
+export interface IFtsAdapter {
+  /**
+   * Execute a full-text search query against a collection.
+   * @param collection - The collection/table name
+   * @param query - User's search query string
+   * @param options - Search configuration
+   */
+  search(
+    collection: string,
+    query: string,
+    options?: {
+      columns?: Array<{ name: string; weight?: "A" | "B" | "C" | "D" }>;
+      limit?: number;
+      offset?: number;
+      tenantId?: DatabaseId | null;
+      language?: string;
+      filters?: Record<string, unknown>;
+    },
+  ): Promise<DatabaseResult<{ items: any[]; total: number }>>;
+}
+
+export interface IDBAdapter {
+  type: string;
+  // Top-Level Domains
+  auth: IAuthAdapter;
+  content: IContentAdapter;
+  crud: ICrudAdapter;
+  media: IMediaAdapter;
+  system: ISystemAdapter;
+  monitoring: IMonitoringAdapter;
+
+  /** Database-agnostic Full-Text Search adapter (optional). */
+  fts?: IFtsAdapter;
+
+  // High-Performance Batch Operations
+  batch: IBatchAdapter;
+
+  // Test/Dev Utilities
+  clearDatabase(): Promise<DatabaseResult<void>>;
+
+  /**
+   * Performs periodic maintenance and cleanup of expired data (sessions, tokens, logs).
+   * Replicates TTL index functionality for databases that do not support it natively.
+   */
+  cleanupExpiredData?(): Promise<
+    DatabaseResult<{ sessions: number; tokens: number; logs?: number }>
+  >;
+
+  collection: ICollectionAdapter;
+  registerHook?(hook: any): void;
+
+  // Connection Management with Pooling
+  connect(connectionString: string, options?: unknown): Promise<DatabaseResult<void>>;
+  connect(poolOptions: ConnectionPoolOptions): Promise<DatabaseResult<void>>;
+  disconnect(): Promise<DatabaseResult<void>>;
+
+  // Lazy Initializers
+  ensureAuth?(): Promise<void>;
+  ensureCollections?(): Promise<void>;
+  ensureContent?(): Promise<void>;
+  ensureMedia?(): Promise<void>;
+  ensureMonitoring?(): Promise<void>;
+  ensureSystem?(): Promise<void>;
+
+  // Performance and Capabilities
+  getCapabilities(): DatabaseCapabilities;
+
+  // Row-Level Security (RLS) & Multi-Tenancy
+  enforceTenantPolicy?(collection: string, tenantId: string): Promise<DatabaseResult<void>>;
+  getTenantContext?(): Promise<DatabaseResult<any>>;
+
+  // Debugging & Observability
+  explainQuery?(
+    collection: string,
+    query: QueryFilter<any>,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<ExplainPlan>>;
+
+  // Collection Data Access
+  getCollectionData(
+    collectionName: string,
+    options?: {
+      limit?: number;
+      offset?: number;
+      fields?: string[];
+      sort?: { field: string; direction: "asc" | "desc" };
+      filter?: Record<string, unknown>;
+      includeMetadata?: boolean;
+    },
+  ): Promise<
+    DatabaseResult<{
+      data: unknown[];
+      metadata?: {
+        totalCount: number;
+        schema?: unknown;
+        indexes?: string[];
+      };
+    }>
+  >;
+
+  getConnectionHealth(): Promise<
+    DatabaseResult<{
+      healthy: boolean;
+      latency: number;
+      activeConnections: number;
+    }>
+  >;
+
+  isEmpty(): Promise<DatabaseResult<boolean>>;
+
+  getPoolDiagnostics?(): Promise<DatabaseResult<ConnectionPoolStats>>;
+
+  getMultipleCollectionData(
+    collectionNames: string[],
+    options?: { limit?: number; fields?: string[] },
+  ): Promise<DatabaseResult<Record<string, unknown[]>>>;
+
+  isConnected(): boolean;
+  getVersion(): Promise<DatabaseResult<string>>;
+  clearDatabase(): Promise<DatabaseResult<void>>;
+
+  // Query Builder Entry Point
+  queryBuilder<T extends BaseEntity>(collection: string): QueryBuilder<T>;
+
+  // Transaction Support
+  transaction<T>(
+    fn: (transaction: DatabaseTransaction) => Promise<DatabaseResult<T>>,
+    options?: { timeout?: number; isolationLevel?: string; isWrite?: boolean },
+  ): Promise<DatabaseResult<T>>;
+
+  // Database Agnostic Utilities
+  utils: any;
+
+  waitForConnection?(): Promise<void>;
+
+  /**
+   * 🚀 Dynamic Enterprise Scaling
+   * Hot-loads read-replica configuration from database settings.
+   */
+  configureReplicas?(urls: string[] | string): void;
+}
+
+// Type aliases for backward compatibility (Consider migrating away from dbInterface to DatabaseAdapter)
+export type DatabaseAdapter = IDBAdapter;
+/** @deprecated use `DatabaseAdapter` or `IDBAdapter` to match standard PascalCase conventions */
+export type dbInterface = IDBAdapter;
+
+export interface FolderContents {
+  mediaFiles: Array<{
+    id: string;
+    name: string;
+    path: string;
+    type: string;
+    size: number;
+  }>;
+  subfolders: SystemVirtualFolder[];
+}
+
+export interface VirtualFolderUpdateData {
+  name?: string;
+  order?: number;
+  parentId?: DatabaseId;
+  path?: string;
+}
+
+export interface FolderResponse {
+  ariaLabel: string;
+  id: string;
+  name: string;
+  path: string;
+}

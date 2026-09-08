@@ -1,0 +1,869 @@
+/**
+ * @file src/services/local-cms/misc-namespaces.ts
+ * @description Miscellaneous namespaces for LocalCMS SDK.
+ */
+
+import fs from "node:fs/promises";
+import path from "node:path";
+import { AppError } from "@utils/error-handling";
+import { jobQueue } from "@src/services/background/jobs/job-queue-service";
+import {
+  fetchDrupalData,
+  fetchWordPressData,
+} from "@src/services/content/importer/source-adapters";
+import { scaffoldCollectionSchema } from "@src/services/content/importer/scaffolder";
+import { automationService } from "@src/services/background/automation/automation-service";
+import { getHealthCheckReport } from "@src/stores/system/reporting";
+import { reinitializeSystem } from "@src/databases/db";
+import { aiService } from "@src/services/core/ai-service";
+import {
+  getAllSettings,
+  getUntypedSetting,
+  invalidateSettingsCache,
+  loadSettingsCache,
+  setPrivateSetting,
+  updateSettingsFromSnapshot,
+} from "@src/services/core/settings-service";
+import { generateSecureToken } from "@utils/native-utils";
+import { withTenant } from "@utils/tenant";
+import type { DatabaseId, IDBAdapter, ISODateString } from "@src/databases/db-interface";
+import { collectionTableName } from "@src/databases/core/collection-name";
+import { MediaService } from "@utils/media/media-service.server";
+import { type LocalApiOptions, type TokenOptions } from "./types";
+import { bulkImportCollectionDocuments } from "@src/services/background/jobs/import-jobs";
+import { lazyModule } from "@src/utils/lazy-module";
+
+export abstract class BaseNamespace {
+  constructor(protected _dbAdapter: IDBAdapter) {}
+}
+
+/**
+ * Widgets Namespace
+ */
+export class WidgetsNamespace extends BaseNamespace {
+  constructor(_dbAdapterOverride: IDBAdapter) {
+    super(_dbAdapterOverride);
+  }
+
+  async getActiveWidgets() {
+    if (!this._dbAdapter.system?.widgets?.getActiveWidgets) return { success: true, data: [] };
+    return this._dbAdapter.system.widgets.getActiveWidgets();
+  }
+
+  async list(options: LocalApiOptions = {}) {
+    const { tenantId = "default-tenant" } = options;
+    const { widgets, getWidgetDependencies } = await import("@src/stores/widget-store.svelte.ts");
+    await widgets.initialize(tenantId as string);
+    const activeWidgetsResult = await this._dbAdapter.system.widgets.getActiveWidgets();
+    const activeWidgetNames = (activeWidgetsResult.success ? activeWidgetsResult.data : []).map(
+      (w: any) => (typeof w === "string" ? w : w.name),
+    );
+    const widgetList = Object.entries(widgets.widgetFunctions).map(([name, widgetFn]) => {
+      const isActive = activeWidgetNames.includes(name);
+      const isCore = widgets.coreWidgets.includes(name);
+      const dependencies = getWidgetDependencies(name);
+      const widget = widgetFn as unknown as Record<string, unknown>;
+      return {
+        name,
+        icon: (widget.Icon as string) || (isCore ? "mdi:puzzle" : "mdi:puzzle-plus"),
+        description: (widget.Description as string) || "",
+        isCore,
+        isActive,
+        dependencies,
+        pillar: {
+          definition: {
+            name: widget.Name as string,
+            description: widget.Description as string,
+            icon: widget.Icon as string,
+            guiSchema: widget.GuiSchema ? Object.keys(widget.GuiSchema as object).length : 0,
+            aggregations: !!widget.aggregations,
+          },
+          input: {
+            componentPath: (widget.__inputComponentPath as string) || "",
+            exists: !!(widget.__inputComponentPath as string),
+          },
+          display: {
+            componentPath: (widget.__displayComponentPath as string) || "",
+            exists: !!(widget.__displayComponentPath as string),
+          },
+        },
+        canDisable: !isCore && dependencies.length === 0,
+        hasValidation: !!widget.GuiSchema,
+      };
+    });
+    widgetList.sort((a, b) => {
+      if (a.isCore && !b.isCore) return -1;
+      if (!a.isCore && b.isCore) return 1;
+      return a.name.localeCompare(b.name);
+    });
+    return widgetList;
+  }
+
+  async activate(widgetId: string) {
+    const result = await this._dbAdapter.system.widgets.activate(widgetId as DatabaseId);
+    if (!result.success) throw new AppError(result.message, 500);
+    return { widgetId };
+  }
+
+  async deactivate(widgetId: string) {
+    const result = await this._dbAdapter.system.widgets.deactivate(widgetId as DatabaseId);
+    if (!result.success) throw new AppError(result.message, 500);
+    return { widgetId };
+  }
+}
+
+/**
+ * Settings Namespace (Helper for SystemNamespace)
+ */
+export class SettingsNamespace {
+  constructor(_dbAdapter: IDBAdapter) {}
+  async getAll(options: LocalApiOptions = {}) {
+    return getAllSettings(options.tenantId as string);
+  }
+  async updateFromSnapshot(snapshot: any) {
+    return updateSettingsFromSnapshot(snapshot);
+  }
+  async invalidateCache(options: LocalApiOptions = {}) {
+    return invalidateSettingsCache(options.tenantId as string);
+  }
+  async getPublic(options: LocalApiOptions = {}) {
+    const { public: p } = await loadSettingsCache(options.tenantId as string);
+    return p;
+  }
+  async get(key: string, options: LocalApiOptions = {}) {
+    if (key === "all") return getAllSettings(options.tenantId as string);
+    return getUntypedSetting(key, "private", options.tenantId as string);
+  }
+  async set(key: string, value: any, options: LocalApiOptions = {}) {
+    return setPrivateSetting(key as any, value, options.tenantId as string);
+  }
+}
+
+/**
+ * Resolve a Drupal taxonomy term name from JSON:API included data or reference ID.
+ * JSON:API includes resolved entities in `included[]` with type and attributes.name.
+ */
+function resolveDrupalTermName(
+  ref: { type?: string; id?: string },
+  included: any[],
+): string | null {
+  if (!ref?.id) return null;
+
+  // Try to find the term in the included data
+  const resolved = included.find((inc: any) => inc?.type === ref.type && inc?.id === ref.id);
+  if (resolved?.attributes?.name) {
+    return resolved.attributes.name;
+  }
+  if (resolved?.attributes?.title) {
+    return resolved.attributes.title;
+  }
+  if (resolved?.attributes?.drupal_internal__target_id) {
+    return String(resolved.attributes.drupal_internal__target_id);
+  }
+
+  // Fall back to the UUID/ID
+  return ref.id;
+}
+
+/**
+ * Importer Namespace (Helper for SystemNamespace)
+ */
+export class ImporterNamespace {
+  constructor(private _dbAdapter: IDBAdapter) {}
+  async importData(body: any, options: LocalApiOptions = {}) {
+    const { tenantId } = options;
+    const {
+      collectionName,
+      data,
+      mode = "merge",
+      duplicateStrategy = "skip",
+      async = false,
+    } = body;
+    if (!collectionName) throw new AppError("Collection name is required", 400);
+    if (!Array.isArray(data)) throw new AppError("Data must be an array", 422);
+    const shouldProcessInBackground = async || data.length > 50;
+    if (shouldProcessInBackground) {
+      let jobPayload: any = {
+        collectionName,
+        mode,
+        duplicateStrategy,
+        tenantId,
+      };
+      if (data.length > 1000) {
+        jobPayload.tempPayloadId = await saveTempPayload(data);
+      } else {
+        jobPayload.data = data;
+      }
+      const jobId = await jobQueue.dispatch(
+        "import-data",
+        jobPayload,
+        (tenantId || undefined) as string,
+      );
+      return {
+        success: true,
+        message: "Import started in background",
+        jobId,
+        total: data.length,
+        status: "pending",
+      };
+    }
+    const tally = await bulkImportCollectionDocuments(this._dbAdapter, {
+      collectionName,
+      data,
+      mode,
+      duplicateStrategy,
+      tenantId: tenantId as string | undefined,
+    });
+    return {
+      success: true,
+      imported: tally.imported,
+      skipped: tally.skipped,
+      errors: tally.errors,
+      total: tally.total,
+      status: "completed",
+    };
+  }
+  async scaffold(body: any) {
+    const { sourceType, sourceUrl, apiKey, sourceTypeIdentifier, collectionName } = body;
+    if (!sourceType || !sourceUrl || !sourceTypeIdentifier || !collectionName)
+      throw new AppError("Missing params", 400);
+    let sourceData;
+    if (sourceType === "drupal")
+      sourceData = await fetchDrupalData(sourceUrl, sourceTypeIdentifier, apiKey);
+    else if (sourceType === "wordpress")
+      sourceData = await fetchWordPressData(sourceUrl, sourceTypeIdentifier, apiKey);
+    else throw new AppError("Unsupported source", 400);
+    const schema = await scaffoldCollectionSchema(collectionName, sourceData.schema);
+    const collectionPath = path.join(process.cwd(), "config", "collections", `${schema.slug}.ts`);
+    const fileContent = `import { widgets } from '@widgets';\nimport type { Schema } from '@src/content/types';\n\nexport const schema: Schema = ${JSON.stringify(schema, null, 2).replace(/"widget":\s*"(\w+)"/g, '"widget": widgets.$1')};\n`;
+    await fs.mkdir(path.dirname(collectionPath), { recursive: true });
+    await fs.writeFile(collectionPath, fileContent);
+    return {
+      success: true,
+      message: `Collection '${collectionName}' scaffolded.`,
+      slug: schema.slug,
+    };
+  }
+  async importExternal(body: any, options: LocalApiOptions = {}) {
+    const {
+      sourceType,
+      sourceUrl,
+      apiKey,
+      contentType,
+      targetCollection,
+      mapping,
+      dryRun = false,
+    } = body;
+    const { user, tenantId } = options;
+
+    if (!sourceUrl || !sourceType || !contentType || !targetCollection)
+      throw new AppError("Missing params", 400);
+    let externalData;
+    if (sourceType === "drupal")
+      externalData = await fetchDrupalData(sourceUrl, contentType, apiKey);
+    else if (sourceType === "wordpress")
+      externalData = await fetchWordPressData(sourceUrl, contentType, apiKey);
+    else throw new AppError("Unsupported source", 400);
+    // Resolve the target schema ONCE — the physical table name derives from the
+    // schema _id (single source of truth, same convention as cms.collections).
+    const collectionsResult = await this._dbAdapter.collection.listSchemas(tenantId as DatabaseId);
+    const targetCol = collectionsResult.success
+      ? collectionsResult.data.find(
+          (c: any) => c.name === targetCollection || c._id === targetCollection,
+        )
+      : null;
+    const tableName = collectionTableName(String(targetCol?._id || targetCollection));
+
+    let finalMapping = mapping;
+    if (!finalMapping) {
+      if (!targetCol) throw new AppError("Target collection not found", 404);
+      finalMapping = await aiService.suggestMapping(externalData.schema, targetCol);
+    }
+    if (dryRun)
+      return {
+        success: true,
+        dryRun: true,
+        mapping: finalMapping,
+        sampleData: externalData.items.slice(0, 3),
+      };
+    const mediaService = new MediaService(this._dbAdapter);
+    let importedCount = 0,
+      errorCount = 0;
+
+    // Source ID → SveltyCMS document ID map for post-import relationship resolution
+    const idMap = new Map<string, string>();
+    // Pending references to resolve after all items are imported
+    const pendingRefs: Array<{
+      docId: string;
+      field: string;
+      sourceIds: string[];
+    }> = [];
+
+    for (const item of externalData.items) {
+      try {
+        const transformed: Record<string, any> = {};
+        const attributes = sourceType === "drupal" ? item.attributes || {} : item;
+        const relationships = sourceType === "drupal" ? item.relationships || {} : {};
+        const sourceUuid = item.id || (item as any).uuid || undefined;
+
+        // Preserve source UUID for relationship resolution
+        if (sourceUuid) transformed._importSourceId = sourceUuid;
+
+        // Resolve Drupal taxonomy terms from relationships into tags/categories
+        if (sourceType === "drupal" && Object.keys(relationships).length > 0) {
+          const taxonomyNames: string[] = [];
+          const categoryNames: string[] = [];
+
+          for (const [relName, relData] of Object.entries(relationships)) {
+            const rel = relData as any;
+            const data = rel?.data;
+            if (!data) continue;
+
+            const items = Array.isArray(data) ? data : [data];
+            const names: string[] = [];
+            const refIds: string[] = [];
+            for (const ref of items) {
+              if (ref?.id) {
+                const resolvedName = resolveDrupalTermName(
+                  ref,
+                  (externalData as any)._included || [],
+                );
+                names.push(resolvedName || ref.id);
+                refIds.push(ref.id);
+              }
+            }
+
+            const lower = relName.toLowerCase();
+            if (lower.includes("tag") || lower.includes("taxonomy")) {
+              taxonomyNames.push(...names);
+            } else if (lower.includes("categor")) {
+              categoryNames.push(...names);
+            }
+            // Store as array for direct mapping and for later resolution
+            transformed[relName] = refIds;
+          }
+
+          if (taxonomyNames.length > 0) transformed.tags = taxonomyNames;
+          if (categoryNames.length > 0) transformed.categories = categoryNames;
+        }
+
+        for (const [sourceField, targetField] of Object.entries(finalMapping)) {
+          let targetKey =
+            typeof targetField === "string" ? targetField : (targetField as any).target;
+          let transform =
+            typeof targetField === "string" ? undefined : (targetField as any).transform;
+          let value = attributes[sourceField];
+
+          // Flatten Drupal richtext fields (body → { value, format })
+          if (sourceType === "drupal" && value && typeof value === "object" && "value" in value) {
+            const fmt = (value as Record<string, unknown>).format;
+            if (fmt) {
+              transformed[`${targetKey}Format`] = fmt;
+            }
+            value = (value as Record<string, unknown>).value;
+          }
+
+          if (transform === "media" && value) {
+            try {
+              const media = await mediaService.saveRemoteMedia(
+                value,
+                (user?._id as string) || "",
+                "public",
+                tenantId as DatabaseId,
+              );
+              if (media.success) {
+                value = media.data._id;
+              } else {
+                value = null;
+              }
+            } catch {
+              value = null;
+            }
+          }
+          transformed[targetKey] = value;
+        }
+
+        const result = await this._dbAdapter.crud.insert(tableName, transformed, {
+          tenantId: tenantId as DatabaseId,
+        });
+        if (result.success) {
+          const newId = (result.data as any)?._id || "";
+          if (sourceUuid && newId) {
+            idMap.set(sourceUuid, newId);
+          }
+
+          // Collect entity references that need post-import resolution
+          for (const [relName, relData] of Object.entries(relationships)) {
+            const rel = relData as any;
+            const data = rel?.data;
+            if (!data) continue;
+            const refItems = Array.isArray(data) ? data : [data];
+            const sourceRefIds = refItems.map((r: any) => r?.id).filter(Boolean);
+            if (sourceRefIds.length > 0) {
+              // Skip taxonomy references (handled as tags/categories)
+              const lower = relName.toLowerCase();
+              if (
+                !lower.includes("tag") &&
+                !lower.includes("taxonomy") &&
+                !lower.includes("categor")
+              ) {
+                pendingRefs.push({
+                  docId: newId,
+                  field: relName,
+                  sourceIds: sourceRefIds,
+                });
+              }
+            }
+          }
+
+          importedCount++;
+        } else errorCount++;
+      } catch {
+        errorCount++;
+      }
+    }
+
+    // Phase 2: Resolve entity references using the idMap
+    let resolvedRefs = 0;
+    for (const ref of pendingRefs) {
+      try {
+        const resolvedIds = ref.sourceIds
+          .map((srcId) => idMap.get(srcId))
+          .filter(Boolean) as string[];
+        if (resolvedIds.length > 0) {
+          await this._dbAdapter.crud.update(
+            tableName,
+            ref.docId as unknown as DatabaseId,
+            { [ref.field]: resolvedIds },
+            { tenantId: tenantId as DatabaseId },
+          );
+          resolvedRefs++;
+        }
+      } catch {
+        // Best-effort resolution
+      }
+    }
+
+    // Phase 3: Import revisions if Drupal source
+    let revisionCount = 0;
+    if (sourceType === "drupal") {
+      // Reuse the schema resolved above — no second listSchemas round-trip.
+      const supportsRevisions = targetCol?.revision !== false;
+
+      if (supportsRevisions) {
+        for (const item of externalData.items) {
+          try {
+            const sourceUuid = item.id || (item as any).uuid;
+            const destId = sourceUuid ? idMap.get(sourceUuid) : undefined;
+            if (!destId) continue;
+
+            const attrs = sourceType === "drupal" ? item.attributes || {} : item;
+            // Drupal revisions: check for revision fields
+            const revisionId = attrs.vid || attrs.revision_id || attrs.drupal_internal__vid;
+            const revisionLog = attrs.revision_log || attrs.revision_log_message;
+
+            if (revisionId) {
+              // Build the revision data from attributes
+              const revisionData: Record<string, any> = {};
+              for (const [sourceField, targetField] of Object.entries(finalMapping)) {
+                const targetKey =
+                  typeof targetField === "string" ? targetField : (targetField as any).target;
+                let value = attrs[sourceField];
+                if (value && typeof value === "object" && "value" in value) {
+                  value = (value as Record<string, unknown>).value;
+                }
+                if (value !== undefined) revisionData[targetKey] = value;
+              }
+
+              await this._dbAdapter.crud.insert(
+                "content_revisions",
+                {
+                  contentId: destId,
+                  data: JSON.stringify(revisionData),
+                  version: Number(revisionId) || 1,
+                  commitMessage: String(revisionLog || `Imported revision ${revisionId}`).slice(
+                    0,
+                    255,
+                  ),
+                  authorId: (user?._id as string) || "system",
+                } as any,
+                { tenantId: tenantId as DatabaseId, skipMeta: true } as any,
+              );
+              revisionCount++;
+            }
+          } catch {
+            // Revision import is best-effort
+          }
+        }
+      }
+    }
+
+    return {
+      success: true,
+      imported: importedCount,
+      errors: errorCount,
+      resolvedRefs,
+      revisions: revisionCount,
+      total: externalData.items.length,
+    };
+  }
+}
+
+/**
+ * Website Tokens Namespace
+ */
+export class WebsiteTokensNamespace extends BaseNamespace {
+  constructor(_dbAdapterOverride: IDBAdapter) {
+    super(_dbAdapterOverride);
+  }
+  async list(options: TokenOptions = {}) {
+    const { tenantId, page = 1, limit = 10, sort = "createdAt", order = "desc" } = options;
+    return withTenant(
+      tenantId ?? null,
+      async () => {
+        const websiteTokens = this._dbAdapter.system.websiteTokens as any;
+        const result = await websiteTokens.getAll(
+          {
+            limit,
+            skip: (page - 1) * limit,
+            sort,
+            order,
+          },
+          tenantId ?? undefined,
+        );
+        if (!result.success) throw new AppError(result.message, 500);
+        return {
+          data: result.data.data,
+          pagination: {
+            totalItems: result.data.total,
+            page,
+            limit,
+            totalPages: Math.ceil(result.data.total / limit),
+          },
+        };
+      },
+      { collection: "websiteTokens" },
+    );
+  }
+  async create(options: {
+    name: string;
+    permissions?: string[];
+    expiresAt?: string;
+    user: any;
+    tenantId?: DatabaseId | null;
+  }) {
+    const { name, permissions, expiresAt, user, tenantId } = options;
+    if (!name) throw new AppError("Name is required", 400);
+    return withTenant(
+      tenantId ?? null,
+      async () => {
+        const tokenValue = `sv_${generateSecureToken(24)}`;
+        const websiteTokens = this._dbAdapter.system.websiteTokens as any;
+        const result = await websiteTokens.create(
+          {
+            name,
+            token: tokenValue,
+            updatedAt: new Date().toISOString() as ISODateString,
+            createdBy: user!._id,
+            permissions: permissions || [],
+            expiresAt: (expiresAt || undefined) as ISODateString | undefined,
+          },
+          tenantId ?? undefined,
+        );
+        if (!result.success) throw new AppError(result.message, 500);
+        return { ...result.data, token: tokenValue };
+      },
+      { collection: "websiteTokens" },
+    );
+  }
+  async delete(tokenId: string, options: LocalApiOptions = {}) {
+    const { tenantId } = options;
+    return withTenant(
+      tenantId ?? null,
+      async () => {
+        const websiteTokens = this._dbAdapter.system.websiteTokens as any;
+        const existing = await websiteTokens.getById(tokenId as any, tenantId ?? undefined);
+        const storedHash =
+          existing?.success && existing.data?.token ? String(existing.data.token) : null;
+
+        const result = await websiteTokens.delete(tokenId as any, tenantId ?? undefined);
+        if (!result.success) throw new AppError(result.message, 500);
+
+        const { invalidateWebsiteTokenAuth } =
+          await import("@src/databases/auth/credential-auth-cache");
+        await invalidateWebsiteTokenAuth(tokenId, tenantId ?? undefined, storedHash);
+
+        return result.data;
+      },
+      { collection: "websiteTokens" },
+    );
+  }
+
+  async deleteMany(tokenIds: string[], options: LocalApiOptions = {}) {
+    const { tenantId } = options;
+    if (!tokenIds || tokenIds.length === 0) {
+      return { deletedCount: 0 };
+    }
+    return withTenant(
+      tenantId ?? null,
+      async () => {
+        const websiteTokens = this._dbAdapter.system.websiteTokens as any;
+        const { invalidateWebsiteTokenAuth } =
+          await import("@src/databases/auth/credential-auth-cache");
+        let deletedCount = 0;
+        await Promise.all(
+          tokenIds.map(async (tokenId) => {
+            const existing = await websiteTokens.getById(tokenId as any, tenantId ?? undefined);
+            const storedHash =
+              existing?.success && existing.data?.token ? String(existing.data.token) : null;
+            const result = await websiteTokens.delete(tokenId as any, tenantId ?? undefined);
+            if (result.success) {
+              deletedCount++;
+              await invalidateWebsiteTokenAuth(tokenId, tenantId ?? undefined, storedHash);
+            }
+          }),
+        );
+        return { deletedCount };
+      },
+      { collection: "websiteTokens" },
+    );
+  }
+
+  async update(tokenId: string, data: any, options: LocalApiOptions = {}) {
+    const { tenantId } = options;
+    return withTenant(
+      tenantId ?? null,
+      async () => {
+        const result = await this._dbAdapter.crud.update<any>(
+          "websiteTokens",
+          tokenId as any,
+          data,
+          { tenantId: tenantId as DatabaseId },
+        );
+        if (!result.success) throw new AppError(result.message, 500);
+        return result.data;
+      },
+      { collection: "websiteTokens" },
+    );
+  }
+}
+
+/**
+ * System Namespace
+ */
+export class SystemNamespace {
+  public settings: SettingsNamespace;
+  public importer: ImporterNamespace;
+  public websiteTokens: WebsiteTokensNamespace;
+  public themes: ThemeNamespace;
+  constructor(private _dbAdapter: IDBAdapter) {
+    this.settings = new SettingsNamespace(this._dbAdapter);
+    this.importer = new ImporterNamespace(this._dbAdapter);
+    this.websiteTokens = new WebsiteTokensNamespace(this._dbAdapter);
+    this.themes = new ThemeNamespace();
+  }
+  getHealth() {
+    return getHealthCheckReport();
+  }
+  async reinitialize(force: boolean = true) {
+    return reinitializeSystem(force);
+  }
+  async refresh(options: LocalApiOptions & { skipReconciliation?: boolean } = {}) {
+    const { tenantId, skipReconciliation = false } = options;
+    const { contentSystem } = await import("@src/content/index.server");
+    return contentSystem.refresh(tenantId as string, skipReconciliation);
+  }
+  async getPreferences(
+    keys: string[],
+    options: {
+      userId?: string;
+      scope?: "user" | "system";
+      tenantId?: string;
+    } = {},
+  ) {
+    const { userId, scope = "system", tenantId } = options;
+    return this._dbAdapter.system.preferences.getMany(keys, {
+      scope,
+      userId: userId as DatabaseId,
+      tenantId: tenantId as DatabaseId,
+    });
+  }
+  async setPreference(
+    key: string,
+    value: any,
+    options: {
+      userId?: string;
+      scope?: "user" | "system";
+      tenantId?: string;
+    } = {},
+  ) {
+    const { userId, scope = "system", tenantId } = options;
+    return this._dbAdapter.system.preferences.set(key, value, {
+      scope,
+      userId: userId as DatabaseId,
+      tenantId: tenantId as DatabaseId,
+    });
+  }
+  async sendMail(params: {
+    recipientEmail: string;
+    subject: string;
+    templateName: string;
+    props?: any;
+    languageTag?: string;
+  }) {
+    const { sendMail: coreSendMail } = await import("@utils/email.server");
+    return coreSendMail(params);
+  }
+}
+
+const getAdminThemeServiceLazy = lazyModule(() =>
+  import("@src/services/core/admin-theme-service").then((m) => m.adminThemeService),
+);
+
+/**
+ * Theme Namespace — zero-overhead server-side theme operations via LocalCMS SDK
+ */
+export class ThemeNamespace {
+  async getAdminTheme(tenantId?: string | null) {
+    const adminThemeService = await getAdminThemeServiceLazy();
+    return adminThemeService.getAdminTheme(tenantId);
+  }
+  async saveAdminTheme(settings: any, tenantId?: string | null) {
+    const adminThemeService = await getAdminThemeServiceLazy();
+    return adminThemeService.saveAdminTheme(settings, tenantId);
+  }
+  async listThemes(tenantId?: string | null) {
+    const adminThemeService = await getAdminThemeServiceLazy();
+    return adminThemeService.listThemes(tenantId);
+  }
+  async createTheme(name: string, settings?: any, tenantId?: string | null) {
+    const adminThemeService = await getAdminThemeServiceLazy();
+    return adminThemeService.createTheme(name, settings, tenantId);
+  }
+  async activateTheme(themeId: string, tenantId?: string | null) {
+    const adminThemeService = await getAdminThemeServiceLazy();
+    return adminThemeService.activateTheme(themeId, tenantId);
+  }
+  async deleteTheme(themeId: string, tenantId?: string | null) {
+    const adminThemeService = await getAdminThemeServiceLazy();
+    return adminThemeService.deleteTheme(themeId, tenantId);
+  }
+  async cloneTheme(sourceId: string, newName: string, tenantId?: string | null) {
+    const adminThemeService = await getAdminThemeServiceLazy();
+    return adminThemeService.cloneTheme(sourceId, newName, tenantId);
+  }
+  async resetToDefaults(tenantId?: string | null) {
+    const adminThemeService = await getAdminThemeServiceLazy();
+    return adminThemeService.resetToDefaults(tenantId);
+  }
+}
+
+/**
+ * Automation Namespace
+ */
+export class AutomationNamespace extends BaseNamespace {
+  async getFlow(id: string, options: LocalApiOptions = {}) {
+    return automationService.getFlow(id, options.tenantId as string);
+  }
+  async getLogs(flowId: string, options: LocalApiOptions = {}) {
+    return automationService.getLogs(flowId, options.tenantId as string);
+  }
+  async executeFlow(id: string, triggerData: any = {}, options: LocalApiOptions = {}) {
+    const { tenantId } = options;
+    const flow = await this.getFlow(id, options);
+    if (!flow) throw new Error(`Flow ${id} not found`);
+    return automationService.executeFlow(flow, {
+      event: "manual_trigger",
+      tenantId: tenantId as string,
+      ...triggerData,
+    });
+  }
+}
+
+export class TelemetryNamespace extends BaseNamespace {
+  async checkUpdateStatus(options: LocalApiOptions = {}) {
+    const { tenantId } = options;
+    return withTenant(tenantId ?? null, async () => {
+      const result = await (this._dbAdapter.system as any).health.getUpdateStatus();
+      if (!result.success) throw new AppError(result.message, 500);
+      return result.data;
+    });
+  }
+}
+
+let _tempStoreSavePromise: Promise<(data: any) => Promise<string>> | null = null;
+
+async function getTempStoreSave(): Promise<(data: any) => Promise<string>> {
+  if (!_tempStoreSavePromise) {
+    _tempStoreSavePromise = import("@utils/temp-store").then((m) => m.saveTempPayload);
+  }
+  return _tempStoreSavePromise;
+}
+
+async function saveTempPayload(data: any): Promise<string> {
+  const save = await getTempStoreSave();
+  return save(data);
+}
+
+/**
+ * PluginStorage Namespace
+ *
+ * Exposes plugin storage operations via the LocalCMS SDK, allowing plugins
+ * to persist arbitrary JSON records scoped by (plugin, collection) without
+ * creating custom database tables.
+ */
+export class PluginStorageNamespace extends BaseNamespace {
+  private _adapter: any = null;
+
+  private async _getAdapter() {
+    if (!this._adapter) {
+      const { PluginStorageAdapterImpl } = await import("@src/plugins/storage");
+      this._adapter = new PluginStorageAdapterImpl(this._dbAdapter);
+    }
+    return this._adapter;
+  }
+
+  async createRecord(
+    plugin: string,
+    collection: string,
+    data: any,
+    options?: { tenantId?: string },
+  ) {
+    const adapter = await this._getAdapter();
+    return adapter.createRecord(plugin, collection, data, options);
+  }
+
+  async getRecord(
+    plugin: string,
+    collection: string,
+    recordId: string,
+    options?: { tenantId?: string },
+  ) {
+    const adapter = await this._getAdapter();
+    return adapter.getRecord(plugin, collection, recordId, options);
+  }
+
+  async listRecords(
+    plugin: string,
+    collection: string,
+    options?: {
+      tenantId?: string;
+      limit?: number;
+      offset?: number;
+      filter?: Record<string, unknown>;
+    },
+  ) {
+    const adapter = await this._getAdapter();
+    return adapter.listRecords(plugin, collection, options);
+  }
+
+  async deleteRecord(
+    plugin: string,
+    collection: string,
+    recordId: string,
+    options?: { tenantId?: string },
+  ) {
+    const adapter = await this._getAdapter();
+    return adapter.deleteRecord(plugin, collection, recordId, options);
+  }
+}

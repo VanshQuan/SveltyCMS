@@ -1,0 +1,614 @@
+---
+description: "Database performance benchmarks with trend analysis and competitive context."
+path: docs/project/benchmarks/benchmark_mongodb_redis.mdx
+title: MongoDB + Redis Performance Audit
+order: 12
+icon: "mdi:speedometer"
+author: SveltyCMS Team
+created: 2026-07-04
+updated: 2026-07-04
+tags:
+  - benchmark
+  - performance
+  - mongodb
+---
+
+# 🚀 MongoDB+Redis Performance Ledger
+
+> [!NOTE] Competitive comparisons based on publicly available documentation as of June 2026. All SveltyCMS metrics self-measured via `bun test tests/benchmarks/`.
+
+> [!IMPORTANT]
+> **Console-only by default.** Use `BENCHMARK_RECORD=1` to write results to this report.
+>
+> ```bash
+> BENCHMARK_RECORD=1 bun test tests/benchmarks/auth-performance.test.ts
+> ```
+>
+> The full matrix runner (`bun run scripts/benchmark-matrix/index.ts --sql`) always records.
+
+<!-- BENCHMARK_START -->
+
+<!-- EXECUTIVE_START -->
+<!-- LATEST_AUDIT_HEADER -->
+
+## 📊 Latest Performance Audit
+
+<!-- EXECUTIVE_FIX_NOTES_START -->
+
+### 📝 Fix Overlays
+
+> [!NOTE]
+> Phase notes and remediation entries appear here after matrix or surgical runs.
+
+<!-- EXECUTIVE_FIX_NOTES_END -->
+
+> ⏳ Pending — run full matrix to populate executive summary.
+
+<!-- EXECUTIVE_PARTIAL_WATERMARK -->
+
+<!-- EXECUTIVE_ALERTS_START -->
+<!-- EXECUTIVE_ALERTS_END -->
+
+<!-- EXECUTIVE_END -->
+
+<!-- SUMMARY_START -->
+
+<!-- SUMMARY_RUN_OVERLAY_START -->
+
+### Current Run Summary
+
+> Only tests that ran in THIS invocation. Populated after `BENCHMARK_RECORD=1` or matrix run.
+
+<!-- SUMMARY_RUN_OVERLAY_END -->
+
+<!-- SUMMARY_HISTORY_START -->
+
+### Historical Trends
+
+> Sparklines only — link to `history.sqlite` for full run tables.
+
+<!-- SUMMARY_HISTORY_END -->
+
+<!-- SUMMARY_END -->
+
+<!-- LEDGER_START -->
+
+## 🔬 Full benchmark ledger (35 modules)
+
+Expand dimension groups, then any row, for ASCII truth tables. Executive summary above shows pass/fail and issues only.
+
+<!-- LEDGER_DIMENSION:CORE:START -->
+
+<details id="ledger-dimension-core">
+<summary><strong>Core</strong> · 7 tests</summary>
+
+<!-- SECTION:API_LATENCY:START -->
+
+<details id="section-api_latency">
+<summary><strong>🏷️ API LAYER LATENCY</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/api-latency.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Measures the base network and HTTP overhead for the simplest possible API calls.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:API_LATENCY:END -->
+
+<!-- SECTION:COLD_START:START -->
+
+<details id="section-cold_start">
+<summary><strong>🏷️ PHASED COLD START</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/cold-start-phased.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Measures the time to READY state (serving traffic) vs WARMED state (background tasks).
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:COLD_START:END -->
+
+<!-- SECTION:TRUTH_AUDIT:START -->
+
+<details id="section-truth_audit">
+<summary><strong>🏷️ SRE TRUTH AUDIT</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/truth-latency.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — The definitive truth audit: SDK vs Dispatcher vs Real HTTP (Production Standalone).
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:TRUTH_AUDIT:END -->
+
+<!-- SECTION:INCREMENTAL:START -->
+
+<details id="section-incremental">
+<summary><strong>🏷️ Incremental Content Reload</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/content-incremental-reload.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Measures surgical single-file fullReload vs full reconciliation + SCHEMA cache wipe.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:INCREMENTAL:END -->
+
+<!-- SECTION:STATE_MACHINE:START -->
+
+<details id="section-state_machine">
+<summary><strong>🏷️ State Machine Transitions</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/state-machine-transition.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Validates rapid IDLE -> READY self-healing cycles.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:STATE_MACHINE:END -->
+
+<!-- SECTION:DB_RAW_P95:START -->
+
+<details id="section-db_raw_p95">
+<summary><strong>🏷️ Database Adapter Raw CRUD</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/database-performance.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Direct low-level benchmarks of Create, Read, Update, Delete on the current database adapter.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:DB_RAW_P95:END -->
+
+<!-- SECTION:ACID:START -->
+
+<details id="section-acid">
+<summary><strong>🏷️ ACID Transaction Overhead</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/transaction-acid.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Measures commit/rollback latency and transaction isolation performance.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:ACID:END -->
+
+</details>
+
+<!-- LEDGER_DIMENSION:CORE:END -->
+
+<!-- LEDGER_DIMENSION:API:START -->
+
+<details id="ledger-dimension-api">
+<summary><strong>API</strong> · 8 tests</summary>
+
+<!-- SECTION:TEMPORAL:START -->
+
+<details id="section-temporal">
+<summary><strong>🏷️ Temporal Integrity Audit</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/temporal-integrity.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Verifies timezone normalization and deterministic UTC persistence.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:TEMPORAL:END -->
+
+<!-- SECTION:RELATIONAL:START -->
+
+<details id="section-relational">
+<summary><strong>🏷️ Relational & Nested Queries</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/relational-performance.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Stress-tests JOINs, population strategies, and deeply nested relationships (depth 2–3).
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:RELATIONAL:END -->
+
+<!-- SECTION:AUTH_TRACE:START -->
+
+<details id="section-auth_trace">
+<summary><strong>🏷️ Auth & RBAC Performance</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/auth-performance.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Measures JWT verification, session retrieval, and permission matrix resolution overhead.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:AUTH_TRACE:END -->
+
+<!-- SECTION:REST:START -->
+
+<details id="section-rest">
+<summary><strong>🏷️ REST API Performance</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/rest-api-performance.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — End-to-end throughput and latency of the unified REST dispatcher.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:REST:END -->
+
+<!-- SECTION:GRAPHQL:START -->
+
+<details id="section-graphql">
+<summary><strong>🏷️ GraphQL API Performance</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/graphql-api-performance.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Resolver execution time and throughput for common queries.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:GRAPHQL:END -->
+
+<!-- SECTION:SEO:START -->
+
+<details id="section-seo">
+<summary><strong>🏷️ Enterprise SEO Suite Audit</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/seo-performance.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — E2E audit of Redirect Middleware, 404 Logging, and Sitemap Caching performance.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:SEO:END -->
+
+<!-- SECTION:BROADCAST:START -->
+
+<details id="section-broadcast">
+<summary><strong>🏷️ REAL-TIME BROADCAST AUDIT</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/websocket-broadcast.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Benchmarks network-layer broadcast latency (SSE vs WebSocket).
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:BROADCAST:END -->
+
+<!-- SECTION:REAL_TIME:START -->
+
+<details id="section-real_time">
+<summary><strong>🏷️ WebSocket & Realtime Latency</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/realtime-performance.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Benchmarks WebSocket connection/broadcast latency.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:REAL_TIME:END -->
+
+</details>
+
+<!-- LEDGER_DIMENSION:API:END -->
+
+<!-- LEDGER_DIMENSION:SCALE:START -->
+
+<details id="ledger-dimension-scale">
+<summary><strong>Scale</strong> · 15 tests</summary>
+
+<!-- SECTION:NEGATIVE_CACHE:START -->
+
+<details id="section-negative_cache">
+<summary><strong>🏷️ Negative Cache Performance</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/negative-cache.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Benchmarks 404-miss response times and cache lookup speedup.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:NEGATIVE_CACHE:END -->
+
+<!-- SECTION:MEMORY:START -->
+
+<details id="section-memory">
+<summary><strong>🏷️ Memory Stability & GC Behavior</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/memory-stability.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Long-running soak test to identify memory leaks and GC pressure.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:MEMORY:END -->
+
+<!-- SECTION:TENANCY:START -->
+
+<details id="section-tenancy">
+<summary><strong>🏷️ Multi-Tenant Performance & Isolation</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/multi-tenant-performance.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Stress-tests cross-tenant isolation and security boundary latency.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:TENANCY:END -->
+
+<!-- SECTION:MIXED:START -->
+
+<details id="section-mixed">
+<summary><strong>🏷️ Realistic Mixed Workload</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/mixed-workload.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Production request mix: 60% Reads, 20% Writes, 15% GraphQL, 5% Media.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:MIXED:END -->
+
+<!-- SECTION:GQL_STRESS:START -->
+
+<details id="section-gql_stress">
+<summary><strong>🏷️ GraphQL Load Stress</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/graphql-stress.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — High-concurrency GraphQL query stress test for resolver efficiency.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:GQL_STRESS:END -->
+
+<!-- SECTION:MIGRATION:START -->
+
+<details id="section-migration">
+<summary><strong>🏷️ Bulk Migration & Scale</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/migration-scale.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Measures system ingestion limits and read performance on 10,000+ entries.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:MIGRATION:END -->
+
+<!-- SECTION:INDEX_PRESSURE:START -->
+
+<details id="section-index_pressure">
+<summary><strong>🏷️ Million-Row Index Pressure</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/index-pressure.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Measures complex filtering and sorting performance on 100,000+ entry collections.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:INDEX_PRESSURE:END -->
+
+<!-- SECTION:CONTENT_STRESS:START -->
+
+<details id="section-content_stress">
+<summary><strong>🏷️ Content Scale Stress</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/content-scale-stress.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Measures content scan performance on 1,000+ collections under .compiledCollections/test/stress (isolated).
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:CONTENT_STRESS:END -->
+
+<!-- SECTION:MEDIA_UPLOAD:START -->
+
+<details id="section-media_upload">
+<summary><strong>🏷️ Media Upload Stress & Throughput</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/media-upload-stress.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Measures large file upload throughput, concurrent upload handling, and streaming efficiency.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:MEDIA_UPLOAD:END -->
+
+<!-- SECTION:JOURNEY:START -->
+
+<details id="section-journey">
+<summary><strong>🏷️ Full Client Journey Simulation</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/client-journey.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — E2E journey: Login -> List -> View -> Edit -> Save -> Realtime. Measures cumulative latency.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:JOURNEY:END -->
+
+<!-- SECTION:CONCURRENCY:START -->
+
+<details id="section-concurrency">
+<summary><strong>🏷️ Concurrency & Race Condition</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/concurrency-race.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Verifies atomic consistency and lost-update protection.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:CONCURRENCY:END -->
+
+<!-- SECTION:THROUGHPUT:START -->
+
+<details id="section-throughput">
+<summary><strong>🏷️ Multi-Doc Concurrency Throughput</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/concurrency-throughput.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Measures throughput scaling across 10, 100, 1000 documents.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:THROUGHPUT:END -->
+
+<!-- SECTION:MAXRPS:START -->
+
+<details id="section-maxrps">
+<summary><strong>🏷️ Max Throughput — No Throttle</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/concurrency-max.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — 1000 concurrent writes across 100 docs — no semaphore.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:MAXRPS:END -->
+
+<!-- SECTION:LOCALSDK:START -->
+
+<details id="section-localsdk">
+<summary><strong>🏷️ Local SDK Throughput</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/local-api-throughput.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — 1000 direct adapter calls — no HTTP, no middleware.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:LOCALSDK:END -->
+
+<!-- SECTION:PROD_DAY:START -->
+
+<details id="section-prod_day">
+<summary><strong>🏷️ Production Day Simulation</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/production-day.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Full production day with mixed workload, 100% reliability.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:PROD_DAY:END -->
+
+</details>
+
+<!-- LEDGER_DIMENSION:SCALE:END -->
+
+<!-- LEDGER_DIMENSION:RESILIENCE:START -->
+
+<details id="ledger-dimension-resilience">
+<summary><strong>Resilience</strong> · 5 tests</summary>
+
+<!-- SECTION:CIRCUIT_BREAKER:START -->
+
+<details id="section-circuit_breaker">
+<summary><strong>🏷️ Circuit Breaker Failover</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/circuit-breaker-failover.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Measures system graceful degradation when external services fail.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:CIRCUIT_BREAKER:END -->
+
+<!-- SECTION:THROTTLING:START -->
+
+<details id="section-throttling">
+<summary><strong>🏷️ Throttling & Backoff Stress</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/throttling-backoff-stress.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Measures rate-limiting consistency under 10x design load.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:THROTTLING:END -->
+
+<!-- SECTION:GDPR:START -->
+
+<details id="section-gdpr">
+<summary><strong>🏷️ GDPR Compliance Speed</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/right-to-be-forgotten-audit.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Measures performance of deep-deletion across all linked tables.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:GDPR:END -->
+
+<!-- SECTION:SOVEREIGNTY:START -->
+
+<details id="section-sovereignty">
+<summary><strong>🏷️ Data Residency & Sovereignty</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/data-residency-failover.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — PII blocking and data sovereignty enforcement with cross-region failover.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:SOVEREIGNTY:END -->
+
+<!-- SECTION:FAILOVER:START -->
+
+<details id="section-failover">
+<summary><strong>🏷️ Database Failover & Reconnection</strong> · ⏳ pending · ➡️ baseline · <a href="../../../tests/benchmarks/database-failover.test.ts">source</a></summary>
+
+<!-- LEDGER_TRUTH_START -->
+
+> ⏳ Pending — Simulates DB disconnect mid-request — measures circuit breaker activation and reconnection timing.
+
+<!-- LEDGER_TRUTH_END -->
+
+</details>
+<!-- SECTION:FAILOVER:END -->
+
+</details>
+
+<!-- LEDGER_DIMENSION:RESILIENCE:END -->
+
+<!-- LEDGER_END -->
+
+<!-- METADATA_START -->
+
+> ⏳ Host environment populates after matrix run.
+
+<!-- METADATA_END -->
+
+<!-- BENCHMARK_END -->

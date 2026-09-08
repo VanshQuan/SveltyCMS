@@ -1,0 +1,627 @@
+/**
+ * @file src/databases/core/relational-content.ts
+ * @description Consolidated Content module for all SQL-based database adapters.
+ * Merges nodes, drafts, and revisions into a single domain module.
+ */
+
+import { isoDateStringToDate, nowISODateString } from "@src/utils/date";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import type {
+  ContentDraft,
+  ContentNode,
+  ContentRevision,
+  DatabaseId,
+  DatabaseResult,
+  PaginatedResult,
+  PaginationOptions,
+  EntityCreate,
+  IContentAdapter,
+  BaseQueryOptions,
+  ISqlAdapter,
+} from "../db-interface";
+import {
+  applyTenantFilter,
+  convertArrayDatesToISO,
+  convertDatesToISO,
+  generateId,
+} from "./relational-utils";
+import { assertTenantContext } from "@src/utils/security/safe-query";
+
+export class RelationalContentModule implements IContentAdapter {
+  protected readonly adapter: ISqlAdapter;
+  protected readonly schema: any;
+
+  constructor(adapter: ISqlAdapter, schema: any) {
+    this.adapter = adapter;
+    this.schema = schema;
+  }
+
+  protected get db() {
+    return (this.adapter as any).db;
+  }
+
+  protected get crud() {
+    return this.adapter.crud;
+  }
+
+  protected getDb(options?: BaseQueryOptions) {
+    const tx = options?.transaction;
+    if (tx) {
+      return tx.db || tx;
+    }
+    return this.db;
+  }
+
+  protected prepareContentNodeValues(
+    node: Partial<ContentNode>,
+    options: {
+      id?: DatabaseId | string;
+      tenantId?: DatabaseId | null;
+    } = {},
+  ) {
+    const table = this.schema.contentNodes;
+    const now = isoDateStringToDate(nowISODateString());
+    const id = (options.id || (node as any)._id || (node as any).id || generateId()) as
+      | string
+      | undefined;
+    const tenantId = options.tenantId !== undefined ? options.tenantId : (node as any).tenantId;
+    const order = (node as any).order;
+    // `order` is the domain field the app recomputes on every move; `position` is
+    // its storage column and is round-tripped back from a previous read. A caller
+    // that sends both means the new `order` — preferring the carried-over
+    // `position` wrote the NEW order into the `data` blob while leaving the column
+    // at the OLD value, so saves came back re-sorted to the pre-move order.
+    const position =
+      typeof order === "number" ? order : ((node as any).position as number | undefined);
+    const preparedValues = (this.adapter as any).prepareValues(
+      table,
+      {
+        ...node,
+        _id: id,
+        tenantId,
+        ...(position !== undefined ? { position } : {}),
+      },
+      id,
+      now,
+      { tenantId },
+    );
+
+    return { preparedValues, id, tenantId };
+  }
+
+  protected async executeContentNodeUpsert(db: any, values: Record<string, unknown>) {
+    const insert = db.insert(this.schema.contentNodes).values(values) as any;
+
+    if (this.adapter.type === "mariadb" || this.adapter.type === "mysql") {
+      await insert.onDuplicateKeyUpdate({
+        set: values,
+      });
+      return;
+    }
+
+    const conflictTarget = [this.schema.contentNodes.path, this.schema.contentNodes.tenantId];
+
+    await insert.onConflictDoUpdate({
+      target: conflictTarget,
+      set: values,
+    });
+  }
+
+  // ============================================================
+  // DRAFTS
+  // ============================================================
+  public readonly drafts = {
+    create: async (draft: EntityCreate<ContentDraft>): Promise<DatabaseResult<ContentDraft>> => {
+      return this.crud.insert<ContentDraft>("content_drafts", draft);
+    },
+
+    createMany: async (
+      drafts: EntityCreate<ContentDraft>[],
+    ): Promise<DatabaseResult<ContentDraft[]>> => {
+      return this.crud.insertMany<ContentDraft>("content_drafts", drafts);
+    },
+
+    update: async (draftId: DatabaseId, data: any): Promise<DatabaseResult<ContentDraft>> => {
+      return this.crud.update<ContentDraft>("content_drafts", draftId, data);
+    },
+
+    publish: async (
+      draftId: DatabaseId,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<void>> => {
+      return this.adapter.wrap(
+        async () => {
+          await this.getDb(options)
+            .update(this.schema.contentDrafts)
+            .set({ status: "archived" })
+            .where(eq(this.schema.contentDrafts._id, draftId as string));
+        },
+        "PUBLISH_DRAFT_FAILED",
+        undefined,
+        { transaction: options?.transaction, isWrite: true },
+      );
+    },
+
+    publishMany: async (
+      draftIds: DatabaseId[],
+    ): Promise<DatabaseResult<{ publishedCount: number }>> => {
+      return this.adapter.wrap(
+        async () => {
+          if (this.adapter.type === "sqlite" || this.adapter.type === "postgresql") {
+            const result = await this.db
+              .update(this.schema.contentDrafts)
+              .set({ status: "archived" })
+              .where(inArray(this.schema.contentDrafts._id, draftIds as string[]))
+              .returning();
+            return { publishedCount: result.length };
+          }
+          const [result] = await this.db
+            .update(this.schema.contentDrafts)
+            .set({ status: "archived" })
+            .where(inArray(this.schema.contentDrafts._id, draftIds as string[]));
+          return { publishedCount: (result as any)?.affectedRows || draftIds.length };
+        },
+        "PUBLISH_MANY_DRAFTS_FAILED",
+        undefined,
+        { isWrite: true },
+      );
+    },
+
+    getForContent: async (
+      contentId: DatabaseId,
+      options?: PaginationOptions,
+      dbOptions?: BaseQueryOptions,
+    ): Promise<DatabaseResult<PaginatedResult<ContentDraft>>> => {
+      return this.adapter.wrap(
+        async () => {
+          const limit = options?.pageSize || 20;
+          const offset = ((options?.page || 1) - 1) * limit;
+
+          const results = await this.getDb(dbOptions)
+            .select(this.adapter.getPhysicalSelection(this.schema.contentDrafts))
+            .from(this.schema.contentDrafts)
+            .where(eq(this.schema.contentDrafts.contentId, contentId as string))
+            .limit(limit)
+            .offset(offset)
+            .orderBy(desc(this.schema.contentDrafts.version));
+
+          return {
+            items: convertArrayDatesToISO(results) as unknown as ContentDraft[],
+            total: results.length,
+            page: options?.page || 1,
+            pageSize: limit,
+            hasNextPage: false,
+            hasPreviousPage: false,
+          };
+        },
+        "GET_DRAFTS_FAILED",
+        undefined,
+        { transaction: dbOptions?.transaction },
+      );
+    },
+
+    restore: async (draftId: DatabaseId): Promise<DatabaseResult<void>> => {
+      return this.crud.restore("content_drafts", draftId);
+    },
+
+    delete: async (draftId: DatabaseId): Promise<DatabaseResult<void>> => {
+      return this.crud.delete("content_drafts", draftId);
+    },
+
+    deleteMany: async (
+      draftIds: DatabaseId[],
+    ): Promise<DatabaseResult<{ deletedCount: number }>> => {
+      return this.crud.deleteMany("content_drafts", {
+        _id: { $in: draftIds },
+      } as any);
+    },
+  };
+
+  // ============================================================
+  // NODES
+  // ============================================================
+  public readonly nodes = {
+    getStructure: async (
+      _mode: "flat" | "nested",
+      options?: BaseQueryOptions & { filter?: Partial<ContentNode> },
+    ): Promise<DatabaseResult<ContentNode[]>> => {
+      assertTenantContext(options, "content.nodes.getStructure");
+      return this.crud.findMany<ContentNode>("content_nodes", (options?.filter || {}) as any, {
+        tenantId: options?.tenantId as any,
+        bypassTenantCheck: options?.bypassTenantCheck,
+        bypassSafeQuery: options?.bypassSafeQuery,
+        bypassCache: options?.bypassCache,
+      });
+    },
+
+    upsertContentStructureNode: async (
+      node: EntityCreate<ContentNode>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<ContentNode>> => {
+      const tenantId = options?.tenantId ?? (node as any).tenantId;
+      assertTenantContext({ ...options, tenantId }, "content.nodes.upsertContentStructureNode");
+      // NOTE: tenant filter decisions now centralized via getTenantCondition / applyTenantFilter (relational-utils) for query paths.
+
+      if (this.adapter.type !== "mongodb" && (this.adapter as any).prepareValues) {
+        return this.adapter.wrap(
+          async () => {
+            const { preparedValues } = this.prepareContentNodeValues(node, {
+              tenantId: tenantId as any,
+            });
+
+            await this.executeContentNodeUpsert(this.db, preparedValues);
+
+            return convertDatesToISO(preparedValues) as unknown as ContentNode;
+          },
+          "UPSERT_STRUCTURE_NODE_FAILED",
+          undefined,
+          { isWrite: true },
+        );
+      }
+
+      // Fallback to standard CRUD for MongoDB or non-relational adapters
+      return this.crud.upsert<ContentNode>(
+        "content_nodes",
+        { path: node.path, tenantId } as any,
+        node,
+        { tenantId },
+      );
+    },
+
+    create: async (
+      node: EntityCreate<ContentNode>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<ContentNode>> => {
+      const tenantId = options?.tenantId ?? (node as any).tenantId;
+      assertTenantContext({ ...options, tenantId }, "content.nodes.create");
+      return this.crud.insert<ContentNode>("content_nodes", node, { ...options, tenantId });
+    },
+
+    createMany: async (
+      nodes: EntityCreate<ContentNode>[],
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<ContentNode[]>> => {
+      assertTenantContext(options, "content.nodes.createMany");
+      return this.crud.insertMany<ContentNode>("content_nodes", nodes, options);
+    },
+
+    update: async (
+      path: string,
+      changes: Partial<ContentNode>,
+      options: BaseQueryOptions & { tx?: any } = {},
+    ): Promise<DatabaseResult<ContentNode>> => {
+      if (!path) {
+        return {
+          success: false,
+          message: "Path is required for node update",
+          error: { code: "INVALID_PATH", message: "Path is undefined" },
+        };
+      }
+
+      return this.adapter.wrap(
+        async () => {
+          assertTenantContext(options, "content.nodes.update");
+          const db = options.tx?.db || options.tx || this.db;
+          const { preparedValues } = this.prepareContentNodeValues(
+            {
+              ...changes,
+              path: changes.path || path,
+            },
+            {
+              id: (changes as any)._id || (changes as any).id,
+              tenantId: options.tenantId as any,
+            },
+          );
+          delete (preparedValues as any)._id;
+          delete (preparedValues as any).createdAt;
+
+          const conditions = [eq(this.schema.contentNodes.path, path)];
+          applyTenantFilter(conditions, this.schema.contentNodes.tenantId, options);
+
+          const query = db
+            .update(this.schema.contentNodes)
+            .set(preparedValues as any)
+            .where(and(...conditions));
+
+          if (this.adapter.type === "sqlite" || this.adapter.type === "postgresql") {
+            const [updated] = await query.returning();
+            if (updated) return convertDatesToISO(updated) as unknown as ContentNode;
+          }
+
+          await query;
+          const [updated] = await db
+            .select(this.adapter.getPhysicalSelection(this.schema.contentNodes))
+            .from(this.schema.contentNodes)
+            .where(and(...conditions))
+            .limit(1);
+
+          return convertDatesToISO(updated) as unknown as ContentNode;
+        },
+        "UPDATE_NODE_FAILED",
+        undefined,
+        { isWrite: true },
+      );
+    },
+
+    bulkUpdate: async (
+      updates: { path: string; id?: string; changes: Partial<ContentNode> }[],
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<ContentNode[]>> => {
+      if (updates.length === 0) return { success: true, data: [] };
+      assertTenantContext(options, "content.nodes.bulkUpdate");
+
+      const persistUpdates = async (tx: any): Promise<DatabaseResult<ContentNode[]>> => {
+        const db = tx.db || tx;
+
+        // Prepare all values upfront
+        const preparedValuesList = updates.map((update) => {
+          const { preparedValues } = this.prepareContentNodeValues(
+            {
+              ...update.changes,
+              path: update.path,
+            },
+            {
+              id: update.id,
+              tenantId: options?.tenantId,
+            },
+          );
+          return preparedValues;
+        });
+
+        // Batch multi-row insert + on conflict (avoids N individual roundtrips)
+        // This is the Drizzle bulk upsert pattern for the hot content sync path.
+
+        // Pre-clean: delete rows with the same _id but different (path, tenantId) to
+        // prevent PK constraint violations. ON CONFLICT (path, tenantId) handles the
+        // path-based upsert (which is the canonical identity for content nodes).
+        for (const v of preparedValuesList as any[]) {
+          await db
+            .delete(this.schema.contentNodes)
+            .where(and(eq(this.schema.contentNodes._id, v._id)));
+        }
+
+        const insert = db.insert(this.schema.contentNodes).values(preparedValuesList) as any;
+
+        if (this.adapter.type === "mariadb" || this.adapter.type === "mysql") {
+          // For MySQL/MariaDB bulk, use onDuplicate with VALUES() to pull the new row data per conflict
+          // Build set using sql for the incoming values (works for bulk)
+          const setObj: Record<string, any> = {};
+          if (preparedValuesList.length > 0) {
+            const sample = preparedValuesList[0];
+            Object.keys(sample).forEach((k) => {
+              if (k !== "_id" && k !== "createdAt" && k !== "path" && k !== "tenantId") {
+                setObj[k] = sql`VALUES(${sql.identifier(k)})`;
+              }
+            });
+          }
+          await insert.onDuplicateKeyUpdate({ set: setObj });
+        } else {
+          const conflictTarget = [this.schema.contentNodes.path, this.schema.contentNodes.tenantId];
+          const setObj: Record<string, any> = {};
+          if (preparedValuesList.length > 0) {
+            const sample = preparedValuesList[0];
+            Object.keys(sample).forEach((k) => {
+              if (k !== "_id" && k !== "createdAt" && k !== "path" && k !== "tenantId") {
+                setObj[k] = sql`excluded.${sql.identifier(k)}`;
+              }
+            });
+          }
+          await insert.onConflictDoUpdate({
+            target: conflictTarget,
+            set: setObj,
+          });
+        }
+
+        // Return the prepared (as before, since we don't fetch back the full row for bulk perf)
+        const results = preparedValuesList.map(
+          (pv) => convertDatesToISO(pv) as unknown as ContentNode,
+        );
+        return { success: true, data: results };
+      };
+
+      if (options?.transaction) {
+        return persistUpdates(options.transaction);
+      }
+
+      return this.adapter.transaction(persistUpdates);
+    },
+
+    delete: async (path: string, options?: BaseQueryOptions): Promise<DatabaseResult<void>> => {
+      if (!path) {
+        return {
+          success: false,
+          message: "Path is required for node delete",
+          error: { code: "INVALID_PATH", message: "Path is undefined" },
+        };
+      }
+
+      return this.adapter.wrap(
+        async () => {
+          assertTenantContext(options, "content.nodes.delete");
+          const conditions = [eq(this.schema.contentNodes.path, path)];
+          applyTenantFilter(conditions, this.schema.contentNodes.tenantId, options);
+          await this.db.delete(this.schema.contentNodes).where(and(...conditions));
+        },
+        "DELETE_NODE_FAILED",
+        undefined,
+        { isWrite: true },
+      );
+    },
+
+    deleteMany: async (
+      paths: string[],
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<{ deletedCount: number }>> => {
+      return this.adapter.wrap(
+        async () => {
+          assertTenantContext(options, "content.nodes.deleteMany");
+          const conditions = [inArray(this.schema.contentNodes.path, paths)];
+          applyTenantFilter(conditions, this.schema.contentNodes.tenantId, options);
+          const q = this.db.delete(this.schema.contentNodes).where(and(...conditions));
+
+          let count = 0;
+          if (this.adapter.type === "sqlite" || this.adapter.type === "postgresql") {
+            const result = await (q as any).returning();
+            count = result.length;
+          } else {
+            const [result] = await q;
+            count = (result as any).affectedRows || 0;
+          }
+          return { deletedCount: count };
+        },
+        "DELETE_MANY_NODES_FAILED",
+        undefined,
+        { isWrite: true },
+      );
+    },
+
+    reorder: async (
+      nodeUpdates: Array<{ path: string; newOrder: number }>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<ContentNode[]>> => {
+      assertTenantContext(options, "content.nodes.reorder");
+      return this.adapter.transaction(
+        async (tx: any) => {
+          const db = tx.db || tx;
+          for (const update of nodeUpdates) {
+            await db
+              .update(this.schema.contentNodes)
+              .set({ position: update.newOrder } as any)
+              .where(eq(this.schema.contentNodes.path, update.path));
+          }
+          return { success: true, data: [] };
+        },
+        { isWrite: true },
+      );
+    },
+
+    reorderStructure: async (
+      items: Array<{
+        id: string;
+        parentId: string | null;
+        order: number;
+        path: string;
+      }>,
+    ): Promise<DatabaseResult<void>> => {
+      // Reparenting changes hierarchy only. `path` identifies the collection
+      // schema and rewriting it can make the collection disappear on refresh.
+      // Cold path (admin drag-drop structural reorder): transaction wrapping
+      // eliminates per-item commit overhead while keeping the code simple.
+      return this.adapter.transaction(
+        async (tx: any) => {
+          const db = (tx as any).db || tx;
+          for (const item of items) {
+            // `order` lives twice: the `position` column AND `order` inside the
+            // `data` JSON blob (that is the one read-back hydrates ContentNode.order
+            // from). Updating only `position` left every read serving the PRE-reorder
+            // order, so the reorder response rolled the client back to the old order.
+            const existing = await db
+              .select()
+              .from(this.schema.contentNodes)
+              .where(eq(this.schema.contentNodes._id, item.id))
+              .limit(1);
+            const rawData = (existing?.[0] as { data?: unknown } | undefined)?.data;
+            let nextData: unknown;
+            if (typeof rawData === "string") {
+              // sqlite / mysql: text column holding JSON
+              let parsed: Record<string, unknown> = {};
+              try {
+                const candidate = rawData ? JSON.parse(rawData) : {};
+                if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+                  parsed = candidate as Record<string, unknown>;
+                }
+              } catch {
+                parsed = {};
+              }
+              nextData = JSON.stringify({ ...parsed, order: item.order });
+            } else if (rawData && typeof rawData === "object" && !Array.isArray(rawData)) {
+              // postgres: jsonb column (drizzle serializes the object for us)
+              nextData = { ...(rawData as Record<string, unknown>), order: item.order };
+            }
+
+            await db
+              .update(this.schema.contentNodes)
+              .set({
+                parentId: item.parentId,
+                position: item.order,
+                ...(nextData !== undefined ? { data: nextData } : {}),
+              })
+              .where(eq(this.schema.contentNodes._id, item.id));
+          }
+          return { success: true, data: undefined };
+        },
+        { isWrite: true },
+      );
+    },
+  };
+
+  // ============================================================
+  // REVISIONS
+  // ============================================================
+  public readonly revisions = {
+    create: async (
+      revision: EntityCreate<ContentRevision>,
+    ): Promise<DatabaseResult<ContentRevision>> => {
+      return this.crud.insert<ContentRevision>("content_revisions", revision);
+    },
+
+    getHistory: async (
+      contentId: DatabaseId,
+      options?: PaginationOptions,
+    ): Promise<DatabaseResult<PaginatedResult<ContentRevision>>> => {
+      return this.adapter.wrap(async () => {
+        const limit = options?.pageSize || 20;
+        const offset = ((options?.page || 1) - 1) * limit;
+
+        const results = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.contentRevisions))
+          .from(this.schema.contentRevisions)
+          .where(eq(this.schema.contentRevisions.contentId, contentId as string))
+          .limit(limit)
+          .offset(offset)
+          .orderBy(desc(this.schema.contentRevisions.version));
+
+        return {
+          items: convertArrayDatesToISO(results) as unknown as ContentRevision[],
+          total: results.length,
+          page: options?.page || 1,
+          pageSize: limit,
+          hasNextPage: false,
+          hasPreviousPage: false,
+        };
+      }, "GET_REVISIONS_FAILED");
+    },
+
+    restore: async (revisionId: DatabaseId): Promise<DatabaseResult<void>> => {
+      return this.crud.restore("content_revisions", revisionId);
+    },
+
+    delete: async (revisionId: DatabaseId): Promise<DatabaseResult<void>> => {
+      return this.crud.delete("content_revisions", revisionId);
+    },
+
+    deleteMany: async (
+      revisionIds: DatabaseId[],
+    ): Promise<DatabaseResult<{ deletedCount: number }>> => {
+      return this.crud.deleteMany("content_revisions", {
+        _id: { $in: revisionIds },
+      } as any);
+    },
+
+    cleanup: async (
+      contentId: DatabaseId,
+      keepLatest: number,
+    ): Promise<DatabaseResult<{ deletedCount: number }>> => {
+      return this.adapter.wrap(async () => {
+        const history = await this.revisions.getHistory(contentId, {
+          pageSize: 1000,
+        });
+        if (!history.success || history.data.items.length <= keepLatest) return { deletedCount: 0 };
+        const toDelete = history.data.items.slice(keepLatest).map((i) => i._id);
+        const deleteRes = await this.revisions.deleteMany(toDelete);
+        if (!deleteRes.success) throw deleteRes.error;
+        return deleteRes.data;
+      }, "CLEANUP_REVISIONS_FAILED");
+    },
+  };
+}

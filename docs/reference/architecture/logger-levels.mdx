@@ -1,0 +1,291 @@
+---
+path: "docs/reference/architecture/logger-levels.mdx"
+title: "Logger Levels Guide"
+description: "Level-based logging for SveltyCMS — right signal, low cost, no spam for users or developers."
+order: 8
+icon: "mdi:math-log"
+author: "SveltyCMS Team"
+created: "2025-10-04"
+updated: "2026-07-31"
+tags:
+  - "logger"
+  - "debugging"
+  - "performance"
+  - "development"
+  - "best-practices"
+  - "architecture"
+---
+
+# Logger Levels Guide
+
+## Goal
+
+Help **developers** and **operators** see the issues they need **at the right level**, without wasting CPU or flooding the terminal/browser when detail is not required.
+
+| Audience            | Default need                  | Spam if…                                            |
+| ------------------- | ----------------------------- | --------------------------------------------------- |
+| End users (browser) | Almost never logs             | Console noise on every navigation/click             |
+| Developers (local)  | Errors + important lifecycle  | Per-request auth/cache/preference chatter at `info` |
+| Ops / production    | Failures + security anomalies | Success-path dumps and full object traces           |
+
+**Rule:** if a line fires on **every HTTP request** or **every UI mount**, it is **`debug` or lower** — never `info`.
+
+---
+
+## Public API (one import)
+
+Always import the universal logger:
+
+```ts
+import { logger } from "@utils/logger";
+```
+
+| File                                                  | Import          |
+| ----------------------------------------------------- | --------------- |
+| `.svelte`, stores, shared utils                       | `@utils/logger` |
+| Hooks, `+page.server.ts`, `+server.ts`, `*.server.ts` | `@utils/logger` |
+
+```ts
+logger.fatal(msg, ...args);
+logger.error(msg, ...args);
+logger.warn(msg, ...args);
+logger.info(msg, ...args);
+logger.debug(msg, ...args);
+logger.trace(msg, ...args);
+
+// Smarter gates (prefer these for maintainers / hot paths)
+logger.isEnabled("debug"); // cheap — before building expensive args
+logger.isLevel("debug"); // alias
+logger.once("content-watcher-start", "info", "Watcher armed"); // once per process
+logger.level; // current ceiling name
+
+const auth = logger.channel("auth"); // prefixes messages with [auth]
+auth.once("boot", "info", "plugin hooks registered");
+logger.dump(data, "label"); // trace-only structured dump
+```
+
+Do **not** use raw `console.log` / `console.info` for app diagnostics. Those bypass level gates and masking.
+
+**Allowed raw `console.*` (not app runtime):** CLI entrypoints (e.g. smart-importer CLI), Vite plugins, compile/link-validator/benchmark sandbox reports, and the logger implementation itself.
+
+> **Note:** `src/utils/logger.server.ts` implements an optional **file sink** (rotation, batching, HMAC chain). It is **not** the day-to-day import. File logging only activates if that module is loaded (e.g. registered from server boot). Prefer stdout + platform log shipping in containers. See [Server file sink](#server-file-sink-boot-wired) below.
+
+---
+
+## Level contract (ceiling model)
+
+Levels are a **ceiling**: enable a level and everything **more severe** is shown.  
+Env accepts one level name (if a comma-separated list is passed, only the **first** token is used).
+
+| Level   | Priority | Who turns it on         | What belongs                                                             | What does **not**                                      |
+| ------- | -------- | ----------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------ |
+| `none`  | 0        | Benchmarks / max perf   | Nothing                                                                  | Anything                                               |
+| `fatal` | 1        | Always relevant         | Process-killing / data-corrupting failure                                | Recoverable errors                                     |
+| `error` | 2        | **Default production**  | Failed operations, uncaught paths, broken invariants                     | Expected 401/404 as high-volume chatter                |
+| `warn`  | 3        | Staging / careful ops   | Security anomalies, degraded mode, invalid session, retries exhausted    | Every benign miss without context                      |
+| `info`  | 4        | **Default development** | **Once-ish lifecycle**: boot ready, shutdown, setup complete, migrations | Per-request “session found”, cache HIT, preference GET |
+| `debug` | 5        | Dev diagnosing a path   | Per-request flow: auth branch, turbo status, handler path                | Full DB rows, secrets, entire collection catalogs      |
+| `trace` | 6        | Deep dive only          | Payloads, session JSON, `logger.dump`                                    | Anything left on in normal dev                         |
+
+### Defaults
+
+| Environment                        | Effective default                 | Source                                         |
+| ---------------------------------- | --------------------------------- | ---------------------------------------------- |
+| Production (`NODE_ENV=production`) | `error`                           | Built-in when `LOG_LEVEL` / `LOG_LEVELS` unset |
+| Development                        | `info`                            | Built-in when unset                            |
+| Quiet / benchmark                  | Above `warn` suppressed on server | `QUIET=true` or `BENCHMARK=true`               |
+
+### Configuration
+
+```bash
+# Env (server and Vite client via VITE_LOG_LEVELS)
+LOG_LEVEL=debug
+# or
+LOG_LEVELS=debug
+
+# Client-only override (Vite)
+VITE_LOG_LEVELS=error
+
+# Server file-sink chain secret (production; long random value, e.g. `openssl rand -hex 32`)
+LOG_CHAIN_SECRET=0123456789abcdef…
+```
+
+Examples:
+
+```bash
+# Local deep dive
+LOG_LEVEL=debug bun run dev
+
+# Production-like local
+LOG_LEVEL=error bun run dev
+
+# Silence almost everything
+LOG_LEVEL=none bun run dev
+```
+
+---
+
+## Checklist (every new log line)
+
+1. Fires **more than once per user action / request**? → `debug` / `trace` only.
+2. Can ops act without this line in production? → not `error` / `warn`.
+3. Temporary “I was here while coding”? → **delete** — do not leave at `info`.
+4. PII / secrets? → rely on automatic masking; prefer ids over full objects.
+5. Use `logger.*`, never bare `console.log`, so level gates always apply.
+
+### Channels (scan, don’t replace levels)
+
+```ts
+const auth = logger.channel("auth");
+
+auth.warn("Invalid session", { path }); // prod-visible when warn+
+auth.debug("Session OK", { path }); // only when diagnosing
+```
+
+### Masking
+
+Sensitive object keys (`password`, `token`, `secret`, `authorization`, `api_key`, …) are redacted; email-like fields are partially masked. Prefer structured second arguments over interpolating secrets into the message string.
+
+### Performance
+
+- Level is checked **before** formatting args inside the logger.
+- Use `logger.isEnabled("debug")` before building expensive objects/strings.
+- Prefer: `if (logger.isEnabled("debug")) logger.debug("x", snapshot())`
+- Avoid: `logger.trace("x", expensiveCompute())` — args still evaluate before the call
+- Use `logger.once` for boot banners so HMR/re-init does not spam
+
+### Tests vs logs (Tier policy)
+
+| Tier  | Keep                                              | Drop / demote                                                                             |
+| ----- | ------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| **A** | `error` / security `warn` / rare lifecycle `info` | —                                                                                         |
+| **B** | Per-request / step detail at `debug`              | Never at default `info`                                                                   |
+| **C** | —                                                 | Success narratives, seed step emoji trails, media “fetched N items”, testing poll chatter |
+
+**Unit / integration / E2E own correctness.** Logs own **unexpected runtime truth** (prod, flaky env, security). If a green suite already proves a happy path, do not re-print it at `info`.
+
+---
+
+## Competitive CMS: logging & error handling
+
+Comparison based on publicly available documentation and common production practice (as of 2026). Architectural differences only — not quality rankings.
+
+| Concern                | SveltyCMS                                                                   | Typical open-source headless CMS practice (e.g. Strapi / Payload / Directus style stacks)               |
+| ---------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| **Default prod noise** | `error` ceiling; quiet server when `QUIET`/`BENCHMARK`                      | Often `http`/`info` server logs (e.g. Strapi v5 default log level documents `http`, hiding silly/debug) |
+| **Single API**         | One import `@utils/logger` (universal)                                      | Mix of framework logger, `console`, and plugin loggers unless standardized                              |
+| **Level model**        | Priority ceiling + env                                                      | Winston/Pino-style levels or framework logger                                                           |
+| **PII masking**        | Built-in key/email redaction                                                | Often manual or via external APM                                                                        |
+| **Error model**        | `AppError` / `raise` / `rethrow` + global `handleError` with code + context | Framework errors + status codes; many apps add Sentry plugins                                           |
+| **Tests**              | Pyramid ADR: unit-heavy; logs not the assertion channel                     | Varies; logging often left verbose in local docker compose                                              |
+| **Investigation path** | Structured `error`/`warn` → `LOG_LEVEL=debug` for path                      | APM (Sentry) + verbose server logs                                                                      |
+
+**What “smarter” means for maintainers (SveltyCMS choice):**
+
+1. **Not** more log lines — fewer, higher signal.
+2. **Not** dual import confusion — one API, optional file sink.
+3. **Cheap gates** (`isEnabled` / `once`) so debug code is free when off.
+4. **Error handling first** — user-facing issues via toast/API envelope; logs start search with `code` + ids.
+5. **Tests for happy paths** — log only failures and rare lifecycle so CI and local `bun run dev` stay readable.
+
+**Relative to competitors:** many stacks lean on generic Node loggers + optional Sentry. SveltyCMS emphasizes **level discipline + masking + test pyramid** so maintainers do not pay for narrative logs that tests already cover. Attach APM/Sentry on top of `error`/`warn` if you need aggregation; do not re-enable per-request `info` to “feel safe.”
+
+- `QUIET` / `BENCHMARK` skip server logs above `warn` unless `BENCHMARK_DEBUG=true`.
+
+---
+
+## Patterns by domain
+
+### Authentication
+
+```ts
+const auth = logger.channel("auth");
+
+// Per-request success path — debug only
+auth.debug(`SESSION: ${sessionId.slice(0, 12)}... path=${pathname}`);
+
+// Security / failure — warn
+auth.warn("Invalid session or user not found", { sessionPrefix });
+
+// Crash / bug — error
+auth.error("Session validation crashed", err);
+```
+
+### API / cache
+
+```ts
+// Cache HIT every GET — debug only (or omit)
+logger.debug(`[CacheHit] ${pathname}`);
+
+// Handler failure — error
+logger.error(`[CollectionsRoute] ${path}`, err);
+```
+
+### Lifecycle (info is OK)
+
+```ts
+logger.info("✅ DB module loaded. System will initialize when READY.");
+logger.info("Received SIGTERM. Starting graceful shutdown...");
+logger.info("🔄 System setup state change detected: false -> true");
+```
+
+### Browser / UI
+
+- User-visible problems → toast / form errors, not `console`.
+- Component diagnostics → `logger.debug` / `logger.error` as appropriate.
+- No mount/lifecycle `console.log` in production paths.
+
+---
+
+## Server file sink (boot-wired)
+
+`logger.server.ts` writes a chained audit log to `logs/app.log` (rotation ~5MB, gzip archives, HMAC chain) and is **wired once at server boot** (`hooks.server.ts` — side-effect import). That module:
+
+- Must **not** be imported from client or shared isomorphic modules (Node `fs` / `crypto` / `zlib`).
+- Writes every level (`fatal` → `trace`) **only when the level gate passes** — `LOG_LEVEL=error` or `QUIET`/`BENCHMARK` keeps the file quiet too. `logger.once` boot banners are captured when they actually emit.
+- Applies the **same key/email masking as console output** (`password`, `token`, `secret`, `authorization`, `apiKey`, … redacted; emails partially masked) — file lines never leak secrets.
+- Requires `LOG_CHAIN_SECRET` in production. Missing it in production logs one loud ERROR at first write and falls back to an **ephemeral per-process secret**: chain integrity holds within the process but is lost on restart. Development uses a documented dev default (no audit boundary in dev).
+
+Prefer stdout + platform log shipping in containers; the file sink is the on-host audit trail.
+
+---
+
+## Anti-patterns
+
+```ts
+// ❌ Per-request at info (default dev = spam)
+logger.info(`[Auth] SESSION: ${id} path=${path}`);
+
+// ✅
+logger.debug(`[Auth] SESSION: ${id.slice(0, 12)}... path=${path}`);
+
+// ❌ Bypasses levels and masking
+console.log("[Preference API] GET", result.data);
+
+// ✅
+logger.debug(`[Preference API] GET key=${key}`);
+
+// ❌ Debug leftover left forever
+console.log("✅ [Debug Case 1] Edit mode detected", { editParam });
+
+// ✅ Delete, or logger.debug once while investigating
+```
+
+---
+
+## Quick reference
+
+| Want               | Set                                        |
+| ------------------ | ------------------------------------------ |
+| Prod / quiet local | `LOG_LEVEL=error` (or production default)  |
+| Staging anomalies  | `LOG_LEVEL=warn`                           |
+| Normal local       | unset → `info` (after hot-path discipline) |
+| Follow one request | `LOG_LEVEL=debug`                          |
+| Full dumps         | `LOG_LEVEL=trace`                          |
+| Benchmarks         | `QUIET=true` or `BENCHMARK=true`           |
+
+### Related
+
+- [Utils system](./utils-system.mdx) — infrastructure utilities including `logger.ts`
+- [Code structure](./code-structure.mdx) — system architecture
+- [Server hooks](./server-hooks.mdx) — middleware pipeline (auth, turbo, system state)

@@ -1,0 +1,76 @@
+<!--
+@file src/widgets/custom/Checkbox/Input.svelte
+@component
+**Checkbox Widget Input Component**
+
+Provides a boolean toggle interface using semantic HTML checkbox input.
+Part of the Three Pillars Architecture for widget system.
+
+@example
+<CheckboxInput bind:checked={selectedValue} field={fieldDefinition} />
+Renders a checkbox with label, color, size, and helper text from field props
+
+### Props
+- `field: FieldType` - Widget field definition with color, size, legend, and validation
+- `value: boolean | null | undefined` - Checked state (bindable)
+
+### Features
+- **Semantic HTML**: Uses proper `<fieldset>` and `<legend>` for accessibility
+- **Boolean Toggle**: Native HTML checkbox input with Svelte binding
+- **Required Field Indicators**: Visual asterisk for mandatory fields
+- **Flexible Color/Size**: Supports color and size from configuration
+- **Error State Styling**: Visual error indication with accessible messaging
+- **Tailwind Styling**: Modern design with utility-first CSS approach
+- **Screen Reader Support**: Proper ARIA attributes and semantic markup
+-->
+<script lang="ts">
+	import { validationStore } from '@src/stores/validation-store.svelte';
+	import { getFieldName } from '@utils/schema/field-utils';
+	import type { FieldType } from '.';
+
+	let {
+		field,
+		value = $bindable()
+	}: {
+		field: FieldType;
+		value: boolean | string | null | undefined;
+	} = $props();
+
+	// Initialize with proper boolean value if undefined
+	$effect(() => {
+		if (value === undefined || value === null) {
+			value = false;
+		}
+	});
+
+	const fieldName = $derived(getFieldName(field));
+
+	// Update parent value and clear any validation errors
+	function handleChange(e: Event) {
+		const checked = (e.currentTarget as HTMLInputElement).checked;
+		value = checked;
+		validationStore.clearError(fieldName);
+	}
+</script>
+
+<div class="mb-4">
+	<div class="flex flex-col gap-y-2">
+		<label class="flex items-center gap-2 text-base text-surface-600 dark:text-surface-50">
+			<input aria-label="Checkbox"
+				type="checkbox"
+				id={field.db_fieldName}
+				name={field.db_fieldName}
+				required={field.required}
+				checked={!!value}
+				onchange={handleChange}
+				class={`h-5 w-5 rounded border-gray-300 transition-colors duration-200 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 ${field.size === 'sm' ? 'h-4 w-4' : field.size === 'lg' ? 'h-6 w-6' : ''}`}
+				aria-describedby={field.helper ? `${field.db_fieldName}-helper` : undefined}
+				style={field.color ? `accent-color: ${field.color}` : ''}
+			/>
+			<span>{field.label}</span>
+		</label>
+		{#if field.helper}
+			<p id={`${field.db_fieldName}-helper`} class="text-xs text-secondary-500">{field.helper}</p>
+		{/if}
+	</div>
+</div>

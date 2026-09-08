@@ -1,108 +1,151 @@
 # .github/workflows/auto-release.yaml
-# This workflow uses semantic-release to automatically publish new versions of your package to GitHub based on commit messages.
-name: Semantic Release
+# Primary: CI passes on main → version is read from package.json → tag + GitHub Release + npm publish.
+# Fallback A: pushing a `v*` tag triggers a release from the tag name (matches the AGENTS.md flow).
+# Fallback B: manual dispatch with an explicit version input.
+#
+# The GitHub Release is created independently of npm publish — a missing/invalid
+# NPM_TOKEN or registry failure must never swallow the release (that previously
+# left pushed tags with no GitHub Releases). npm publish is best-effort.
+name: Auto Release
 
-# Triggers the workflow ONLY when a push happens to the main or next branch.
 on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   push:
-    branches: [main] # Only release from protected main branch
-  workflow_dispatch: {} # Allow manual release if needed
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 0.0.x) — only needed for manual trigger"
+        required: false
+        type: string
 
 permissions:
-  contents: write # Allow changelog + tags
-  issues: write # Allow release notes on issues
-  pull-requests: write # Comment on PRs for releases
+  contents: write
+  packages: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
-  test:
-    name: Run Playwright Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-          check-latest: true
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Run Playwright tests
-        run: bunx playwright test
-
   release:
-    name: Release with Semantic Release # Auto version + changelog
+    name: Publish
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.actor != 'github-actions[bot]') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
-    needs: [test] # Only release if tests pass
+    timeout-minutes: 15
 
     steps:
-      # Get git code
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
-          # fetch-depth: 0 is required for semantic-release to analyze the full commit history.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha || 'main' }}
           fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
 
-      # Setup Node.js for semantic-release
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-          check-latest: true
-
-      # Setup Bun environment
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: "1.3.14"
 
-      # Cache Bun dependencies
-      - name: Cache Bun dependencies
-        id: bun-cache
-        uses: actions/cache@v4
+      - name: Setup Node.js (for npm registry auth)
+        uses: actions/setup-node@v6
         with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lockb') }}
-          restore-keys: |
-            ${{ runner.os }}-bun-
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
 
-      # Install only what's needed for release
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # This step is specific to your main branch cleanup requirement.
-      - name: Ensure /config/collections is empty in main
-        # This only runs on the main branch.
-        if: github.ref == 'refs/heads/main'
+      - name: Determine version
+        id: version
         run: |
-          # If the collections directory exists, remove it.
-          if [ -d "config/collections" ]; then
-            echo "Removing config/collections to maintain a clean main branch..."
-            git rm -r --cached config/collections
-            rm -rf config/collections
-            
-            # Commit the changes if any files were removed.
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            # The '|| true' ensures the workflow doesn't fail if there's nothing to commit.
-            git commit -m "chore(build): auto-remove collections directory for release" || true
-            git push origin main
-            echo "Collections directory removed and changes pushed."
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+            echo "source=git tag" >> $GITHUB_OUTPUT
+          elif [ -n "$MANUAL_VERSION" ]; then
+            echo "value=$MANUAL_VERSION" >> $GITHUB_OUTPUT
+            echo "source=manual input" >> $GITHUB_OUTPUT
           else
-            echo "No collections directory found — main is already clean."
+            PKG_VERSION=$(node -e "console.log(require('./package.json').version)")
+            echo "value=$PKG_VERSION" >> $GITHUB_OUTPUT
+            echo "source=package.json" >> $GITHUB_OUTPUT
           fi
-
-      - name: Run semantic-release
-        run: bunx semantic-release
+          PKG_NAME=$(node -e "console.log(require('./package.json').name)")
+          echo "pkg_name=$PKG_NAME" >> $GITHUB_OUTPUT
         env:
-          # The GITHUB_TOKEN is automatically provided by GitHub Actions.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # NPM_TOKEN: ${{ secrets.NPM_TOKEN }} # Uncomment if you decide to publish to npm.
+          MANUAL_VERSION: ${{ github.event.inputs.version }}
+
+      - name: Log version
+        run: |
+          echo "Publishing $PKG_NAME v$VERSION (from $SOURCE)"
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          SOURCE: ${{ steps.version.outputs.source }}
+          PKG_NAME: ${{ steps.version.outputs.pkg_name }}
+
+      - name: Create git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "Tag v$VERSION already exists — skipping tag creation"
+          else
+            git tag "v$VERSION"
+            git push origin "v$VERSION"
+            echo "Created and pushed tag v$VERSION"
+          fi
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+
+      # Release first — the admin UI's update check reads GitHub Releases, so this
+      # must happen even when npm publish cannot. softprops generates release notes
+      # from the commit range since the last tag.
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.value }}
+          name: v${{ steps.version.outputs.value }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Verify npm authentication
+        id: npm-auth
+        continue-on-error: true
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "❌ NPM_TOKEN secret is empty or missing from repository secrets"
+            exit 1
+          fi
+          npm whoami || { echo "❌ npm token is invalid or expired — skipping npm publish"; exit 1; }
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Check if package exists in registry
+        id: check-pkg
+        continue-on-error: true
+        run: |
+          if npm view "$PKG_NAME" version >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Package exists — will publish new version"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Package does not exist in registry — first publish will create it"
+          fi
+        env:
+          PKG_NAME: ${{ steps.version.outputs.pkg_name }}
+
+      - name: Publish to npm
+        if: steps.npm-auth.outcome == 'success'
+        continue-on-error: true
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

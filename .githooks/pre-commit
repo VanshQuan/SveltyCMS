@@ -1,0 +1,77 @@
+#!/usr/bin/env sh
+# =============================================================================
+# SveltyCMS Pre-Commit — Format → Lint → Unit → SBOM Sync (~40s)
+#
+# Pre-push runs build + SQLite integration.
+# POLICY: --no-verify is blocked. Use 'bun run scripts/git-safe.ts commit'.
+# =============================================================================
+set -u
+[ "${CI:-false}" = "true" ] && exit 0
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/lib.sh"
+
+header "Pre-Commit"
+require_bun
+
+TOTAL=6; OK=0
+
+# Step 1 — Database safety
+if run "🛡️  Database safety" pm_run scripts/check-test-db-safety.ts; then
+  OK=$((OK + 1))
+fi
+
+# Step 2 — Format + lint
+if run "🔍  Format + lint" pm_run check; then
+  OK=$((OK + 1))
+else
+  # Format only paths that were already staged — never sweep in unstaged work
+  # (a blanket `git add -u` here would stage unrelated unstaged edits).
+  STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(ts|js|svelte|json|md|mdx)$' || true)
+  if [ -n "$STAGED_FILES" ]; then
+    pm_run format > /dev/null 2>&1
+    printf '%s\n' "$STAGED_FILES" | xargs git add 2>/dev/null || true
+  fi
+
+  if run "🔍  Re-checking after format" pm_run check; then
+    warn "Staged files auto-formatted and updated."
+    OK=$((OK + 1))
+  else
+    warn "Lint errors remain after formatting."
+  fi
+fi
+
+# Step 3 — Lint-staged
+if run "⚡  Lint-staged" pm_run gate:fast; then
+  OK=$((OK + 1))
+fi
+
+# Step 4 — Full risk audit (DB injection classes, secrets, XSS, dependency CVEs, OSV)
+if has_staged_changes '\.(md|mdx)$' && ! has_staged_changes '\.(ts|js|svelte)$' && ! has_staged_changes 'bun\.lock|package\.json'; then
+  warn "Only docs changed — skipping risk audit"
+  TOTAL=$((TOTAL - 1))
+elif run "🛡️  Risk audit (DB/SvelteKit/deps/OSV)" pm_run risk:audit; then
+  OK=$((OK + 1))
+fi
+
+# Step 5 — Unit tests (skip if only docs changed)
+if has_staged_changes '\.(md|mdx)$' && ! has_staged_changes '\.(ts|js|svelte)$'; then
+  warn "Only docs changed — skipping unit tests"
+  TOTAL=$((TOTAL - 1))
+elif run "🧪  Unit tests" pm_run test:unit; then
+  OK=$((OK + 1))
+fi
+
+# Step 6 — SBOM sync (keeps sbom.json in lockstep with bun.lock)
+if has_staged_changes 'bun\.lock|package\.json'; then
+  if run "📦  SBOM sync" pm_run audit:sbom; then
+    git add sbom.json 2>/dev/null || true
+    info "sbom.json regenerated from updated lockfile and staged."
+    OK=$((OK + 1))
+  fi
+else
+  warn "No dependency changes — SBOM already up to date"
+  TOTAL=$((TOTAL - 1))
+fi
+
+summary "$OK" "$TOTAL"

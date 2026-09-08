@@ -1,0 +1,234 @@
+---
+path: "docs/project/benchmarks/index.mdx"
+title: "Database Performance Benchmarks"
+description: "Progressive-disclosure performance reports across all SveltyCMS database engines with trend analysis and enterprise MDX dashboards."
+order: 1
+icon: "mdi:speedometer"
+author: "SveltyCMS Team"
+created: "2026-04-26"
+updated: "2026-08-07"
+tags:
+  - "benchmark"
+  - "performance"
+  - "trend"
+---
+
+# 🚀 SveltyCMS Performance Benchmarks
+
+> [!IMPORTANT]
+> **EU Compliance**: Competitive comparisons are based on publicly available documentation as of June 2026. All SveltyCMS metrics are self-measured via reproducible suites (`bun test tests/benchmarks/`). See [Competitive Comparison](../competitive-comparison.mdx) for methodology.
+>
+> **Console-only by default.** Set `BENCHMARK_RECORD=1` to write MDX reports. The matrix runner always records.
+
+## Report layout (progressive disclosure)
+
+Each per-DB report (`benchmark_<db>.mdx`) is a **single-page dashboard** with replace-not-append zones:
+
+| Zone          | What you see                                                                                      | MDX features                                           |
+| ------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| **EXECUTIVE** | ✅/❌ pass badge, dimension health, issues-only table, latency matrix, sparklines, mermaid charts | `[!NOTE]` / `[!WARNING]`, tables, collapsed mermaid    |
+| **SUMMARY**   | Current run overlay (this invocation) + historical sparklines (Rule C)                            | Zone markers, no duplicate tables                      |
+| **LEDGER**    | Four dimension groups → collapsed per-test `<details>` with ASCII truth tables                    | Nested `<details>`, anchor drill-down `#section-{tag}` |
+| **METADATA**  | Host environment reproduction table                                                               | Markdown table                                         |
+
+Dimension groups match executive rollups: **Core**, **API**, **Scale**, **Resilience**.
+
+### Latest middleware gains (SQLite matrix, August 2026)
+
+Full matrix: **57 passed / 0 failed** in 240s. Hooks via `hooks-performance.test.ts` — full security stack, no turbo-auth shortcut:
+
+| Scenario             | Avg     | p95     | Peak RPS |
+| -------------------- | ------- | ------- | -------- |
+| Static asset         | 0.590ms | 0.677ms | 1,398    |
+| Turbo pipeline       | 0.303ms | 0.376ms | 2,415    |
+| Full auth + security | 0.439ms | 0.516ms | 1,844    |
+| REST API cache HIT   | 0.379ms | 0.444ms | 2,181    |
+| Mutation + outbox    | 2.753ms | 4.263ms | 335      |
+
+Compared to previous ledger: full auth **−43%** latency, turbo **−42%**, REST cache **−50%**. Zero-overhead hook dispatch and asynchronous outbox ring buffer active. See [Server Hooks](../../reference/architecture/server-hooks.mdx) and [SQLite ledger](./benchmark_sqlite.mdx#section-hooks_trace).
+
+## CRUD / findById baseline suites
+
+For **create / update / findById / mixed** regressions (the common CMS pain points), run these first on SQLite before a full matrix:
+
+| Suite                           | Command                                                          | Layer                                                                                                          |
+| ------------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| **Competitive 9-Workload**      | `bun test tests/benchmarks/competitive-workload-replica.test.ts` | Harness protocol: seq + 8c, median rounds. `BENCH_DOCS=10000 BENCH_ROUNDS=3` matches the external headline row |
+| **Middleware Flamegraph**       | `bun test tests/benchmarks/middleware-flamegraph.test.ts`        | Microsecond cost per middleware stage                                                                          |
+| **Event Loop Lag & Saturation** | `bun test tests/benchmarks/event-loop-lag.test.ts`               | Event loop delay & microtask queue drain                                                                       |
+| Adapter CRUD                    | `bun test tests/benchmarks/database-performance.test.ts`         | Direct `db.crud` INSERT / FIND ONE / UPDATE                                                                    |
+| Local wave throughput           | `bun test tests/benchmarks/local-api-throughput.test.ts`         | Adapter waves (no HTTP)                                                                                        |
+| **LocalCMS SDK CRUD tax**       | `bun test tests/benchmarks/local-cms-crud.test.ts`               | `cms.collections` create / update / findById                                                                   |
+| HTTP findById                   | `bun test tests/benchmarks/api-latency.test.ts`                  | Cold (cache-busted) + **TURBO-HIT** @ 8c                                                                       |
+| Mixed read mix                  | `bun test tests/benchmarks/mixed-workload.test.ts`               | Weighted REST + GraphQL + health                                                                               |
+| Truth layers                    | `bun test tests/benchmarks/truth-latency.test.ts`                | Logic vs LocalCMS vs HTTP                                                                                      |
+
+**August 2026 local SQLite rebaseline (rebuild `bun run build` first for HTTP turbo):**
+
+| Metric                                | Result                                              |
+| ------------------------------------- | --------------------------------------------------- |
+| LocalCMS findById warm (L1)           | **~0.001 ms** · ~511k RPS                           |
+| LocalCMS findById cold                | ~0.007 ms · ~126k RPS (≈ adapter)                   |
+| LocalCMS create                       | ~0.085 ms · ~5.9k RPS                               |
+| LocalCMS update                       | **~0.072 ms · ~7.0k RPS** (was ~0.44 ms)            |
+| LocalCMS mixed C/U/R                  | ~0.188 ms                                           |
+| HTTP findById **cold** (cache-busted) | **~2.2 ms** @ 8c                                    |
+| HTTP findById **TURBO-HIT**           | **~1.2 ms** @ 8c · **100% hit** · **~2.0×** vs cold |
+
+Adapter raw CRUD (same run): UPDATE **0.029 ms** (was 0.125 ms — raw `UPDATE…RETURNING`),
+INSERT 0.053 ms, FIND ONE 0.008 ms, FIND PAGE (50, sorted) **0.12 ms** (was 0.70 ms —
+`(tenantId, updatedAt)` composite + `updatedAt` default sort). See
+[Performance Architecture](../../reference/database/performance-architecture.mdx).
+
+> [!IMPORTANT]
+> The benchmark child process loads `index.cjs` → `build/handler.js`. Hook/handler turbo changes are invisible until `bun run build`.
+
+Shared SQL/Mongo core (`lookup-query` → `findById` on all engines) + LocalCMS + turbo: [Performance Architecture](../../reference/database/performance-architecture.mdx).
+
+Record after intentional perf work:
+
+```bash
+bun run build
+BENCHMARK_RECORD=1 bun test tests/benchmarks/api-latency.test.ts
+BENCHMARK_RECORD=1 bun test tests/benchmarks/local-cms-crud.test.ts
+```
+
+## Record modes
+
+| Mode      | Trigger                                     | SQLite history |                 MDX writes                  | Executive               |
+| --------- | ------------------------------------------- | :------------: | :-----------------------------------------: | ----------------------- |
+| `none`    | `bun test` (default)                        |       ❌       |                     ❌                      | ❌                      |
+| `history` | `BENCHMARK_HISTORY_ONLY=1`                  |       ✅       |                     ❌                      | ❌                      |
+| `partial` | `BENCHMARK_RECORD=1 bun test …`             |       ✅       | ✅ ledger + summary + **partial executive** | Scoped to invoked tests |
+| `full`    | `bun run scripts/benchmark-matrix/index.ts` |       ✅       |                ✅ all zones                 | Full matrix executive   |
+
+## Data flow
+
+```mermaid
+flowchart TD
+    A["bun test benchmark"] --> B["setupBenchmarkServer"]
+    B --> C["runBenchmark scenarios"]
+    C --> D["exportResult → history.jsonl"]
+    C --> E["printTruthTable"]
+    E --> F["writeTruthTable — truth + summary line"]
+    D --> G["finalizeReport"]
+    G --> H["writeCollapsedLedgerEntry — full trend"]
+    G --> I["writePartialExecutive — dimension/issues"]
+    G --> J["SUMMARY_RUN_OVERLAY + HISTORY"]
+    F --> K["benchmark_sqlite.mdx"]
+    H --> K
+    I --> K
+    J --> K
+    L["matrix generateFinalReport"] --> M["buildExecutiveReport + quadrantChart"]
+    M --> K
+```
+
+### Step-by-step
+
+| Step | Function                                  | What happens                                                                                                                                           |
+| ---- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1    | `setupBenchmarkServer()`                  | Seeds state in-process, spawns the **production build in NODE_ENV=production**, performs a REAL login (session cookie). No testing API, no test bypass |
+| 2    | `runBenchmark()`                          | Timed iterations with abort-on-consecutive-errors                                                                                                      |
+| 3    | `exportResult()`                          | Appends debug log to `history.jsonl`; registers test file for finalize                                                                                 |
+| 4    | `printTruthTable()` → `writeTruthTable()` | Surgical write: ASCII truth table **and** refreshed `<summary>` line                                                                                   |
+| 5    | `finalizeReport()`                        | SQLite persist, collapsed ledger with trend, **partial executive**, summary slots                                                                      |
+| 6    | Matrix `generateFinalReport()`            | Full executive, infrastructure collapse, dimension-grouped ledger regroup                                                                              |
+
+## MDX zones (writers must respect)
+
+```
+<!-- EXECUTIVE_START -->     ← matrix or partial executive (replace only)
+<!-- SUMMARY_START -->       ← Rule C: RUN overlay vs HISTORY (separate slots)
+<!-- LEDGER_START -->        ← dimension groups + SECTION:TAG pairs
+<!-- METADATA_START -->      ← host reproduction table
+```
+
+**Rule C:** Current Run and Historical Trends never share the same slot. Full run tables live in `tests/benchmarks/results/history.sqlite`.
+
+## Key modules
+
+| Module                                  | Purpose                                                                    |
+| --------------------------------------- | -------------------------------------------------------------------------- |
+| `benchmark-executive.ts`                | Dimension rollups, issues table, mermaid `xychart-beta` + `quadrantChart`  |
+| `benchmark-mdx.ts`                      | Zone writes, dimension grouping, surgical summary parity, shell generation |
+| `benchmark-reporting.ts`                | `finalizeReport()`, partial executive, `BENCHMARK_RECORD` gate             |
+| `benchmark-dimensions.ts`               | Section → Core/API/Scale/Resilience mapping                                |
+| `scripts/benchmark-matrix/reporting.ts` | Matrix `generateFinalReport()` orchestration                               |
+| `scripts/lint-benchmark-mdx.ts`         | CI guard — zones, markers, closed `<details>`                              |
+
+## Guardrails
+
+| Guard                   | Behavior                                                    |
+| ----------------------- | ----------------------------------------------------------- |
+| `BENCHMARK_RECORD=1`    | Gates MDX mutation (matrix/CI always on)                    |
+| `appendSummaryToMdx`    | **No-op** — no duplicate ASCII summary boxes                |
+| `isSpecificInsight()`   | Filters generic SWOT boilerplate from `[!NOTE]` overlays    |
+| `normalizeLedgerZone()` | Strips stray flat trend headings outside `<details>`        |
+| `lint:benchmark-mdx`    | Fails CI on zone drift, duplicate tags, unclosed sections   |
+| Partial executive       | `isPartial` watermark; rollups scoped to invoked tests only |
+
+## Creating a new benchmark
+
+1. Add `tests/benchmarks/my-benchmark.test.ts` with `exportResult`, `printTruthTable`, `printSummaryTable`.
+2. Register in `scripts/benchmark-matrix/benchmark-scripts.ts` (`section` drives dimension group).
+3. Regenerate shells: `bun run scripts/benchmark-matrix/generate-benchmark-reports.ts --force-all`.
+4. Run with recording: `BENCHMARK_RECORD=1 bun test tests/benchmarks/my-benchmark.test.ts`.
+
+Required header fields: `@file`, `@description`, optional `@phase` (`cold` | `warm` | `mixed`).
+
+## How to run
+
+**Console only (safe for dev):**
+
+```bash
+bun test tests/benchmarks/auth-performance.test.ts
+```
+
+**Single test with MDX + partial executive:**
+
+```bash
+BENCHMARK_RECORD=1 bun test tests/benchmarks/auth-performance.test.ts
+```
+
+**Full SQLite matrix (all DBs available with Docker):**
+
+```bash
+bun run scripts/benchmark-matrix/index.ts --db=sqlite
+```
+
+**All databases (Docker required for MariaDB/PostgreSQL/MongoDB):**
+
+```bash
+bun run scripts/benchmark-matrix/index.ts --continue-on-error
+```
+
+**Validate report shape:**
+
+```bash
+bun run lint:benchmark-mdx
+```
+
+## Data sources
+
+| Source            | Path                                            |
+| ----------------- | ----------------------------------------------- |
+| Canonical history | `tests/benchmarks/results/history.sqlite`       |
+| Debug log         | `tests/benchmarks/results/history.jsonl`        |
+| Per-run JSON      | `tests/benchmarks/results/<db>/`                |
+| Report shells     | `docs/project/benchmarks/benchmark_<db>.mdx`    |
+| Script registry   | `scripts/benchmark-matrix/benchmark-scripts.ts` |
+
+<!-- SUMMARY_MATRIX_START -->
+
+### ⚡ Executive Summary Matrix
+
+| Database | Status | Cold Start | REST p95 | GQL Avg | CPU | Memory |
+| :------- | :----- | :--------- | :------- | :------ | :-- | :----- |
+
+<!-- SUMMARY_MATRIX_END -->
+
+## Related
+
+- [Competitive Comparison](../competitive-comparison.mdx)
+- [Achievements Log 2026](../achievements-2026.mdx)
+- [Contributing Docs — Mermaid & admonitions](../../contributing/contributing-docs.mdx)

@@ -1,0 +1,1378 @@
+---
+path: "docs/project/achievements-2026.mdx"
+title: "2026 Achievements Log"
+description: "The completed-achievements log for SveltyCMS 2026 — dated, self-measured engineering milestones that shipped, moved here from the roadmap when done."
+order: 100
+icon: "mdi:chart-box-outline"
+author: "SveltyCMS Team"
+created: "2026-01-18"
+updated: "2026-09-08"
+tags:
+  - "achievements"
+  - "log"
+  - "technical"
+  - "comparison"
+  - "database"
+  - "security"
+---
+
+<!-- lint:disable heading-density -->
+
+# Technical Evaluation of SveltyCMS in the 2026 CMS Landscape
+
+**A Comparative Analysis of Architecture, Performance, and Enterprise Readiness**
+
+> [!NOTE]
+> **Methodology**: All SveltyCMS metrics are self-measured via reproducible benchmark suites (`bun test tests/benchmarks/`). Competitor data is derived from publicly available documentation, CVE databases (NVD, GitHub Advisory DB), and published architecture analyses as of June 2026. We encourage independent verification. This evaluation is prepared in accordance with EU Directive 2006/114/EC on comparative advertising — all comparisons are based on objectively verifiable features.
+
+## 1. Introduction: The Post-Monolithic Era of Content Management
+
+The content management system (CMS) landscape of 2026 is defined by a rigorous bifurcation between legacy monolithic architectures and modern, composable, headless solutions. As enterprises increasingly demand sub-millisecond latency, edge-ready deployment, and "developer-first" ergonomics, the market has opened for frameworks that leverage the compilation-centric performance of next-generation JavaScript libraries.
+
+### 1.1 The Definition of "State of the Art" in 2026
+
+To accurately assess SveltyCMS, one must establish the baseline for SOTA technology in the current year. The benchmarks for 2026 include:
+
+- **Zero-Runtime Overhead:** The shift away from heavy client-side JavaScript bundles toward compiled, lightweight output.
+- **Ultra-Fast Developer Feedback:** Sub-1.2s Hot Module Replacement (HMR) for content structure changes, a 60% improvement over legacy patterns.
+- **Native Svelte 5 UI Library (March 2026):** Zero-dependency, native Svelte 5 UI architecture, achieving <150 requests per page and solving the "ESM Storm" overhead.
+- **Ultra-High Performance Toolchain:** Rust-powered linting and formatting (oxlint/oxfmt).
+  - **Linting (Oxlint):** Project-wide checks in **47ms** (1000+ files).
+  - **Formatting (Oxfmt):** Full project formatting in **~2.2s**.
+  - **Production Builds (Vite 7):** Fast builds using Vite's native bundler.
+  - **Zero-Warning Codebase:** Automated and manual audit cleared all 84 legacy warnings.
+  - **Automated Doc Integrity (March 2026):** Native `lint-docs.ts` utility achieving **100% link integrity** and **Path Alignment Strategy** (filesystem matching) across 158 files.
+
+  - **True Database Agnosticism:** The ability to run on NoSQL (for scale), SQL (for relations), or Embedded DBs (for edge) without code changes.
+
+- **Edge Compatibility:** The ability to deploy logic and content delivery to the network edge (e.g., Cloudflare Workers, Vercel Edge).
+- **Type Safety:** End-to-end TypeScript integration from the database schema to the frontend component.
+- **Infrastructure as Code (IaC):** The ability to define content schemas, permissions, and configurations as version-controlled code.
+- **Structural Consolidation (5-Pillar Architecture):** Moving beyond file-fragmented systems to a unified, 5-pillar reactive core.
+- **Enterprise SEO Excellence:** Sub-millisecond redirect lookups and dynamic, multi-tenant sitemap generation with automated indexing pings.
+- **Typed Component Loaders:** Moving beyond brittle string-based component resolution to type-safe, tree-shakeable `import()` closures.
+
+This report describes **self-measured** SveltyCMS behavior and **publicly documented** competitor capabilities as of mid-2026. It does **not** claim global ranking, external security certification, or same-harness superiority over all commercial CMS products.
+
+## 2. The Architectural Foundation: SvelteKit and the Compiler Paradigm
+
+### 2.1 The "No-Runtime" Advantage
+
+SveltyCMS leverages Svelte's compiler to generate highly optimized vanilla JavaScript during the build process.
+
+- **Middleware pipeline (April 2026, self-measured):** Consolidated security handlers and `/api` fast-paths; documented **~71% reduction** in hook overhead on the measured path (**~12 µs p95** micro-bench — not full HTTP E2E).
+- **API fast-path skips:** Omitting locale/theme/content-init on pure API routes saves on the order of **tens of µs** per request when those hooks would otherwise run (depends on path and cache state).
+- **Throughput:** REST/dispatcher benches have recorded **high thousands–~14k+ RPS** on specific SQLite/local scenarios. **Not** a claim of global product speed leadership; networked adapters and full auth stacks are lower.
+
+### 2.2 Performance & Security Infrastructure (New)
+
+In March 2026, SveltyCMS implemented several enterprise-grade infrastructure optimizations:
+
+- **Single-Trip Mutations:** Standardized `.returning()` (SQL) and `returnDocument: 'after'` (Mongo) across all adapters, eliminating redundant `SELECT` queries and reducing mutation latency by **~40%**.
+- **Prepared / hot-path SQL (April 2026):** Cached prepared statements and related hot-path work on SQLite, PostgreSQL, and MariaDB reduce per-query compile overhead. **Sub-ms** reads are typical on **embedded SQLite** under our harness; networked SQL still pays RTT (**~0.5–2 ms** class on local Docker, 2026-08-04).
+- **Memory Stability & Allocation Efficiency (April 2026):** Resolved significant allocation overhead in the `LocalCMS` SDK by consolidating transient caches into a shared `static` LRU engine. This refactor neutralized a 524 MB/min memory leak, achieving a **STABLE** rating with < 1MB/min growth under sustained 3,400+ RPS loads.
+
+- **Negative Caching & Bloom Filter Protection:** Implemented a high-performance negative caching engine with an in-memory Bloom filter to track missing keys/documents. When a 404 cache miss is recorded, subsequent requests for the same missing key are resolved immediately in the current microtask tick, bypassing the database driver.
+
+  Negative cache / Bloom miss path is **orders of magnitude** faster than a full DB miss on repeated absent keys (self-measured hot-miss micro-benches). It **reduces** miss storms; it does not “immunize” the system against all DoS classes (rate limits, body limits, and ops still apply).
+
+- **Zero-Tax LocalCMS SDK Bridge:** Hardened the `LocalCMS` server-to-server bridge to bypass SvelteKit's HTTP middleware pipelines entirely. Combined with hot-swappable getter structures and microtask batching, this achieves internal query resolution in **<0.05ms** for server-side loading and internal API interactions with 0% runtime overhead.
+- **Active Driver Validation (Anti-False Positive):** Implemented mandatory `SELECT 1` verification in the MariaDB and PostgreSQL adapters. This ensures that the Setup Wizard provides immediate, clear feedback for missing or incorrect credentials, eliminating "lazy connection" false positives found in legacy ORM implementations.
+- **Micro-Telemetry:** Native per-operation timing (`performance.now()`) is bubbled up from the DB adapter to the API `meta` field, providing high-resolution observability without external dependencies.
+
+- **Streamed collection export (September 2026):** `GET /api/collections/{id}/export` streams NDJSON, CSV, or chunked JSON from `streamMany` (Mongo cursor, PostgreSQL driver stream, SQLite/MariaDB 500-row pages). `streamingExportResponse` encodes one record at a time with backpressure. Admin import/export downloads the stream URL instead of `JSON.parse` of the full payload. Tests: `tests/unit/utils/export-encode.test.ts`. Docs: [Collections API](../reference/api/collections.mdx).
+
+- **Collection Weak ETags & DB-free 304 (September 2026):** `GET /api/collections/{id}` emits `W/"cv1|{tenant}|{collection}|{epoch}|{reprHash}"`. `If-None-Match` is compared to the in-memory collection epoch (bumped on write with L1 eviction) in `handleTurboGet` and `handleApiRequests` **before** the collections handler — no DB, no JSON. Representation hash covers path, query, and user id. Tests: `tests/unit/services/collection-etag.test.ts`. Docs: [Collections API](../reference/api/collections.mdx).
+
+- **Native Field-Level Encryption at Rest (September 2026):** Collection fields flagged `encrypt: true` are transparently encrypted in `write-pipeline.ts` and decrypted in `read-pipeline.ts` using AES-256-GCM envelopes (`v1:iv:tag:ciphertext`) keyed from `ENCRYPTION_KEY` with HKDF domain separation (`sveltycms-field-at-rest`) and AAD binding (`tenantId:collectionId:fieldName`). Physical adapters store only ciphertext; L1/L2 caches keep ciphertext (decrypt clones on the way out). Filter/sort on encrypted fields fail closed (`ENCRYPTED_FIELD_NOT_QUERYABLE`). Unique indexes and SQL materialization are skipped. Tests: `tests/unit/utils/field-encryption.test.ts`, `tests/unit/services/field-encryption-pipeline.test.ts`. Docs: [Field-Level Encryption](../reference/security/field-level-encryption.mdx).
+
+- **Interactive Admin Session Console (September 2026):** Shipped a comprehensive user session management modal (`modal-user-sessions.svelte` and `DELETE /api/user/sessions`) inside User Management. Administrators can inspect concurrent active sessions per user account, complete with client metadata (OS, browser type, IP address, and current active session indicator) and execute one-click remote session revocation with instantaneous authorization cache invalidation. Tests: `tests/unit/auth/sessions/session-manager.test.ts`.
+
+- **GDPR Article 17 Right to Erasure & Benchmark Hardening (September 2026):** Implemented permanent cascading user erasure (`eraseUser`) in `GDPRService` and exposed authenticated `action: "erase"` and `action: "wipe"` on `/api/gdpr`. Cascading deletion purges associated sessions, active tokens, audit logs, and account records with 0 orphans across all 4 database adapters. Migrated `tests/benchmarks/right-to-be-forgotten-audit.test.ts` from the legacy `/api/testing` backdoor to the authentic production endpoint with `benchmarkAuthHeaders()`, unblocking the test to execute inside the production benchmark matrix with `<1ms` average wipe latency and 900+ wipes/s. Tests: `tests/unit/api/gdpr.test.ts`, `tests/unit/services/gdpr-service.test.ts`, `tests/benchmarks/right-to-be-forgotten-audit.test.ts`. Docs: [ADR: Testing 2026](../tests/adr-testing-2026.mdx).
+
+- **Point-Lookup Slab & Hot-Path Serialization (September 2026):**
+  - **Random-Access Slab**: Implemented a dedicated 2,000-slot FIFO cache (`randomAccessSlab`, 30s TTL) for high-frequency point lookups, elevating `findByIdRandom` throughput by +196% to match the hot-path `findById` baseline.
+  - **LRU Protection**: Applied `updateAgeOnGet: false` on `ENTRY` and `CONTENT` lookups, preventing cold random reads from displacing hot cache working sets.
+  - **Pattern Invalidation Acceleration**: Refactored pattern-based cache clearing to reduce invalidation latency by −87% (4.11ms → 0.53ms), achieving +676% RPS in mutation benchmarks.
+  - **O(N) Fast JSON Serialization**: Replaced rope concatenation with pre-allocated buffer joins in `serializeArrayFast` (`fast-json.ts`), eliminating GC pressure during `listLarge` queries.
+  - **Pool & SMTP Hardening**: Elevated hardware-profile connection pool floors to 32 on 8c+ hosts, and hardened transactional SMTP connection pooling (`maxRecipients: 1`, `maxMessages: Infinity`, `connectionTimeout: 10s`, `socketTimeout: 30s`).
+
+- **Store Architecture Modernization & Svelte 5 Runes Consolidation (September 2026):**
+  - **Lean Store Footprint**: Consolidated the global store directory from 28 files down to 18 single-purpose domain singletons.
+  - **Monolith Elimination**: Removed the legacy `store.svelte.ts` singleton and compatibility bridges in favor of direct imports from specialized modules (`locale-store.svelte`, `validation-store.svelte`, `toast.svelte`).
+  - **State Absorption**: Absorbed satellite stores (`status-store`, `data-change-store`, `user-prefs-overlay`) into cohesive domain singletons (`collection-store`, `theme-store`).
+  - **Domain Colocation**: Relocated single-consumer stores (`consent-store`, `settings-state`, `dashboard-preferences`, `image-editor-store`, `help-state`) directly into their respective feature and component directories.
+  - **Widget & Shell Decoupling**: Updated all 72 widget inputs, displays, schemas, and app shell routes to import directly from domain singletons, eliminating dozens of unused legacy imports and standardizing on Svelte 5 fine-grained reactivity (`$state()`, `$derived()`). Tests: `tests/unit/stores/`, `tests/unit/components/image-editor/`.
+
+- **Write-Path Acceleration & Single-Pass Field Preparation (August 2026):**
+  - **Deduplication of Sanitization Passes:** Eliminated redundant recursive `sanitizeObject` tree traversal in `prepareWritePayload`, relying on the pre-compiled `PrepPlan` in `prepareCollectionFields` to perform targeted HTML/text sanitization per schema field.
+  - **Pre-Compiled Number & DateTime Plans:** Pre-compiled DateTime and Numeric constraint plans in `SchemaHotFlags` (`_dateTimeFieldNames`, `_numberFields`), eliminating runtime `schema.fields` iteration in the hook pipeline and achieving zero field-iteration loops on write mutations.
+  - **Behavioral Mutation Self-Learning:** Integrated `recordWriteAccess` directly into `schedulePostWrite` and commerce `addCartItem` / `decrementStock`, feeding mutation signals (weight: 2) into the in-memory decaying heat map without blocking response latency.
+  - **Canonical Keyspace Cache-Warming Alignment:** Aligned `CacheWarmingService` keyspace with `CollectionsNamespace` (`${tenant}:collection:${id}:${entry}:published` and `${tenant}:collection:${id}:find:default_50:published`), ensuring pre-warmed entries and lists produce 100% cache hits on subsequent SDK reads.
+  - **PostgreSQL Parameter Coercion:** Hardened `bindPgParam` to coerce `undefined` to `null` across all prepared statement queries, eliminating driver parameter rejection.
+
+- **Security Hardening (API & Multi-Tenancy):**
+  - **Universal Tenant Context:** Implemented a rigorous middleware-driven `tenantId` propagation system, ensuring every database mutation and query is explicitly scoped to the correct tenant.
+  - **IDOR Prevention:** Hardened all 40+ API endpoints with role-based access control and explicit owner verification.
+  - **GraphQL Isolation:** Eliminated schema leakage by deploying isolated per-tenant Yoga server instances.
+  - **Tenant-Aware Uniqueness:** Implemented granular control for unique field constraints. The `tenantScopedUnique` flag ensures that identifiers like slugs (e.g., `/about`) remain unique within a tenant but can safely overlap across different tenants, preventing cross-tenant namespace collisions.
+  - **SSE Hygiene:** Resolved a critical memory leak in the real-time event stream and implemented tenant-aware real-time filtering.
+  - **Encrypted Data Portability:** Standardized AES-256-GCM encryption for all sensitive fields during tenant-scoped data exports.
+
+  - **Automated Security Response (v2026)**: Implemented a unified `SecurityResponseService` providing:
+    - **Structured Payload Scanning**: JSON and Form-data aware parsing, avoiding the overhead of raw string scanning on binary/multipart payloads.
+    - **Bounded ReDoS Protection**: All security regex patterns now use strictly bounded quantifiers ({0,500}), effectively eliminating the risk of accidental or malicious Regular Expression Denial of Service.
+    - **Distributed Redis State**: Security incidents, IP throttles, and blocks are distributed via Redis, ensuring immediate global protection across multi-node clusters.
+    - **Performance Early-Exits**: Sub-microsecond `Content-Length` checks and a 32KB processing cap for unknown payload types ensure high-volume protection without performance degradation.
+
+  - **Hardened Authentication Core**:
+    - **OAuth State Integrity**: Native HMAC-SHA256 signing and verification of OAuth states, neutralizing authorization code replay attacks and CSRF during external identity provider flows.
+    - **Compartmentalized Rate Limiter Secrets**: Decoupled RateLimiter cryptographic keys from the primary `JWT_SECRET_KEY`, utilizing a dedicated `RATE_LIMIT_SECRET` fallback architecture. This containment strategy prevents a leaked rate-limit key from compromising the core authentication perimeter.
+    - **Strict IP Resolution**: Implemented `getClientIp(event)` across all authentication mutation flows (Login, Sign-Up, Forgot Password), replacing generic "N/A" placeholders in Audit Logs to guarantee high-fidelity forensic traceability.
+    - **RFC 6585 Compliance**: Enforced strict `Retry-After: 60` HTTP headers for all `429 Too Many Requests` responses generated by the authentication firewall, ensuring respectful client backoff protocols.
+    - **Setup Wizard Gating (June 2026)**: Hardened setup route handlers (`setup.ts`) to query the database and check for registered admin accounts, blocking setup hijacking attempts (`403 SETUP_ALREADY_COMPLETE`) even if the local config file `config/private.ts` is deleted or corrupted.
+    - **Stateless CSRF Exemption (June 2026)**: Excluded Bearer-authenticated API key and Website token requests from CSRF checks in `+server.ts` to allow secure external client mutations without blocking browser-based cookie-authenticated sessions.
+
+      - **Demo Tenant Capacity Guard**: Integrated a hard-coded 100-user capacity limit for demo tenant signups, utilizing high-performance `getUserCount` adapters to protect the system from automated resource exhaustion attacks.
+
+      - **L0 Session & Cache Stability (August 2026)**: Refactored the `InMemorySessionManager` to utilize a bounded direct `Map` with capacity caps (`MAX_SESSIONS = 10000`) and proactive timestamp eviction, eliminating GC drop hazards while preventing memory leaks. Additionally, added process-local `_clientNodesCache` to `contentStore` and `_clientSchema` memoization, eliminating repetitive layout JSON serializations.
+
+    - **TOTP Secret Encryption**: TOTP secrets are now encrypted at rest using AES-256-GCM under the instance
+
+    - **HKDF + size-aware compression (August 2026)**: Passphrase-shaped `ENCRYPTION_KEY` / `SECRET_ENCRYPTION_KEY` values (not 64-char hex) derive AES-256 keys with **HKDF-SHA-256** (cached once per process, domain-separated per subsystem). Decrypt still accepts SHA-256(raw) envelopes. Hex keys are unchanged (AES-NI, no KDF on the request path). Compression negotiation now prefers gzip below 4 KiB and skips zstd below 32 KiB; `compressSync` refuses output that is not smaller than the input. No ML-KEM on the request path.
+
+    - **SQL PK upsert + bulk import (August 2026)**: `crud.upsert` / `upsertMany` on SQLite, PostgreSQL, and MariaDB are one `INSERT … ON CONFLICT (_id)` / `ON DUPLICATE KEY` when the filter is a primary-key lookup (status-pinned queries still use findOne). Collection import (sync LocalCMS and the `import-data` job) shares `bulkImportCollectionDocuments`: `findByIds` + `insertMany`/`upsertMany` per 100-row chunk.
+
+    - **Automation event→flow index (August 2026)**: Automation dispatch indexes active event-triggered flows by event name so content mutations resolve matching flows with a single Map lookup instead of scanning every flow. Unmatched events exit before flow iteration.
+
+    - **QueryBuilder list + Mongo 1-RT upsert (August 2026)**: Admin collection lists (`queryBuilder.execute`) convert rows in place with registered schema maps on SQLite/PostgreSQL/MariaDB; `exists()` is LIMIT 1. Mongo upsert is one `findOneAndUpdate` (filter carries `_id`) instead of update-then-create.
+
+    - **Plugin state + relation batch (August 2026)**: Extensions uses the layout plugin-state map (one `findMany` + 15s L1) instead of N `getPluginState`; config reuses `parent().pluginStates`. Relation Input/Display issue one `_id $in` list request; collection lists hydrate relation labels in one `findByIds` per related collection so table cells skip extra HTTP.
+
+    - **Remotes skip HTTP-to-self (August 2026)**: User profile, sessions, tokens, settings groups, and collection save/delete remotes call LocalCMS in-process (`getRequestLocalCMS`) instead of `event.fetch("/api/...")`. Dashboard health uses `cms.db.isConnected()` instead of fetching `/health`. Same privilege strips as the REST handlers.
+
+    - **SQLite write templates + GraphQL fast path (August 2026)**: SQLite INSERT synthesizes the row (no `RETURNING *`) with a cached SQL template; UPDATE SQL is cached per column-set. GraphQL `contentSystemHealth` / `allCollections` skip Yoga/JIT after auth (in-memory catalog/health).
+
+- **TOTP Replay Protection**: A consumed-codes registry using an adapter pattern (in-memory, swappable to Redis/SQLite) prevents TOTP code reuse within the 90-second validity window. Fail-closed design — registry errors reject the code.
+- **TOTP Timing Attack Mitigation**: Replaced standard string comparisons in the 2FA layer with `crypto.timingSafeEqual`, mathematically neutralizing nanosecond-level side-channel attacks on TOTP code verification.
+
+      - **Trusted Devices**: HMAC-SHA256 signed __Host-2fa-trusted-device cookie (30-day TTL) enables "Remember this device" — subsequent logins skip 2FA on recognized devices. Forgery-proof design using the instance's ENCRYPTION_KEY.
+
+- **Plugin Auth Hooks**: New afterAuthenticate lifecycle hook allows plugins to deny logins or enforce 2FA gating on any authentication method (password, OAuth, passkey, token, magic link). Fires after credential verification but before session cookie issuance.
+- **Pending 2FA Setup**: Encrypted TOTP secrets are persisted immediately during setup with twoFactorPending: true — interrupted enrollment is automatically resumed on re-initiation.
+- **Configurable TOTP Window**: TOTP_WINDOW env var (default 1, max 5) for clock-drift tolerance without code changes.
+
+- **Fallback Garbage Collection Resilience**: Hardened the session cleanup loop to guarantee that in-memory fallback caches are continuously pruned even when a `RedisSessionManager` is actively managing the primary connection, ensuring zero memory leaks during Redis outages.
+
+  - **May 2026 AI Bot Defense & Crypto Hardening**:
+    - **AI Bot Detection & Blocking**: Proactive User-Agent fingerprinting detects and blocks 28 known AI crawler patterns (GPTBot, Claude, Perplexity, CommonCrawl, Bytespider) and reconnaissance tools (Nmap, SQLMap, Nikto, Burp Suite, Zgrab, Masscan, Nessus).
+    - **Multi-Layer Honeypot Grid**: 45+ decoy routes covering WordPress, Drupal, Joomla, AWS metadata endpoints, config/backup file probes, and common exploit paths. Any probe triggers immediate IP flagging/blacklisting.
+    - **Honeypot IP Flagging & Response Poisoning**: Honeypot probes get an immediate decoy 200 (no 5–15s socket hold — that was a Slowloris/DDoS vector) while the IP is flagged for firewall rejection on the next request. Bots receive fake JSON payloads (phantom users, false config) designed to corrupt scraper datasets rather than revealing real system information.
+    - **Cross-Origin Isolation Headers**: All API responses enforce `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`, and `Cross-Origin-Resource-Policy: same-origin`, preventing Spectre/Meltdown side-channel attacks.
+
+      - **Zero-Bias Token Generation**: `generateRandomToken` now uses rejection sampling to eliminate ~3.125% modulo bias, guaranteeing uniform CSPRNG distribution for session tokens and API keys.
+
+    - **Setup Cookie Prefix Consistency**: Setup handler now uses consistent `__Host-` cookie prefix logic, closing the gap between runtime and initialization session cookie naming.
+
+  - **June 2026 Comprehensive Security Audit & Hardening**:
+    Full-stack codebase audit against dependency stack, security architecture docs, and CVE landscape. Closed 6 gaps:
+    - **SVG Polyglot Upload Sanitization**: Server-side `sanitizeSvg()` strips scripts, foreignObject, event handlers, `javascript:`/`data:` URIs, CDATA, XML PIs, and DOCTYPE from uploaded SVG files.
+    - **S3 Endpoint SSRF Prevention**: `validateS3Endpoint()` blocks private IPs (127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16), cloud metadata hosts, and non-HTTP protocols before S3Client creation.
+
+      - **Ollama RAG Prompt Injection Defense**: Remote knowledge-base context relocated to `user` message role with `<rag_context>` XML delimiters and control-character stripping.
+
+    - **GraphQL Introspection Explicit Blocking**: `NoSchemaIntrospectionCustomRule` applied in production, preventing unauthenticated `__schema` enumeration.
+    - **Tiptap Link Protocol Hardening**: Protocol allowlist `["http", "https", "mailto", "tel"]` blocks `javascript:` and `data:` URI injection at editor level.
+
+      - **Rate Limiter Dependency Hygiene**: `sveltekit-rate-limiter` moved from `devDependencies` to `dependencies` to guarantee production build inclusion.
+        All 64 defense-in-depth security regression tests pass. 0 lint errors. 0 type errors.
+
+  - **4-Layer Defense-in-Depth Authorization**:
+    Most CMS platforms (Payload, Strapi, Directus) rely on a **perimeter security model**: authenticate at the gate, then assume internal trust. This creates dangerous gaps where an authenticated user with low privileges can exploit deeper vulnerabilities. SveltyCMS eliminates this assumption through **4-layer zero-trust re-validation**:
+    - **Layer 1 — Middleware**: `__Host-` cookie prefix enforcement (RFC 6265bis), setup completion gating, CSRF protection.
+    - **Layer 2 — Dispatcher**: Fail-closed `hasApiPermission()` checks; unmapped namespaces return 403 by default.
+
+    - **Layer 3 — Handler**: Admin verification for system mutations, `media:write`/`media:delete` permission checks.
+    - **Layer 4 — Page Action**: Centralized permission guards (e.g., `requireCollectionBuilderPermission`).
+      Each layer re-validates permissions independently, and the system fails safely if any check fails. This "zero trust within the application" architecture is rare among open-source CMS platforms and makes entire classes of vulnerabilities impossible — a single compromised perimeter layer does not grant full access.
+
+  - **ETag Conditional Requests**:
+    Implemented HTTP ETag support in the central API dispatcher. Every GET 200 response receives a SHA-256-based ETag header (first 16 hex chars of the response body hash). The dispatcher checks the If-None-Match request header and returns 304 Not Modified with zero body when content has not changed. This reduces bandwidth consumption and server processing for cache-valid clients, with sub-microsecond hash computation overhead per response.
+
+  - **API Versioning**:
+    Added X-API-Version: 1 header to all API responses. The dispatcher automatically strips /v1/ path prefixes for backward-compatible routing (e.g., /api/v1/collections/posts to /api/collections/posts). This enables future /api/v2/ endpoints without breaking existing clients, while existing /api/ paths continue working unchanged.
+
+  - **Vectorized Audit Chaining**: Moved Audit Log SHA-256 hashing to a dedicated Node.js `Worker Thread` pool. This offloads cryptographic overhead from the main event loop, preventing API starvation during high-volume bulk imports and deletions.
+  - **Middleware AST Pre-compilation**: Introduced a compiled "Auth-Path" cache in the SvelteKit `handleSetup` hook. Pre-evaluating complex AST route bypasses reduced total middleware latency by ~40%.
+  - **Unified Gatekeeper Consolidation (April 2026)**: Purged 13 redundant API route directories and consolidated entire REST surface into a single, high-performance `[...path]` dispatcher. This reduced AST parsing overhead in SvelteKit by 80% and minimized cold-start times for serverless environments.
+
+  - **Enterprise "Immunity" Layer (April 2026)**:
+    - **Global Security Guard**: A top-level wrapper ensuring HSTS, CSP, and X-Frame-Options are injected into _every_ response, including error boundaries and redirects.
+    - **Self-Healing Load Shedding**: Integrated a memory-pressure monitor (90% heap threshold) that automatically rejects mutation traffic with compressed 503 responses, protecting read-availability during spikes.
+    - **Graceful Shutdown Instrumentation**: Instrumented `SIGTERM` / `SIGINT` handlers to drain in-flight requests and cleanly disconnect DB/Cache pools, ensuring zero-restart integrity.
+    - **Timing-Safe Cryptography**: Protected CI/CD test bypasses using `crypto.timingSafeEqual` to neutralize side-channel attacks on administrative bypass secrets.
+    - **Request Tracing**: Automated `X-Request-ID` and `requestId` propagation across the entire stack via `AsyncLocalStorage` and the middleware pipeline.
+
+  - **Lazy Relation Hydration**: Eliminated Depth-3 query lag on strict SQL engines (PostgreSQL/MariaDB) by utilizing Svelte 5 snippets (`{#snippet}`) and the `IntersectionObserver` API. This "Ghost Relation" pattern delays complex sub-graph `JOIN` execution until the specific relation field natively scrolls into the viewport.
+  - **L1/L2 cache (v0.0.7+)**: Hybrid LRU + optional Redis. Hot-path hits bypass the DB driver; **LocalCMS / L1-hot** internal timings can land in the **sub-0.1 ms** class in our micro-benches. Percent reductions vs a specific prior baseline are scenario-dependent — reproduce with `tests/benchmarks/cache-*.test.ts` / LocalCMS benches.
+
+    Furthermore, **batched Ghost Relations** mathematically eliminate the N+1 query bottlenecks and relational choking that plague competitors like Strapi and Directus under heavy nested population.
+
+  - **Surgical Field-Level Caching**: Enhanced the Ghost Caching engine with `tagMap` surgical invalidation. Single-field updates (e.g., `viewCount`) now trigger targeted purges of specific document keys instead of flushing entire collections, maintaining "Hot L1" status for 99% of unrelated traffic.
+
+  - **Distributed Edge Sync & Real-Time Invalidation**: Introduced a Redis Pub/Sub invalidation bridge (`svelty:cache:invalidation`). This ensures sub-millisecond global state consistency across multi-node edge clusters, with immediate local-memory purging upon remote invalidation events.
+  - **Geographic Read-Replica Awareness**: Implemented a context-aware `ReplicaPoolManager` in the PostgreSQL adapter. By parsing the `x-svelty-region` header, the CMS automatically routes read traffic to the nearest global database replica (e.g., US users to `us-east-1`), while keeping all mutations on the primary instance.
+
+    - **Optional Edge CDN Invalidation**: Integrated a background `CdnService` for Cloudflare. Automated `purge_by_tags` calls are fired upon content updates, ensuring global Edge consistency without manual cache management. This service is 100% optional and fails gracefully if credentials are not provided.
+
+  - **Hardened Telemetry Protocol**: HMAC-SHA256 registration handshakes for lifecycle reporting to make spoofed heartbeats harder (not a formal PKI guarantee).
+  - **Persistent DoS Protection (April 2026)**: Implemented stateful rate-limiter persistence using `dump()` and `restore()` mechanisms in `SecurityResponseService`. This ensures that active IP blocks and throttles survive graceful shutdowns and node restarts, providing continuous protection across deployments.
+
+  - **SQLite Multi-Tenant Index Optimization (April 2026)**: Hardened the SQLite schema with compound `(tenantId, field)` indexes across `authUsers`, `authTokens`, and `contentNodes`. This eliminated table scans for multi-tenant lookups, achieving sub-millisecond query performance (**0.000ms - 0.007ms**) even under high concurrency.
+  - **Connection Resilience Hardening (June 2026)**: Fixed undici pool hangs when rejected HTTP response bodies were left unconsumed (brownout simulations). Chaos-resilience benches pass after consuming failed bodies; re-run `tests/benchmarks/chaos-resilience.test.ts` for current numbers.
+
+### 2.2.1 Scaling benches (April 2026, self-measured)
+
+Selected high-load results from our suites (not “zero overhead” as a universal claim):
+
+- **Hot REST/read path**: On the order of **sub-ms** entry retrieval when schema/cache is warm (scenario-dependent).
+- **Content scanning**: Worker-pool scan of large collection sets measured in sub-ms–low-ms class under our content-scan bench.
+- **Bulk ingestion**: Order of **~10k entries / ~1s** class in migration-scale style benches (machine- and DB-dependent).
+- **Revision-heavy docs**: Lookup degradation under many revisions constrained by indexing strategy in revision benches (see benchmark ledger for latest %).
+
+- **World Life Data Diagnostics**: Implemented a high-fidelity "Reality Simulator" measuring **Success/Failure Latency Splits**. Verified a **1.85x Fast-Fail Efficiency**, proving the system rejects malicious or invalid traffic significantly faster than it processes valid data, preventing resource exhaustion.
+- **Monitoring Tax Elimination**: Reduced health-probe latency to **0.45ms** via intelligent caching, protecting production CPU cycles from monitoring overhead.
+- **Simulated Form Vitality**: Proved a **sub-0.05ms** server prep time for complex 50-field forms, ensuring the Admin UX feels instantaneous regardless of schema complexity.
+- **Transparent AI Integration**: Reduced CMS-side AI logic tax to **1.3ms**, ensuring the platform adds zero perceived latency to generative workflows.
+- **High-Throughput Large-Payload & Concurrency Scaling (September 2026)**:
+  - **Single-Pass V8 JSON Serialization**: Replaced intermediate string template allocation in `successResponse` with direct V8 streaming serialization, reducing 225 KB payload serialization time from 1.47s to 650ms (55.7% latency reduction) in micro-benchmarks.
+  - **SIMD-Accelerated ByteLength Calculation**: Fast-paths payloads $\ge$ 1 KB to AVX2/SSE4.2 SIMD `Buffer.byteLength()`, eliminating JavaScript character-by-character loops on large responses.
+  - **L1 Query Cache Retention**: Kept `CacheCategory.CONTENT` with `updateAgeOnGet: true` (restricting `coldCategory` to `ENTRY`), ensuring high-traffic collection queries and pagination pages stay hot in L1 cache under concurrent workloads.
+  - **Adaptive Brotli Quality Scaling**: Lowered Brotli compression quality for dynamic API responses between 32 KB and 256 KB from quality 6 to 2 (4.4× faster compression with <0.1% ratio difference), preventing threadpool saturation under multi-worker spikes.
+  - **Hardware-Concurrent Libuv Threadpool**: Automatic boot-time scaling of `UV_THREADPOOL_SIZE` up to 32 worker threads prior to module initialization in both Node.js (`index.cjs`) and Bun (`index.bun.ts`).
+
+### 2.3 The Typed Widget Revolution (March 2026)
+
+One of the most significant architectural leaps in 2026 was the migration of the "Three Pillars" widget system from string-based paths to **Type-Safe Component Loaders**.
+
+- **The Problem:** Legacy CMS architectures (including early SveltyCMS) relied on strings like `inputComponentPath: './MyWidget.svelte'`. This prevented IDE refactoring, required giant `import.meta.glob` scans, and led to runtime "module not found" errors.
+- **The Solution:** Redesigned the `createWidget` factory to accept typed `ComponentLoader` closures: `() => import('./input.svelte')`.
+- **Result:**
+  - **Zero Runtime Surprises:** Broken paths are caught at compile-time by TypeScript and Svelte Check.
+  - **Perfect Tree-Shaking:** Vite no longer bundles unused widgets; only the components for enabled widgets are loaded.
+  - **AI Integrity:** The `jsonRender` catalog validates referenced components at load time to fail closed on missing widgets (not a cryptographic proof system).
+
+### 2.4 Core Utilities Standardization (March 2026)
+
+To support the UI migration and global dynamic content, SveltyCMS standardized its core utility belt:
+
+- **`cn`**: High-performance Tailwind class merging (powered by `tailwind-merge` and `clsx`) resolving "ESM Storms" in UI components.
+- **`pluralize`**: A dynamic, runtime counterpart to Paraglide JS, leveraging `Intl.PluralRules` to accurately pluralize Arabic, Russian, and English database content (which cannot be pre-compiled).
+- **`slugify`**: Advanced Unicode normalization engine capable of safely trans-literating complex diacritics into URL-safe identifiers.
+
+## 3. Performance & Competitive Analysis
+
+### 3.1 Competitive Feature Matrix (2026)
+
+The following matrix evaluates core engineering implementations where SveltyCMS provides a distinct technical advantage over legacy and contemporary competitors.
+
+| Feature             | SveltyCMS (v2026)                                    | Strapi 5          | Payload 3.0        | Directus 11       | Sveltia CMS       |
+| :------------------ | :--------------------------------------------------- | :---------------- | :----------------- | :---------------- | :---------------- |
+| **Core Framework**  | **Svelte 5 (Runes)**                                 | React             | Next.js / React    | Vue / Node.js     | Svelte (SPA)      |
+| **Architecture**    | **Server-First (SSR)**                               | Node.js / React   | Next.js / React    | Node.js / Vue     | Git-based (Local) |
+| **Multi-Tenancy**   | **Native Adapter-Level**                             | Paid (Enterprise) | Plugin-based       | Native            | N/A               |
+| **Slug Uniqueness** | **Tenant-Scoped (Native)**                           | Global Only       | Global Only        | Manual Config     | Locale-Agnostic   |
+| **AI Architecture** | **Local (Ollama) + Cloud + Client‑Side (LiteRT.js)** | Cloud Only (Paid) | MCP Native (Cloud) | Cloud Only (Paid) | N/A               |
+| **Dual-Runtime**    | **✅ Dual-Adapter (Node.js + native Bun.serve)**     | Node.js only      | Node.js only       | Node.js only      | Browser Only      |
+| **Real-time Sync**  | **SSE + Yjs (adapter-node compatible)**              | WebSockets        | None / Custom      | WebSockets        | Git Pull/Push     |
+
+| Feature              | SveltyCMS (v2026)           | Strapi 5           | Payload 3.0     | Directus 11        | Sveltia CMS   |
+| :------------------- | :-------------------------- | :----------------- | :-------------- | :----------------- | :------------ |
+| **Cache Repair**     | **Smart / Incremental**     | Manual Clear       | Manual Clear    | Manual Clear       | Browser Only  |
+| **SDK Latency**      | **Zero (Local Bridge)**     | 2–5ms (Local HTTP) | ~1ms (Direct)   | 3–8ms (Local HTTP) | N/A           |
+| **Negative Caching** | **Bloom Filter (100,000x)** | None / DB query    | None / DB query | None / DB query    | N/A           |
+| **SEO Redirects**    | **0.92 ms (Sub-MS)**        | ~45 ms (Plugin)    | ✅ Plugin       | ⚠️ Basic           | ⚠️ Basic      |
+| **Toolchain**        | **Vite + oxlint/oxfmt**     | Vite (JS/TS)       | Vite (JS/TS)    | Vite (JS/TS)       | Rolldown/Vite |
+
+| Feature                    | SveltyCMS (v2026)                               | Strapi 5            | Payload 3.0  | Directus 11  | Sveltia CMS |
+| :------------------------- | :---------------------------------------------- | :------------------ | :----------- | :----------- | :---------- |
+| **Scheduled Publishing**   | **✅ Adaptive Job Scheduler**                   | ⚠️ Cron Plugin      | ✅ Job Queue | ✅ Flows     | ❌          |
+| **Content Versioning**     | **✅ Revisions + Diff + Restore**               | ⚠️ Basic            | ✅ Versions  | ✅ Revisions | ❌          |
+| **Per-Field Localization** | **✅ Record<Locale,string> + AI**               | ⚠️ Separate Entries | ✅           | ✅           | ❌          |
+| **Full-Text Search**       | **✅ DB-Native FTS (Zero Deps)**                | ⚠️ Plugin           | ⚠️ Plugin    | ⚠️ Plugin    | ❌          |
+| **Crypto-Chained Audit**   | **✅ SHA-256 Tamper-Evident**                   | ❌                  | ❌           | ❌           | ❌          |
+| **Smart CMS Migration**    | **✅ AI-Smart 5-Format Importer**               | ❌                  | ❌           | ❌           | ❌          |
+| **Cold Start UX**          | **✅ Progressive / gated init (self-measured)** | ⚠️ Spinner          | ⚠️ Spinner   | ⚠️ Spinner   | ✅ Local    |
+| **Quick-Start Templates**  | **✅ 7 Presets (Website Starter default)**      | ❌                  | ❌           | ❌           | ❌          |
+| **In-Repo Site Frontend**  | **✅ SvelteKit + Svedit at `/`**                | ❌ (bring your own) | ❌           | ❌           | ⚠️ Git-only |
+| **Behavioral Learning**    | **✅ Server-side, zero PII**                    | ❌                  | ❌           | ❌           | ❌          |
+| **AI Widget Scaffolder**   | **✅ LLM-ready code generation**                | ❌                  | ❌           | ❌           | ❌          |
+| **Token Security**         | **✅ SHA-256 all adapters**                     | ⚠️                  | ⚠️           | ⚠️           | ❌          |
+
+### 3.2 Competitive Benchmark Analysis (2026)
+
+See [Competitive Comparison](./competitive-comparison.mdx#-competitive-context--is-sveltycms-really-that-fast) for the full benchmark matrix — 60 tests across 4 databases under extreme concurrent load, with per-adapter throughput, Local SDK, and competitor comparisons (Payload, Directus, Strapi, Drupal, WordPress).
+
+#### What our benchmarks actually show (not a global ranking)
+
+We do **not** claim global product speed leadership. Public competitor numbers rarely use the same hardware, dataset, or middleware stack. Below is **self-measured** behavior only.
+
+| Layer                             | Self-measured order of magnitude (2026)                   | Caveat                                             |
+| :-------------------------------- | :-------------------------------------------------------- | :------------------------------------------------- |
+| **LocalCMS / in-process SDK**     | Sub-0.1 ms class internal calls when L1-hot               | Not comparable to another product’s HTTP API RPS   |
+| **SQLite adapter FIND ONE**       | **~0.05–0.08 ms** avg (2026-08-04 re-bench)               | Embedded; no network RTT                           |
+| **Networked adapter FIND/INSERT** | **~0.5–2+ ms** avg on local Docker (PG/Maria/Mongo)       | Dominated by loopback RTT + engine                 |
+| **`findPage` vs list+count**      | **~1.6–5.7×** fewer ms on dual-query path (same re-bench) | Product API change; call sites must use `findPage` |
+| **Count L1 cache hit**            | **~0.024–0.029 ms** all engines                           | **`count` only**, not full list JSON               |
+| **Count estimate (unfiltered)**   | **~3–10×** vs exact when mode allows                      | Never used for tenant-scoped exactness             |
+
+Full tables: [Performance Architecture](../reference/database/performance-architecture.mdx#product-layer-list--count-equal-on-all-engines) · matrix: [Benchmarks](./benchmarks/index.mdx) · buyer framing: [Competitive Comparison](./competitive-comparison.mdx).
+
+#### Understanding Executive Latency Uniformity Across Adapters
+
+It is entirely normal and expected for raw CRUD execution matrices to look nearly identical for individual operations within a single database dialect (e.g., PostgreSQL `FIND ONE` at ~0.85ms vs `UPDATE` at ~2.15ms across runs). This occurs because:
+
+1. **Network RTT & Loopback IPC Overhead**: Under local containerized testing (Docker), loopback socket traversal and TCP handshake serialization impose a fixed **0.4–0.8ms latency floor** regardless of query complexity.
+2. **Standardized Drizzle SQL Generation**: The unified Drizzle AST compiler emits identical SQL query structures for single-record lookups across all relational adapters.
+3. **Hardware Engine Isolation**: Below the `hooks.server.ts` middleware pipeline, raw adapter performance reflects the underlying database engine's storage locks (e.g. WiredTiger in Mongo, InnoDB in MariaDB, WAL in SQLite).
+
+> **Reproduce locally:**
+>
+> ```bash
+> bun test tests/benchmarks/database-performance.test.ts
+> BENCHMARK_RECORD=1 bun test tests/benchmarks/database-performance.test.ts
+> bun run scripts/benchmark-matrix/index.ts --sql
+> ```
+>
+> **8 database reports** available at `docs/project/benchmarks/benchmark_<db>.mdx` with educational context (Measures/Budget/Code/Why), trend labels, and root cause insights.
+
+### 3.3 June 2026 Enhancement Sprint — Closing the Feature Gap
+
+In June 2026, SveltyCMS shipped a large feature sprint aimed at **parity on commonly requested enterprise surfaces** (scheduling, importer, media, etc.) relative to public competitor docs — not a claim of absolute feature superiority.
+
+#### Scheduled Publishing — Now Production-Ready
+
+The existing `svelty_jobs` table infrastructure was completed with a lightweight **adaptive job scheduler** (`src/services/scheduler.ts`):
+
+- **Adaptive Polling**: 1-second intervals when jobs are pending, 30-second idle intervals — sub-0.1ms CPU per poll cycle
+- **Status Transitions**: Automatic draft→publish, publish→unpublish, and scheduled delete execution
+- **Exponential Retries**: Failed jobs retry with backoff (2^n seconds), max 3 attempts before permanent failure
+- **Audit Integration**: Every job execution creates a crypto-chained audit log entry
+- **API Management**: Full CRUD via `POST/DELETE /api/system-jobs` for programmatic scheduling
+- **UI Integration**: Right sidebar "Schedule publication" creates real executable jobs with cancel support
+
+This replaces the previous vaporware implementation where the schedule modal set a `_scheduled` timestamp but nothing ever executed it.
+
+#### Per-Field Content Localization with AI Translation
+
+Moved from document-level i18n to **per-field Record<Locale, string>** storage:
+
+- Each translated field stores all language variants in a single document: `{ en: "Hello", de: "Hallo", fr: "Bonjour" }`
+- **Inline Locale Switcher**: Per-field `[EN ▼]` badge cycles through available locales without affecting other fields
+- **Scoped Remounting**: Svelte 5 `{#key fieldName:locale}` ensures only the switched field's widget remounts
+- **AI Translate Button**: One-click field translation via the AI/MCP infrastructure with caching, rate limiting, and audit logging
+- **Legacy Auto-Migration**: Existing single-string translated fields automatically wrap into locale records
+- **Progress Tracking**: Updated `translationProgress` store with per-field per-locale granularity
+
+#### Crypto-Chained Audit Logs (SHA-256 Tamper-Evident)
+
+Extended the audit_logs schema across all 4 database adapters with cryptographic integrity:
+
+- **Hash Chain**: Each entry gets `previousHash` (SHA-256 of prior entry) and `chainHash` (SHA-256 of self + previousHash)
+- **CSPRNG-Compliant**: Uses `globalThis.crypto.subtle.digest('SHA-256')` — no Math.random() fallback
+- **Chain Verification**: `verifyChain()` walks the full audit trail and detects tampering, deletion, or reordering
+- **Per-Content Viewer**: New `AuditHistory` component with visual chain indicator and "Verify Chain" button
+- **Enterprise Compliance**: SOC 2, ISO 27001, GDPR Article 30 ready — verifiable proof no logs were tampered
+
+#### Full-Text Search — Zero Dependency
+
+Database-native FTS across all adapters with no additional npm packages:
+
+- **PostgreSQL**: `tsvector`/`tsquery` with weighted column ranking (title:A, content:B, description:C)
+- **MariaDB**: `MATCH...AGAINST IN BOOLEAN MODE` with FULLTEXT indexes
+- **SQLite**: FTS5 virtual tables with BM25 ranking
+- **MongoDB**: `$text` index with field weights
+- **Graceful Fallback**: `ILIKE`/`LIKE` pattern matching when FTS not configured
+
+#### Smart AI-Driven Migration Pro v2.1
+
+Universal migration pipeline (v2.1, June 2026) — **40+ CMS platforms**, 5-step visual wizard rendered via plugin workspace overlay (`?plugin=smart-importer`), accessible from the Config grid tile:
+
+- **40 Platform Parsers**: WordPress (WXR XML), Drupal (JSON:API/YAML/CSV), Contentful, Sanity, Strapi, Directus, Payload, Storyblok, Prismic, Shopify, Magento, PrestaShop, OpenCart, Ghost, Webflow, HubSpot, Wix, Squarespace, Duda, Tilda, Builder, Joomla, TYPO3, Craft, Statamic, Grav, and 12 PHP CMS + 4 headless SaaS + SveltyCMS native + 9 universal formats (CSV, Markdown, SQL, API, JSON, Airtable, Notion, Firebase, MongoDB)
+- **5-Step Wizard**: Upload & Detect → Visual Mapping (`TransformationTree`) → Validate (schema diff + dry-run) → Import (SSE `/api/migration/import`) → Review & Rollback
+- **Enterprise-Grade Features**: Forward-reference auto-stubbing (circular dependency healing), deep JSONPath resolution, schema diff previews (Git-style), in-body media harvesting & CDN replacement, cyclic dependency resolution (DFS topological sort), direct DB cursor streaming
+
+- **Auto-Scaffold**: `collection-scaffold.ts` provisions missing collections via Collection Builder pipeline; wizard button + auto-provision on import
+- **Infer Collection Names**: `infer-collection.ts` sets target collection from source content types (`wp:post_type` → `post`); user can override. Multi-type selection imports into one collection — primary type wins by entry frequency
+
+- **98 Unit Tests**: Full pipeline tests covering parse → ingest → verify → rollback, conflict strategies, schema scaffolding, PII scrubbing, AI health scoring, wizard mappings, content filtering, dependency ordering
+- **Shared Orchestration**: `import-runner.ts`, `known-mappings.ts`, `mapping-tree.ts`, delta engine, PII scrubbing (Pro), background queue at 500+ entries
+- **Freemium Model**: 5 platforms + 9 universal formats free; 31 additional platforms + enterprise features (rollback, delta, PII, webhooks, audit logs) via marketplace license
+- **Full Media Parity**: `migrated-media.server.ts` + `saveResizedImages` variants; respects `MEDIA_OUTPUT_FORMAT_QUALITY`
+
+- **CLI**: `migrate import` / `scaffold` / `delta` / `rollback` / `validate` wired through `runMigrationImport` with auto-scaffold
+- **E2E**: Full import cycle verified — WXR upload → import → `GET /api/collections/{id}` entry assertion
+- **Docs**: `src/plugins/smart-importer/smart-importer.mdx`; platform guides for Drupal and WordPress
+
+#### Collection Builder Quick-Start Templates
+
+7 setup presets — **Website Starter** is the recommended default; five additional content templates ship full schemas:
+
+- **Website Starter** _(default, recommended)_: `pages` collection, Svedit homepage at `/`, Editable Website trial auto-enabled
+- **Blog/Editorial**: Posts, Categories, Authors with SEO and Rich Text
+- **Agency/Portfolio**: Projects, Services, Team with media and testimonials
+- **SaaS Product**: Features, Pricing, Documentation with multi-tenant support
+- **Corporate Site**: Team, Careers, Press with locations
+- **E-commerce**: Products, Categories, Orders with variants, inventory, CRM
+- **Blank**: Clean slate for pure headless or custom frontends
+
+#### Website Starter + Svedit (July 2026)
+
+Default onboarding path for SvelteKit teams — headless-capable, same-repo public frontend:
+
+- **Public routes**: `src/routes/(site)/` — SSR homepage (`slug: home` → `/`) and catch-all pages; guests see published content, authenticated editors redirect to CMS
+- **Svedit rendering**: `svedit@0.12.0` — block components (hero, paragraph, CTA) in `src/components/site/svedit/`; `page-renderer.svelte` is Svedit-first with flat-field fallback
+- **Seeding**: `seedWebsiteStarterPages()` publishes default Svedit document; `seedWebsiteStarterBlueprint` shared by setup + testing API
+- **Headless toggle**: `SITE_STARTER_ENABLED` (public, default `true`) — set `false` for API-only deployments
+- **Monetization split**: CMS form + Svedit JSON saves are **free**; **Editable Website** plugin (€14.99, 14-day trial) gates Live Preview iframe sync and inline click-to-edit only
+- **Testing**: 15 unit tests (Svedit helpers, homepage seed, preview utils, license gate, protocol), website preset integration, `site-starter.spec.ts` E2E smoke
+
+See [Site Starter](/docs/development/site-starter.mdx) and [Live Preview Architecture](/docs/reference/architecture/live-preview-architecture.mdx).
+
+#### Cold Start & Progressive Initialization UX
+
+The system uses synchronous initialization in the middleware pipeline:
+
+- **Zero-Tax Init**: `handleSystemState` waits synchronously for DB on the first request, then proceeds inline — no intermediate page or polling
+- **Page-Level Redirects**: `[language]/+page.server.ts` detects empty collections and redirects directly to Collection Builder
+- **Error Resilience**: Restricted states (`MAINTENANCE`, `FAILED`) render the standard SvelteKit error page with actionable messaging
+
+#### Auth Expansion — API Keys, Magic Links, Guest Auth, WebAuthn/Passkeys
+
+Closed the remaining auth surface gaps to match and exceed enterprise CMS platforms (based on publicly available documentation as of June 2026):
+
+**API Keys (Machine-to-Machine Auth)**
+
+- `sck_*` prefix bearer tokens with SHA-256 hashed storage — plaintext never persisted
+- `generateApiKey()` returns plaintext once; `createApiKey` / `revokeApiKey` / `listApiKeys` across all 4 DB adapters
+- Admin REST API: `GET/POST/DELETE /api/api-keys` with owner-or-admin enforcement
+- Credential cache: hash-keyed `SESSION` category entries with tag invalidation (`apikey:{sha256-b64url}`)
+- Cache purge on revoke: `invalidateApiKeyAuth()` clears both L1/L2 and tag buckets immediately
+- Dispatcher wired via `hasApiPermission()` + `api:api-keys` permission
+
+**Magic Links (Passwordless Auth)**
+
+- `sendMagicLinkForEmail()` creates single-use `type: "magic_link"` token with short TTL
+- `verifyMagicLink()` atomically consumes token and creates session (TOCTOU guard)
+- Remote function `requestMagicLink` wired in `auth.remote.ts`; Magic Link tab in `sign-in.svelte`
+- Every request and verification audit-logged with crypto-chained entry
+
+**Guest / Anonymous Auth**
+
+- Ephemeral `ANONYMOUS_USER` assigned on public routes when no session or bearer token present
+- `guest` role with read-only permissions (`content:read`, `media:read` only)
+- Stateless — no session created, no cookie, transparent upgrade on real authentication
+
+**WebAuthn / Passkeys (Biometric Auth — ~75%)**
+
+- `webauthn-service.ts`: challenge generation, RP ID validation, credential verification
+- `attestation.ts`: COSE key → JWK conversion, assertion signature verification
+- `cbor-decoder.ts`: CBOR binary parsing for `navigator.credentials` responses
+- Remote functions: `getPasskeyAuthOptions` / `verifyPasskeyAuth` (login), `getPasskeyRegisterOptions` / `verifyPasskeyRegister` (registration)
+- Passkey button on sign-in form; `Authenticator` schema on User across all adapters
+- Unit tests: `webauthn-cbor` (7 pass), `webauthn-attestation` (4 pass)
+- Pending: settings-page UI for managing registered passkeys
+
+**Authentication test suite**: 32 auth expansion-specific tests + 68 defense-in-depth security regression tests — all passing.
+
+#### SSRF IPv6 Transition Address Blocking
+
+Extended the egress guard (`src/utils/egress-guard.ts`) and cloud storage endpoint validator (`src/utils/media/cloud-storage.ts`) to block IPv6 transition/embedding mechanisms that previously bypassed IPv4 deny lists:
+
+- **IPv4-Mapped IPv6** (`::ffff:0:0/96`): Blocks `::ffff:127.0.0.1` and similar addresses that embed private IPv4 ranges in IPv6 space — previously could reach local services through webhook/automation paths
+- **6to4** (`2002::/16`): Blocks 6to4-encapsulated IPv4 traffic
+- **Teredo** (`2001::/32`): Blocks Teredo NAT-traversal tunnels
+- **Bare IPv6 Detection**: `isBlockedHostname()` now handles IPv6 addresses without bracket notation (e.g., bare `::1` or `fe80::1%eth0` with zone IDs)
+
+This closes a critical SSRF bypass vector where `http://[::ffff:127.0.0.1]:27017/` could previously reach a local MongoDB instance through any admin-configured fetch path (importers, webhooks, automations, AI calls).
+
+#### Binary MIME Sniffing for Large File Uploads
+
+The media service (`src/utils/media/media-service.server.ts`) previously trusted the client-declared `file.type` for all uploads ≥5MB, relying on the stream path for large files. This opened a MIME-type spoofing vector:
+
+- **Small files (<5MB)**: Already used `arrayBuffer()` → `Buffer.from()` → `sniffMimeType(buffer.subarray(0, 2048))` for binary signature verification
+- **Large files (≥5MB)**: Added `file.slice(0, 2048).arrayBuffer()` → `sniffMimeType()` before stream processing — rejects major MIME category mismatches (e.g., client sends `image/png` but binary signature indicates `application/pdf`)
+- Uses the lightweight `slim-sniffer.server.ts` (~2KB, zero dependencies) which detects 10+ formats via magic bytes (JPEG, PNG, GIF, WebP, SVG, MP4, WebM, PDF, DOCX)
+- SVGs additionally sanitized via dedicated `sanitizeSvg()` function
+
+#### Email Normalization Utility
+
+Created a dedicated `normalizeEmail()` utility (`src/utils/normalize-email.ts`) providing proper email normalization:
+
+- **Unicode NFC Normalization**: Prevents homoglyph bypass attacks where visually identical Unicode characters resolve to different code points
+- **Whitespace Trimming**: Both leading/trailing and after normalization
+- **Case-Folding**: Consistent lowercase conversion
+
+Applied across all 5 auth adapters, replacing 13 raw `.toLowerCase()` call sites in MongoDB, relational, and token auth modules. The old `.toLowerCase()` approach did not handle Unicode normalization, meaning an attacker registering with `"user@example.com"` (using a Unicode homoglyph) could create a separate account from the legitimate `"user@example.com"`.
+
+#### Draft Relation Validation Before Publish
+
+The scheduled publish handler (`src/services/background/jobs/scheduled-jobs.ts`) previously transitioned entries from `draft` to `publish` status without validating relation field targets:
+
+- **Pre-Publish Scan**: Before publishing, the handler fetches all content nodes and builds a `nodeStatusById` status map
+- **Relation Field Inspection**: Scans each node's `data` field for values matching MongoDB ObjectId patterns (24-char hex), covering relation fields storing `string | string[]` entry IDs
+- **Guard**: If any referenced entry is still in `"draft"` status, the publish is skipped with a logged warning
+- **Cache Invalidation**: After each successful publish, `cacheService.invalidateCollection()` is called to prevent stale relation data from being served via the GraphQL `publicationFilter` cache
+
+This prevents broken front-end experiences where an entry is published but references content not yet visible to visitors.
+
+#### Cache Invalidation on Scheduled Publish
+
+The background job scheduler (`scheduled-jobs.ts`) previously bypassed the SDK's cache invalidation by calling `db.content.nodes.update()` directly, leaving cached responses stale:
+
+- **Automatic Invalidation**: After each successful scheduled publish transition, calls `cacheService.invalidateCollection()` on the affected collection
+- **Scope**: Clears all cached entries for that collection across L1 (in-memory LRU) and L2 (Redis) cache layers
+- **Impact on GraphQL**: Without this invalidation, GraphQL queries using `publicationFilter` would continue serving cached results that don't reflect the newly published state — visitors would not see published content until the TTL expired or an admin manually cleared the cache
+
+#### Row ID Regeneration in Bulk Updates
+
+Created `copyDataWithFreshRowIds()` utility (`src/utils/data/copy-data-with-fresh-ids.ts`) to prevent key conflicts in array/repeater data during bulk operations:
+
+- Recursively walks nested structures (repeaters inside repeaters)
+- Regenerates `_dndId`, `_rowId`, `uuid`, and `key` identifiers using `crypto.randomUUID()` (Web Crypto API)
+- Preserves all data shape and values — only internal row identifiers are refreshed
+- Applied in the SDK `collections-namespace.ts` `bulkUpdate()` method
+
+Without this regeneration, reused array/block rows from Repeater/Group widgets would retain their old IDs during bulk updates, causing duplicate `_dndId` values across multiple entries — leading to silent DnD reorder corruption and duplication bugs in dynamic zones.
+
+#### MongoDB Batch Update Ordering
+
+Changed MongoDB batch-module `bulkWrite` from `{ ordered: false }` to `{ ordered: true }` (`src/databases/mongodb/batch-module.ts`):
+
+- **Previous behavior**: `{ ordered: false }` allowed MongoDB to process bulk operations in any order, causing a read-order ≠ write-order mismatch when revision sequencing depends on update sequence
+- **Current behavior**: `{ ordered: true }` preserves input order, ensuring counter-based version fields and sequential updates are written in the expected sequence
+- **Performance impact**: Negligible — MongoDB still batches internally regardless of the ordered flag
+- **SQLite**: Already uses a transaction with sequential `for...of` processing, so no change needed
+
+#### Lazy Chunk Retry for Admin Dashboard
+
+Created `retryDynamicImport()` utility (`src/utils/retry-dynamic-import.ts`) to recover from transient chunk load failures in the admin UI:
+
+- **Exponential backoff**: `baseDelay × 2^attempt` (1s, 2s, 4s) with jitter (`+random(0, 200ms)`) to avoid thundering herd on chunk servers
+- **Configurable**: `maxRetries` (default: 3), `baseDelayMs` (default: 1000), optional fallback value on permanent failure
+- **Integration**: Applied to dashboard widget dynamic imports in `src/routes/(app)/dashboard/+page.svelte`, wrapping `import.meta.glob` widget resolvers
+- **Error UX**: Failed chunk loads display a toast notification via the existing `setupErrorBoundary()` (catches global `unhandledrejection` events)
+
+This prevents the dashboard from showing broken widget areas when a CDN chunk encounters a load failure due to network instability during deployment rollouts or cache evictions.
+
+#### Data Operations — 6-Domain Architecture (July 2026)
+
+SveltyCMS now provides a complete data operations system organized into six separate API domains, replacing the previous placeholder `/api/config_sync` endpoint with a professional, security-hardened architecture:
+
+**Six Operational Domains:**
+
+| Domain                  | API Namespace                                    | Service                               | Purpose                                                                                                                                                            |
+| :---------------------- | :----------------------------------------------- | :------------------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Configuration Promotion | `/api/config/*`                                  | `ConfigService` (1,066 lines)         | Plan-first promotion of collections, roles, permissions, settings, widgets, themes, webhooks, automations between environments with checksum-based drift detection |
+| Content Packages        | `/api/content-export/*`, `/api/content-import/*` | `ContentPackageService` (1,133 lines) | NDJSON streaming export/import with 4 duplicate strategies (skip/update/create-copy/fail), relation remapping, and media reference maps                            |
+| Data Migrations         | `/api/migrations/*`                              | `MigrationEngine` (984 lines)         | Idempotent schema/data transformations with planHash deduplication, cross-adapter locking, risk scoring (safe/warning/destructive), and checksummed ledger         |
+| External Importers      | `/api/importers/*`                               | Smart Importer plugin                 | Multi-format auto-detection (WordPress, Drupal, CSV, JSON, Directus, Strapi, Payload) with heuristic field mapping, scaffold mode, and SSE streaming               |
+| Backups & Restore       | `/api/backups/*`                                 | `BackupService` (1,770 lines)         | Manifest + SHA-256 integrity, AES-256-GCM encryption, restore-plan dry-run, maintenance-lock-gated restore, tenant isolation                                       |
+| Content Sync            | `/api/content-sync/*`                            | `ContentSyncService` (785 lines)      | Channel-based cross-environment sync, PII anonymization for production-to-dev pulls, disabled-by-default safety, conflict review before writes                     |
+
+**Key architectural decisions:**
+
+- **Fail-closed permissions**: Each namespace has granular read/write/apply permission mappings in the API dispatcher. Unmapped namespaces return 403 by default.
+- **Plan-first safety**: All mutating operations follow a validate → snapshot → plan → confirm → lock → apply → audit → verify → release lifecycle.
+- **Adapter agnosticism**: All 5 core services use `dbAdapter.crud` exclusively — works identically on MongoDB, PostgreSQL, MariaDB, and SQLite.
+- **Webhook integration**: 15 new event types (`config.exported`, `content.import.completed`, `backup.created`, `migration.applied`, etc.) with best-effort fire-and-forget emission.
+- **GraphQL surface**: 16 types, 4 queries, 12 mutations exposing all data operations to headless consumers.
+- **LocalCMS SDK**: 6 new hot-swap lazy-loaded namespaces (`cms.config`, `cms.contentTransfer`, `cms.migrations`, `cms.importers`, `cms.backups`, `cms.contentSync`) with 0% middleware tax.
+- **89 new unit tests**: config-service (20), config-permissions (24), operation-plan (26), identity-matching (19).
+- **2 new benchmark suites**: config-promotion (297 lines, 6 scenarios) and content-package (clean REST-based, 2 scenarios — 1.12ms export, 1.01ms import).
+
+**Measured performance (SQLite):**
+
+- Config status check: 3.3ms avg, export (100 cols): 5.3ms avg, plan: 3.1ms avg, apply: 3.6ms avg
+- Content package export (100 entries): 1.12ms avg, import plan: 1.01ms avg
+- LocalCMS SDK overhead: 0.00% (lazy-loaded namespaces)
+- All operations sub-5ms, consistent with SveltyCMS performance targets
+
+### 3.4 June 2026 All-Phase Performance Optimization Sprint
+
+In mid-June 2026, SveltyCMS executed a comprehensive 19-file, multi-phase performance optimization sprint targeting every bottleneck identified by the 53-script benchmark matrix. The work was structured in phases, each addressing specific warnings from the matrix:
+
+#### Phase R1/R2 — Hot-Path Streamlining & Smart Entropy Compression
+
+- **Hook timing gate** (`HOOK_TIMING_ENABLED`): Per-request `performance.now()` + `traceSpan` + Map writes gated out in production and under `BENCHMARK=true`. `handleFnRef()` resolved once at pipeline build time instead of per-request.
+- **Pre-compressed cache entries**: On cache MISS, the API handler stores both raw body and pre-compressed Brotli/gzip variants using shared `compressSync`. On cache HIT, pre-made compressed bytes served directly when `Accept-Encoding` matches — zero re-stringify, zero re-compress.
+- **Size observability headers**: `X-Original-Size`, `X-Compressed-Size`, `X-Compression-Ratio`, `X-Compression-Algorithm` emitted on all compressed responses. Compression metrics (`compression.avgOriginalSize`, `avgCompressedSize`, `avgRatio`, `samples`) exported on every benchmark run.
+
+- **Cache clear optimizations**: Direct Set iterators replace `Array.from()` copies in bulk clears. `lastChar` check skips regex when no glob characters. `_isBulkClearing` guard defers per-key tag cleanup to post-clear batch. CDN purge fast-path caches `_cdnActive` flag, skipping dynamic import chain when no Cloudflare credentials configured.
+- **Shared compression utilities**: `setCompressionHeaders()` provides single DRY helper. `negotiateEncoding()` and `hasNativeCompression()` exported for reuse across turbo and API layers.
+
+#### Phase P1 — Audit & Turbo Optimization
+
+- **Fire-and-forget audit logging**: User context (`userId`, `tenantId`, `path`, `method`) captured before `await resolve(event)`. Audit log written in detached `Promise.resolve().then(...)`, removing synchronous `logger.info` from the mutation hot path. Measured audit overhead: **-3.57ms** (the mutation path is now faster than the full pipeline baseline).
+- **Turbo hit skip**: `__turboAuth` flag prevents double audit logging on turbo-served mutations, skipping `performance.now()` + checks entirely.
+
+#### Phase P2 — Cold Path Elimination & Cache Contention
+
+- **OpenAPI pre-warm**: `apiSpecService.generateFullSpec()` called after content initialization, eliminating ~2.2ms cold first-hit on `/api/openapi.json`.
+- **Batch tag clears**: `clearLocalL1ByTags` converted from per-key delete loop to batched collection + deferred tag cleanup, avoiding O(deleted) × O(tags-per-key) Map/Set operations during invalidation.
+
+#### Phase P3c/3a — Batch Relational Upserts (Measured: -78% to -88% latency)
+
+- **`setMany` batch upsert**: Changed from N individual `SELECT+INSERT/UPDATE` loops to single `INSERT ... ON CONFLICT DO UPDATE` with dialect-specific conflict handling (PostgreSQL/SQLite `excluded.*`, MariaDB/MySQL `VALUES()`). During setup seeding, ~80 individual queries become 1.
+- **`bulkUpdate` multi-row batch**: Hot content sync path refactored from per-item `executeContentNodeUpsert` to `db.insert().values(preparedValuesList).onConflictDoUpdate()`. Measured results (June 14 RECORD runs):
+  - Relational deep: **3.61ms avg / 6.06ms p95** (-88% avg, -86% p95)
+  - Relational shallow: **6.68ms avg / 10.71ms p95, 146 RPS** (-78% avg, -75% p95, +336% RPS)
+- **Reorder transaction wrapping**: Reorder operations converted to single-transaction wrappers, eliminating per-item commit overhead.
+
+#### Phase 3b — Trained zstd Dictionary (Build-Time Artifact)
+
+_Removed_. Benchmarks showed the trained dictionary provided 0% improvement over generic Brotli at production quality levels (Brotli-4), and Node.js/Bun's zlib does not expose `BROTLI_PARAM_DICTIONARY`. Brotli's built-in sliding window already handles repetitive CMS JSON field names optimally without an external dictionary. The dictionary builder, dictionary files, and all runtime loading code have been removed.
+
+#### Enterprise Scaling Layers
+
+- **PgBouncer/ProxySQL/Nginx**: First-class documentation with inline copy-paste configs in `scaling-layers.mdx`, `DATABASE_PREPARE` flag for prepared statement control behind transaction-mode poolers, pooler URL support across PostgreSQL/MariaDB adapters, and resilience diagnostics.
+- **Composable scaling**: All layers are optional — single-node SQLite + L1 cache remains excellent for simple deployments. Add Redis for cross-node invalidation, PgBouncer for Postgres connection multiplexing, Nginx for TLS termination and static offload.
+
+#### Measured Results (BENCHMARK_RECORD=1, June 14 2026)
+
+| Hot Path                    | Pre-Fix                                 | Post-Fix                           |                                               Gain |
+| :-------------------------- | :-------------------------------------- | :--------------------------------- | -------------------------------------------------: |
+| Relational deep population  | ~30ms (N+1 estimate)                    | 3.61ms avg                         |                                 -88% avg, -86% p95 |
+| Relational shallow          | ~30ms (N+1 estimate)                    | 6.68ms avg, 146 RPS                |                                -78% avg, +336% RPS |
+| Setup seeding (round-trips) | ~80 individual queries                  | 1 batch query                      |                                   -98% round-trips |
+| Mutation + Audit            | Blocking sync logger.info               | 1.90ms avg, audit overhead -3.57ms |                          Audit blocking eliminated |
+| Cache HIT (pre-compressed)  | Re-stringify + re-compress              | Pre-made bytes served              | Avoids re-compress CPU on matching Accept-Encoding |
+| Cache clear (bulk)          | Array.from copy + inline Map/Set        | Iterator + deferred batch          |                                   ~3-5× less alloc |
+| CDN purge (no CDN)          | dynamic import chain every invalidation | Single boolean check               |                                ~100× less overhead |
+| OpenAPI cold first-hit      | ~2.2ms on-demand                        | 0ms (pre-warmed)                   |                                         Eliminated |
+
+> [!NOTE]
+> **Methodology**: All gains measured via `BENCHMARK_RECORD=1` on Intel i7-13700H, 32GB DDR5, Windows 11, Bun 1.3.14, SQLite WAL mode. Reproduce with `bun run scripts/benchmark-matrix/index.ts --sql`.
+>
+> Pre-fix relational estimates based on N individual SELECT+UPSERT round-trips vs 1 batch query. Gains are targeted and path-specific; full mixed-workload numbers reflect heavier 53-script methodology with real seeding vs lighter historical baselines.
+>
+> **Knowledge-limited claim:** As of June 2026, we have not found public documentation of the **same combination** of batch-relational upserts + trained compression dictionary in the three competitors we track. Other products may implement similar techniques without documenting them.
+
+#### June 20 Stability & Security Hardening
+
+Beyond raw speed, the June 20 sprint focused on **provable stability under sustained load** — the hardest class of bugs to detect and the most damaging in production.
+
+**The Soak Test: Proof of Production-Grade Stability**
+
+The longevity soak test runs a sustained mixed workload (health checks, collection listing, entry reads, schema resolution) at 4 concurrent workers for configurable durations (5 minutes in CI, 4+ hours locally). Unlike snapshot benchmarks that measure a single operation, the soak test reveals **trends over time**:
+
+| Metric         | 5-Minute Soak Result  | What It Proves                                                                                                   |
+| :------------- | :-------------------- | :--------------------------------------------------------------------------------------------------------------- |
+| Total Requests | 8,989                 | Zero crashes under sustained load                                                                                |
+| Errors         | 0                     | No 500s, no timeouts, no connection drops                                                                        |
+| RSS Memory     | 351 → 312 MB (−39 MB) | The garbage collector outruns allocation — memory pressure **decreases** over time, not increases                |
+| Heap Slope     | −0.3 MB/min           | No object leak. A positive slope (>1.0 MB/min) would indicate accumulating references the GC can't free          |
+| Latency Drift  | −0.6 ms/min           | The system gets **faster** under load — JIT warmup and cache population improve response times, not degrade them |
+
+> **Why this matters**: Most systems exhibit positive memory growth under load (slow leaks from unclosed file handles, event listeners, promise chains). A system that _shrinks_ under sustained load has proven its GC hygiene — every allocation is paired with proper cleanup.
+>
+> The negative latency drift is an additional signal: the JIT compiler, connection pool warmup, and L1/L2 cache population all compound to make the system _more_ efficient the longer it runs.
+
+**Additional stability proofs from the same sprint:**
+
+| Test                       | Result                                                     | Significance                                                                                                            |
+| :------------------------- | :--------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------- |
+| Database Failover (SQLite) | 78ms reinitialize recovery                                 | The self-healing state machine restores full service in under 100ms after a simulated disconnect                        |
+| Large Payload Streaming    | 333 MB/s upload, STREAMING verdict                         | 5-10MB file uploads stream without buffering the entire payload — RSS delta stays under 6× file size                    |
+| SqlAdapterCore Refactor    | 1,644 lines eliminated (−30.6%)                            | Three SQL adapter cores consolidated into a shared abstract base class; all 1,152 unit tests pass with zero regressions |
+| Security Hardening         | 4 fixes (2 CRITICAL token-hashing, 2 HIGH race conditions) | Website and auth tokens now SHA-256 hashed across all adapters; atomic consumeToken with TOCTOU guard                   |
+
+**Knowledge-limited:** As of June 2026, we have not found **public** multi-hour memory-stability benches with regression leak detection from the headless CMS projects we track. Absence of public docs is not proof competitors lack internal testing.
+
+#### June 20 AI Intelligence & Ecosystem Hardening
+
+The June 20 sprint delivered the **intelligence layer** that moves SveltyCMS from a passive content engine to an active learning platform — and the **marketplace ecosystem** that closes the plugin gap.
+
+**Behavioral Learning Engine (Active)**
+
+A lightweight, zero-latency server-side learning system that tracks editor access patterns. All tracking is server-side only (no browser JS, no cookies), tenant-isolated, and contains zero PII.
+
+| Capability               | API                        | Latency   |
+| :----------------------- | :------------------------- | :-------- |
+| Collection heat tracking | `recordCollectionAccess()` | < 0.001ms |
+| Entry access tracking    | `recordEntryAccess()`      | < 0.001ms |
+| Navigation prediction    | `predictNextPath()`        | < 0.05ms  |
+| Hot collection query     | `getHotCollections()`      | < 0.05ms  |
+
+Downstream consumers already wired: adaptive cache warming, smart prefetch hints in the layout template, and dashboard widget reordering by actual usage frequency.
+
+**AI Widget Scaffolder & Marketplace**
+
+Two complementary paths to extend the CMS — no waiting for community plugins:
+
+| Path                | Mechanism                                                        |
+| :------------------ | :--------------------------------------------------------------- |
+| Marketplace Install | Browse `marketplace.sveltycms.com` → one-click `installPlugin()` |
+| AI Scaffolder       | Describe → `scaffoldWidget(config)` → 3 production-ready files   |
+
+The marketplace exposes a REST API + License v1 (`POST /api/v1/license/verify`) for plugin discovery, download, and license verification. The scaffolder generates Svelte 5 runes + Tailwind v4 + WCAG 2.2 AA widgets from a simple config object — ideal for LLM-generated prompts.
+
+**Knowledge-limited (June 2026 public docs):** Server-side behavioral learning + LLM widget scaffolding + hosted marketplace license verify is a combination we document for SveltyCMS. SaaS CMSs may offer overlapping AI/marketplace features under different packaging; this is not an exclusivity claim.
+
+#### August 2026 — Marketplace Phase 2: In-App Catalog & Dashboard Widget Packages
+
+The August sprint turned dashboard widgets into a marketplace-ready extension surface and shipped the in-app catalog: **Extensions → Marketplace** tab backed by `GET /api/marketplace` with an **offline-first merge** — local themes and dashboard widget packages always appear when marketplace.sveltycms.com is unreachable.
+
+**Dashboard widgets as packages**
+
+- Each widget ships in its own kebab-case folder: `widgets/<folder>/<component>.svelte` + a required `widget.json` manifest (id, name, license, price, defaultSize) + a required `.mdx` marketplace description. Discovery stays compile-time (`import.meta.glob`) — zero runtime FS scans, lazy chunks only.
+- `installDashboardWidget()` writes a package into the widgets folder; saved layouts keep working because the component filename (not the folder) is the registry key.
+- The Marketplace tab filters by type (incl. `dashboard`) and shows license/price badges sourced from the manifests.
+
+**Licensing — consistent with widgets, plugins, and the site starter**
+
+| Model        | Behavior                                                                | Examples                                                                   |
+| :----------- | :---------------------------------------------------------------------- | :------------------------------------------------------------------------- |
+| **Free**     | Bundled/community packages, no gates                                    | System Health, CPU, Media Storage                                          |
+| **Freemium** | 14-day key-less trial; premium features gate on `checkExtensionLicense` | Audit Log (€24.99), Unified Metrics (€14.99), Logs (€6.99), Smart Importer |
+| **Paid**     | License required; upgrade prompt otherwise                              | SCIM Status (€12.99), Editable Website (€14.99)                            |
+
+Enforced on **both** sides, mirroring custom widgets and plugins:
+
+- **Client-side**: each widget checks `/api/system/license-status?type=dashboard&id=<id>` and renders an upgrade prompt when the trial expired without a key.
+- **Server-side**: premium dashboard endpoints call `checkExtensionLicense("dashboard", widgetId)` and return `403 LICENSE_REQUIRED` when the check fails (see [license-endpoint-inventory](../reference/security/license-endpoint-inventory.mdx)) — premium data is never served without entitlement, matching the plugin lifecycle-hook pattern.
+
+**Knowledge-limited (August 2026 public docs):** package-folder distribution with required manifests + two-sided license gates for dashboard widgets is what we document for SveltyCMS; other CMSs may ship similar marketplace packaging under different terms. This is not an exclusivity claim.
+
+### 3.4.1 LiteRT.js AI Client — Client-Side Browser Inference (July 2026)
+
+SveltyCMS integrated [LiteRT.js](https://developers.googleblog.com/litertjs-googles-high-performance-web-ai-inference/) (Google's high-performance Web AI runtime, announced July 9, 2026) for **client-side ML inference** — entirely in the browser, with zero server cost and zero data egress.
+
+**Architecture decision:** LiteRT.js runs in a dedicated Web Worker served from `/ai/worker` with its own relaxed CSP. The admin page security headers (`COOP: same-origin`, `COEP: require-corp`, `frame-src 'none'`) remain **completely untouched**. The Worker has no DOM or cookie access — it cannot XSS the admin page or steal sessions.
+
+| Property              | Implementation                                                                    |
+| :-------------------- | :-------------------------------------------------------------------------------- |
+| **Inference Runtime** | LiteRT.js WASM (~15 MB) with WebGPU primary, XNNPACK CPU fallback                 |
+| **Isolation**         | Dedicated Web Worker — separate CSP, no DOM/cookie access, typed postMessage RPC  |
+| **Fallback**          | Transparent server-side Ollama (llava / nomic-embed-text) when WebGPU unavailable |
+| **API Model**         | SvelteKit Remote Function pattern — `import { ai } from \"@services/ai-client\"`  |
+| **First Use Case**    | Alt-text generation for WCAG/ATAG compliance — `ai.generateAltText(image)`        |
+| **Lazy Loading**      | WASM runtime downloads on first inference call, not at page boot                  |
+
+**Positioning (July 2026 public docs, knowledge-limited):** SveltyCMS documents a **LiteRT.js client-side** inference path with server (e.g. Ollama) fallback. Payload / Strapi / Directus public docs we reviewed emphasize cloud API AI. Client-side inference avoids per-request cloud cost and egress for that path; latency depends on model and device (sub-200ms is a **target** for small tasks, not a guarantee).
+
+**Performance:** MobileNetV3 (4.5 MB) alt-text inference via WebGPU completes in **~150-200ms** on a 2024 MacBook Pro M4. EmbeddingGemma (18 MB) generates 384-dimensional vectors in **~300-400ms**. Both fall back to CPU (XNNPACK) in ~2× the latency, or to server-side Ollama when neither WebGPU nor WASM is available.
+
+### 3.5 June 23 Content & Media Architecture Consolidation
+
+A focused sprint to eliminate accidental complexity in the content and media subsystems while preserving all features and performance paths.
+
+**Content System (16 files → 9 files, ~200 lines removed)**
+
+- Consolidated 8 scattered modules into `engine.server.ts` (scanner + reconciliation + cache + watcher + CRUD) and `loader.server.ts` (path security + native/pooled schema loading + worker pool).
+- Single `scanCompiledCollections()` shared by Vite and runtime — fixes the old dual-scanner mismatch where Vite used a weaker implementation.
+- Unified `refreshContent({ mode: "full" | "schemas" | "incremental" })` replacing 3 scattered refresh paths.
+- Single `ensureContentInitialized()` init coordinator — stops duplicate `fullReload()` storms under concurrent requests.
+- Dead code removed: unused plugin registry, tracing helpers, `processModule()` stub (~75 lines).
+- `contentSystemBase` de-duplicated between `index.ts` and `index.server.ts` (~90 lines saved, single source of truth).
+- 20 new reconciliation unit tests (`calculateReconciledOperations`, `refreshContent` modes, shared API surface).
+- Benchmark-verified: content scan at **0.008ms** avg (150 files), stress scan at **0.044ms** warm (1,000 files).
+
+**Media System (17 files → 14 files, ~65 duplicate lines removed)**
+
+- Merged 3 duplicate modules into `media-utils.ts`: `api.ts` (fetch wrappers), `media-processing.ts` (filename sanitizer), `mime-utils.ts` (MIME table — expanded from 30 to 65 types with reverse `getExtensionFromMimeType()` lookup).
+- Wired `sharing.ts` into media handler — replaced inline crypto with `createLink()`/`validateLink()` for secure share links with expiry, password protection, IP restrictions, and download limits.
+- Wired `slim-sniffer.server.ts` as binary MIME fallback in upload flow — 2KB native magic-byte detector with zero dependencies.
+- Added 4 DAM API endpoints: bulk download (`GET /api/media/bulk-download`), storage analytics (`GET /api/media/analytics`), version list (`GET /api/media/{id}/version/list`), version compare (`GET /api/media/{id}/version/compare`).
+
+- Implemented real `parseMultipartStream` in `streaming-upload.ts` — chunk-based multipart parser for multi-GB uploads.
+- **Inline metadata editing** in `media-details-modal.svelte` — click-to-edit name, alt text, and caption directly in the media drawer.
+- 40 new unit tests: sharing (13), media-utils (15), slim-sniffer (12).
+- Benchmark-verified: media upload 10MB at **32.3ms** (310 MB/s), SDK processing at **2.7ms** (319 images/s).
+
+**Focal Point & Aspect Preview (July 2026)**
+
+- **Focal point metadata**: `CmsMediaMetadata.focalPoint` — percentage coordinate `{ x, y }` stored per image. Persisted via `PATCH /api/media/:id` (metadata-only, no re-encoding).
+- **Aspect ratio preview grid**: Pure CSS `object-fit: cover` rendering across 7 preset ratios (16:9, 3:2, 4:3, 1:1, 2:3, 9:16, 21:9). Zero canvas/WebGL overhead.
+- **Interactive focal point**: Drag the crosshair on any preview card — all ratios update simultaneously. Arrow keys for 1px steps, Shift+Arrow for 10px. Rule-of-thirds overlay guides.
+- **Plugin-gated architecture**: Core rendering component (`AspectPreview.svelte`) with opt-in plugin (`focal-point`) that injects into `media_gallery`, `image_editor_tool`, and media-upload widget zones. Plugin-disabled-by-default — zero focal point UI when off.
+- **Cross-location coverage**: Media gallery (Slot injection + focal-quick-modal enhancement), collection entry forms (aspect preview button on image cards), image editor toolbar (crosshairs button).
+- **Competitive parity**: Equivalent to Drupal's Focal Point module and Payload CMS's aspect-preview plugin — both implemented as optional extensions in their respective ecosystems.
+
+### 3.6 July 16 Media System Overhaul — Security, Types & Streaming
+
+A comprehensive audit and rewrite of the media subsystem addressing 7 critical security vulnerabilities, eliminating type-casting hacks, and implementing production-grade streaming uploads with backpressure.
+
+**Security Hardening (3 CRITICAL + 12 HIGH fixes)**
+
+| Vulnerability                                         | Class                  | Fix                                                           |
+| :---------------------------------------------------- | :--------------------- | :------------------------------------------------------------ |
+| Path traversal in `LocalStorageAdapter.getMetadata()` | Information disclosure | `resolve()` + `startsWith()` gate on all adapter methods      |
+| Path traversal in `bulk-download.ts`                  | Arbitrary file read    | `safeResolve()` validation on every stored path               |
+| SVG injection via watermark/annotation attributes     | XSS                    | `SAFE_COLOR` / `SAFE_NUMBER` regex validation + `guardAttr()` |
+| Signed URL timing oracle                              | Auth bypass            | Constant-time rejection on invalid hex signatures             |
+| Signed URL tenantId pipe injection                    | Signature collision    | `replace(/\|/g, "_")` sanitization                            |
+| MIME confusion (SVG from bare `<svg` bytes)           | Content-type spoofing  | XML namespace + `<svg>` tag regex                             |
+| Binary corruption in streaming upload                 | Data loss              | Byte-level state machine replaces TextDecoder→TextEncoder     |
+| Upload memory exhaustion (full buffering)             | DoS                    | Incremental parser with backpressure + per-file size limits   |
+| Secrets from `process.env`                            | AGENTS.md violation    | All secrets migrated to `getPublicSettingSync()`              |
+| Cloudinary download raw `fetch()`                     | SSRF                   | `safeFetch()` + `validateEgressUrl()` + timeout               |
+| Dead EXIF parsing (camera/date never extracted)       | Silent empty data      | Binary tag extraction from raw EXIF buffer                    |
+| Temp file leak on Windows                             | Disk exhaustion        | Cross-platform `finally { unlinkSync() }` cleanup             |
+
+**Type Safety & Architecture**
+
+- **Discriminated union**: `MediaItem` = `MediaImage | MediaVideo | MediaAudio | MediaDocument | MediaRemoteVideo` with 7 type guards (`isMediaImage()`, `isStoredMedia()`, `isMediaOfType()`, `assertNever()`).
+- **DTO safety**: `NewMedia<T>` blocks server-assigned fields (`_id`, `hash`, `url`, `createdBy`) at compile time. `MediaPatch` restricts PATCH to user-editable fields only.
+- **Sharp type safety**: `SharpPipeline` typed interface eliminates `any` casts across all Sharp operations.
+- **Storage adapter lifecycle**: `dispose()?` added to `StorageAdapter` interface — prevents keepAlive agent leaks on adapter switch.
+- **`as const` maps**: `MediaType`, `MediaAccess`, `StorageType` use tree-shakable value maps instead of TypeScript enums.
+- **Watermark position normalization**: `normalizeWatermarkPosition()` maps convenience aliases (`"top"` → `"north"`) before passing to Sharp.
+
+**Streaming Upload Parser (rewrite)**
+
+- **Byte-level state machine**: Processes `ReadableStream` chunks incrementally — never buffers the full request body.
+- **Binary-safe**: Raw `Uint8Array` chunks pass through untouched. No `TextDecoder`→`TextEncoder` round-trip.
+- **Backpressure**: Per-file `ReadableStream` pipes directly to storage adapter — memory usage proportional to network speed, not file size.
+- **Configurable limits**: `maxFileSize` (1 GiB), `maxTotalSize` (5 GiB), `allowedMimePattern`, per-chunk read timeout (300s).
+- **Error cleanup**: Active push streams errored on parser failure — no hanging readers.
+
+**Media Reference Reverse-Index**
+
+- Replaces O(n × entries) full-scan in `getMediaReferences()` with O(1) in-memory lookup.
+- `MediaReferenceIndex` class with `rebuild()` (lazy on first query) and `eventBus`-driven invalidation on every content mutation.
+- Estimated **50x speedup** on repeated reference queries (pending benchmark verification).
+
+**MIME Sniffer Enhancements**
+
+- Added TIFF detection (little-endian + big-endian).
+- Added AVIF and HEIC detection via `ftyp` box brand parsing.
+- ZIP sub-type detection distinguishes DOCX/XLSX from plain ZIP archives.
+- WebP bound check hardened (requires 12 bytes before reading).
+
+**Measured Impact**
+
+| Metric                         | Before                              | After                         |
+| :----------------------------- | :---------------------------------- | :---------------------------- |
+| Type guards available          | 0                                   | 7 + `assertNever()`           |
+| `as any` casts in media system | ~20                                 | ~1 (`BaseEntity` → entry)     |
+| Path traversal vectors         | 3                                   | 0                             |
+| Upload data integrity          | Corrupted (TextDecoder→TextEncoder) | Binary-safe                   |
+| Reference scan complexity      | O(n × entries)                      | O(1) after lazy rebuild       |
+| Upload memory usage            | Full file in RAM                    | Proportional to network speed |
+| Temp file cleanup              | Windows-leaked                      | Cross-platform                |
+
+### 3.7 July 25 Security Hardening & OIDC Logout
+
+A focused security sprint addressing RBAC cache staleness, path traversal defense-in-depth, OIDC logout compliance, and media bulk operations.
+
+**RBAC Permission Cache Hardening**
+
+- **Problem**: `invalidatePermissionCache()` was defined but never called. Stale DENY results survived up to 5 minutes (PERMISSION_CACHE_TTL) after user role changes or permission mutations.
+- **Fix**: `Auth.updateUser()` now calls `invalidatePermissionCache(userId)` on every user mutation. `AuthNamespace.updateRoles()` calls `invalidatePermissionCache()` globally — any role change can affect many users' cached checks.
+- **Architecture**: `PermissionCache` (`src/utils/security/permission-cache.ts`) supports both per-user and global invalidation. Turbo auth cache cleared simultaneously via `invalidateTurboAuthForUser()`.
+
+**OIDC Logout (All 3 Mechanisms)**
+
+- **RP-Initiated Logout** (`GET|POST /api/auth/oidc-logout`): Full compliance with OpenID Connect RP-Initiated Logout 1.0. Supports `id_token_hint`, `post_logout_redirect_uri` (with allowlist validation), and `state` for CSRF. Auto-discovers `end_session_endpoint` via `.well-known/openid-configuration` with 1-hour cache.
+- **Front-Channel Logout** (`GET /api/auth/frontchannel-logout`): OP-initiated iframe-based logout per OIDC Front-Channel Logout 1.0. Returns 200 with `Cache-Control: no-cache` headers. Clears all SSO sessions for the issuer.
+- **Back-Channel Logout** (`POST /api/auth/backchannel-logout`): OP-initiated server-to-server logout per OIDC Back-Channel Logout 1.0. Validates JWT `logout_token` claims (`iss`, `events`, `sub`/`sid`), rejects with 400 on failure. Accepts both form-encoded and JSON bodies.
+- **Provider registry**: `registerSsoProvider()` + `loadSsoProvidersFromSettings()`. Multiple OIDC providers supported simultaneously.
+
+**Path Traversal Defense-in-Depth**
+
+- `engine.server.ts` collection scanner: Added `path.resolve()` prefix check alongside existing string-based guards (`.includes("..")`). Protects against symlink escapes and filesystem edge cases.
+- `config-state.ts` config loader: `path.resolve(process.cwd(), "config", filename)` + prefix validation before dynamic import. Malformed filenames cannot escape the config directory.
+
+**Media Bulk Delete**
+
+- `media.svelte` selection toolbar now includes bulk delete with controlled concurrency (4 parallel requests), live progress tracking (`Deleting 3/12...`), and publish-state gating via existing `POST /api/media/delete` handler.
+- **Performance**: N files delete in N/4 round trips instead of N sequential calls (~4× faster for large selections).
+
+**DOMPurify Toast Hardening**
+
+- Toast components (`toast-container.svelte`, `ui/toast.svelte`) now use restricted `ALLOWED_TAGS` (inline formatting only: `b, strong, i, em, u, br, code, a`) and `ALLOWED_ATTR` instead of DOMPurify defaults.
+- Reduces attack surface against CVE-2026-65902 (hook mutation on defaults) and related DOM Clobbering vectors.
+
+**Required-Fields Publish Validation**
+
+- `validateRequiredFields()` in `widget-validation.ts` prevents publishing content with missing required fields (media, relations, text). Closes a data-integrity gap where status transitions could bypass field-level `required` constraints.
+
+**Scanner Pipeline Unified**
+
+- `scripts/security-audit.ts` now supports `--full` flag: OWASP scanner + secret misuse scan + code quality (slop) scan in one pass.
+- `slop-scanner.ts` enhanced: invalid Button variant detection (with autofix: `destructive`→`error`), `@apply` misuse detection outside `app.css`, `goto()` navigation anti-pattern detection.
+
+### 3.8 August 2026 — Session, RBAC & Extension Security Sprint
+
+Three consecutive hardening rounds (see also [Login Security](../reference/security/login-security.mdx)) closed the session-management and permission-propagation gaps identified in the July audit.
+
+**Shipped (self-verified, `next` as of 2026-08-04):**
+
+- **Session device policy** — `SESSION_DEVICE_POLICY`: `single-per-device` (default), `single-per-user`, `allow-multiple`; enforced at the `createSession` chokepoint.
+- **Session lifetime & idle controls** — `SESSION_TTL_HOURS` (absolute) and `SESSION_IDLE_HOURS` (sliding, zero-query via the cache LRU).
+- **Immediate block propagation** — block/unblock/delete purges every session layer; the DB re-validation path enforces the `blocked` flag; permission, roles-list, and turbo-auth caches are invalidated on every mutation path (including config import).
+- **Credential-free session snapshots** — password hashes, TOTP secrets, backup codes, and reset/refresh tokens never enter session caches or stores; password-verifying endpoints re-fetch from the DB.
+- **Step-up re-auth for session management** — cross-session revoke requires a fresh password proof (stateless HMAC, 5-min, session-bound).
+- **Session context anomaly (log-only)** — IP/user-agent drift flagged once per session per hour; no false-positive lockouts.
+- **Max sessions per user** — `SESSION_MAX_PER_USER` LRU-evicts the least recently active session.
+- **Session cleanup as a scheduled job** — expired session/token rows purged every 5 minutes via the job queue.
+
+**Measured cost (self-measured, 2026-08-04, Intel i7-13700H, SQLite):** the full security + auth pipeline (HTTP E2E, all hooks) averaged **0.881 ms** over 7 recorded runs vs. a 0.856 ms July baseline — **+0.025 ms (~3%)** for the entire session/RBAC hardening stack. Static-asset and turbo baselines were at parity. Earlier +25% readings were traced to host CPU power-saving mode; re-measured at parity on the same machine at standard power.
+
+#### Engineering summary
+
+The safe/performant combination is unusual in the CMS landscape because most platforms optimize one axis: enterprise-grade security with heavyweight architecture, or lightweight speed with permissive defaults. SveltyCMS combines **fail-closed authorization enforced at the API dispatcher** (unmapped namespaces return 403) with a **cache hierarchy that makes the checks nearly free** — the entire session/RBAC hardening stack measured above adds ~0.03 ms to the full HTTP pipeline. The cost of enterprise session controls is not a per-request tax; it is amortized across cache layers, single-flight coalescing, and zero-query design choices.
+
+For the full gap register (distributed SSO, adaptive auth, ecosystem depth, field-level write-guards, passkey UI, third-party pentest) with closure paths, see the [2026 Roadmap](./roadmap-2026.mdx).
+
+### 3.9 August 2026 — Middleware, Data-Layer & Core Hardening Sprint
+
+Three workstreams landed on `next` between 2026-08-04 and 2026-08-10: middleware security & performance hardening, data-layer `findPage`/list parity across all four adapters, and the asynchronous non-blocking write core.
+
+#### Middleware security & performance hardening
+
+- **Honeypot DDoS vector removed** — the 5–15s socket-holding tarpit in `handle-security.ts` was replaced with an instant decoy `200` + `securityResponseService.blockIp()` flagging. The next request from that IP is dropped at the firewall layer instead of holding a socket open for up to 15 seconds.
+- **SSR cross-request state pollution fixed** — `handleUserPreferences` no longer mutates the module-global `app` singleton; language preference now flows request-scoped via `event.locals` + page data, eliminating same-tick cross-user leaks (SvelteKit 3-ready pattern).
+- **Rate-limit OOM guard** — bounded bucket insert (evicts the oldest bucket _before_ inserting a new one); docs corrected from "sliding window" to "fixed window with adaptive pressure".
+- **API GET request coalescing** — identical concurrent cache-miss GETs share one upstream resolve (stampede prevention); the leader publishes a plain cache entry, followers await the same promise.
+- **In-process cache prewarm** — mutation prewarm uses in-process `event.fetch` (no loopback socket) behind a concurrency semaphore.
+- **GraphQL + settings-service module pre-warm** during READY-state init; `ensureFullMiddleware()` now loads all hooks in parallel via `Promise.all`.
+- **Redirect hardening** — 404-log flush is crash-safe (buffer cleared only after a successful write); open-redirect guard on redirect targets; locales read from the Paraglide config instead of a hardcoded `["en"]`.
+- **Turbo-pipeline** — settings-service import cached at module level (CORS preflights); dbAdapter init de-duplicated via a shared promise.
+- **Test isolation fail-closed** — worker DB init failure returns 503 instead of silently continuing; numeric worker-index validation + 10s timeout.
+- **Local SDK fast-path** — skips the `getDbInitPromise()` await when the adapter is already booted.
+- **Content negotiation honesty** — no standalone content-negotiation middleware exists and no misleading `X-Content-Negotiation` header is sent (the HTML→MD pipeline is not implemented; only `llms.txt` serves markdown).
+- **18-hook READY pipeline** — the pipeline is kept to live middleware only: immutable asset caching is served by `handleTurboPipeline` + the `FAST_STATIC` lane, and `wrapHandle` passes resolved handles directly into `sequence()` when hook timing is disabled (no per-request wrapper hops).
+- **WebSocket graceful shutdown** — active WS connections tracked (`open`/`close` in `hooks.ws.ts`); `closeAllConnections()` sends a `1001 Going Away` frame on SIGTERM/SIGINT before DB shutdown.
+- **Field-level read filtering** — cached `FIELD_PERMISSIONS` setting (`{collection: {role: [readable fields]}}`) applied in `handle-token-resolution`; admin / absent-policy fast-paths keep the hot path at zero cost; memo invalidated on settings save. Write-guard enforcement remains a [roadmap](./roadmap-2026.mdx) item.
+
+#### Data layer: `findPage` & list-platform parity
+
+Product-layer APIs are now equal on SQLite, PostgreSQL, MariaDB, and MongoDB:
+
+- `crud.findPage` — limit+1 `hasMore`, optional total, keyset `cursor`.
+- `CountMode` (`exact` | `estimate` | `auto`) + dialect-specific estimates.
+- L1 count cache (30s) with invalidation on collection writes.
+- Unit + integration contracts (`find-page-count-contract`, `page-utils`).
+- CollectionService list path: limit+1 + cached `crud.count` when filters are equality-only.
+- Status facets via `crud.count` (L1-backed).
+- Users list: `findPage` on `auth_users` when no text search.
+- Media `getByFolder`: limit+1 + parallel count.
+- Website tokens: Mongo `findPage`; SQL limit+1 trim; Smart Table **saved views**.
+- Schema proxy: `db.<collection>.findPage(...)`.
+
+#### High-performance core & non-blocking writes
+
+- **Asynchronous non-blocking mutation pipeline** — `create` and `update` persist to the DB in **sub-5ms** (~4.20ms) and return `200` immediately.
+- **Async audit & revision queue** — crypto SHA-256 Merkle-tree hash chaining, content revision snapshotting, and L2 cache-invalidation pattern purges run in detached microtask queues (`AUDIT_CHAIN_SYNC=false` default).
+- **Enterprise compliance mode (`AUDIT_CHAIN_SYNC=true`)** — optional synchronous SHA-256 audit chaining inside write transactions for ISO 27001 / SOC2-style compliance.
+- **System Settings UI toggle** — admins toggle `AUDIT_CHAIN_SYNC` / `DISABLE_AUDIT_LOGS` live under Cache & Performance.
+- **Benchmark matrix automation** — the harness supports both env overrides for comparative matrix runs.
+- **Targeted writes on all 4 engines** — SQL `prepareUpdateValues()` omits empty `data={}` and never writes `createdAt` on UPDATE; Mongo `$set` strips `createdAt` (`runValidators: false` because Valibot already ran). PostgreSQL binds objects/arrays as JSON (`$n::jsonb`).
+- **Widget pipeline** — `fields._activeWidgets` + reused accessor; DateTime `toISOString` is a static import.
+- **Session cold path** — `auth.validateSession` is a single session⋈user JOIN; warm sessions are 0 DB round-trips.
+- **Zero boot settling delay** — `plugin-registry` / `db-init` no longer `setTimeout` between CORE and WARMED.
+- **`BENCHMARK` is outbound-only** — it skips webhooks/SMTP/AI network calls so the matrix does not contact third parties. Persistence, RBAC, Valibot, and RETURNING/`$set` run the production path. `skipSideEffects` is an explicit SDK option (reported separately), not an env toggle.
+
+#### Measured impact (self-measured, 2026-08-10, Intel i7-13700H, SQLite, standalone harness)
+
+The Full Security + Auth Pipeline (all hooks, HTTP E2E) averaged **0.583 ms** (p95 0.768 ms, ~1,442 RPS) on the recorded run — a **~32% latency reduction vs the 0.856 ms July 31 baseline** published in [3.8](#38-august-2026-session-rbac-extension-security-sprint), with ~40% higher throughput. Other layers in the same run: Turbo Pipeline (light) 0.285 ms / ~3,201 RPS; REST with API caching 0.540 ms; Static Asset 0.549 ms; Mutation + Audit Logging 1.031 ms. Reproduce with `BENCHMARK_RECORD=1 bun test tests/benchmarks/hooks-performance.test.ts`. Single-run variance on the harness is ~±10%; quote the trend, not one run.
+
+### 3.10 August 2026 — ReDoS-safe linear threat scan
+
+Layer 0 WAF and AuthGuard payload analysis now share one O(n) scanner (`src/services/security/threat-scan.ts`). Per-request RegExp engines, the unused WASM instantiate stub, and `new URL()` on the allow path are gone. Pathological `select`/`from` bait returns in well under 25 ms (unit-tested); clean ASCII URLs skip `decodeURIComponent`. SQL `prepareValues` uses a char-code ISO datetime prefix instead of regex.
+
+**Self-measured 2026-08-23:** `WAF Deep Analysis` in `security-audit` stays at **0.002 ms** because that row times `Request.clone()` + `await analyzeRequest()` — a ~1.5 µs floor that hides the matcher. Isolated scanner microbench (`bun run scripts/waf-scan-microbench.ts`, 200k iters, clean `/api/collections/posts?limit=10`):
+
+| Matcher                               |  ns/op |          ops/s |
+| ------------------------------------- | -----: | -------------: |
+| Previous regex inspect (4× haystacks) |  1,495 |        669,119 |
+| Linear `inspectRequest`               | **96** | **10,388,153** |
+| `isCleanRequestSurface`               |     61 |     16,442,771 |
+
+Linear inspect is **15.5×** less work on the allow-path (ReDoS-safe). Reproduce: `bun run scripts/waf-scan-microbench.ts`. Full service row: `BENCHMARK_RECORD=1 bun test tests/benchmarks/security-audit.test.ts`.
+
+### 3.11 August 2026 — Entry list / field-editor widget + plugin path
+
+Entry edit and collection tables were dropping widgets: `widget.Name` missing when `field.widget` existed, list cells giving up if the registry was not ready at `onMount`, and plugin `entry_edit` slots ignoring `slotRegistry.version` (late registrations never appeared). Loader resolve scanned every glob path per field.
+
+**Self-measured 2026-08-23, `tests/benchmarks/entry-edit-hydration.test.ts`:** 50-field loader resolve **0.053 → 0.023 ms** (~16.3k → **31.9k RPS**, ~2×). Widget prefetch **0.013 → 0.009 ms**. Plugin list columns now skip disabled plugins; plugin cells use a warm L1 peek; plugin tabs load only when selected.
+
+Reproduce: `BENCHMARK_RECORD=1 bun test tests/benchmarks/entry-edit-hydration.test.ts`.
+
+### 3.12 August 2026 — Layout user / plugin / collection-order fetch tax
+
+Every admin navigation hit `(app)/+layout.server.ts`, which re-read the user from the DB, `findOne`’d plugin state per slotted plugin, and parsed the collection-order manifest from disk. Settings TTL was also passed as `30_000` into `cacheService.set` (seconds), so the 30s L1 comment was wrong.
+
+Now: 15s L1 for user snapshot, user-count, and plugin enablement; **one `findMany`** for all plugin states; collection order is mtime-cached; widget first-load no longer busts `/api/widgets/active` with `?refresh=true`. Profile `/user` shares the same user cache; attribute writes and plugin toggles invalidate it.
+
+### 3.13 August 2026 — Auth-path logs + TOTP backup HMAC (hooks re-bench)
+
+Per-request auth work was paying for debug-string interpolation and `new Date()` expiry checks on the Full Auth Pipeline. Cache miss-locks had a `Math.random()` owner fallback. 2FA backup codes were stored as plain SHA-256.
+
+- `handle-authentication.ts`: debug logs behind `logger.isEnabled("debug")`; expiry via `.getTime() < Date.now()`.
+- `content-registry.svelte.ts`: `getSmartFirstCollection` memoized on `contentVersion`.
+- `cache-locks.ts`: lock owner is `crypto.randomUUID()` only.
+- `totp.ts`: backup codes HMAC-SHA-256 (`backupcode-hmac:` + JWT secret), single-scheme verify (legacy plain SHA-256 removed 2026-08).
+
+**Self-measured 2026-08-23, SQLite, two consecutive `hooks-performance` runs vs 0.598 ms baseline:**
+
+| Benchmark         | Metric                     | Baseline         | After                             | Δ                          |
+| ----------------- | -------------------------- | ---------------- | --------------------------------- | -------------------------- |
+| hooks-performance | Full Auth Pipeline avg     | 0.598 ms         | **0.457 ms** (0.474 first re-run) | **−23.6% / −20.7%**        |
+|                   | p95                        | 0.829 ms         | 0.698 / 0.617 ms                  | **−16% / −26%**            |
+|                   | Auth Overhead (Turbo→Full) | 0.276 ms         | 0.143 ms                          | **−48%**                   |
+| auth-performance  | Auth @1c avg               | 0.396 ms         | 0.369 ms                          | **−6.8%**                  |
+|                   | Pipeline @8c / RPS         | 1.244 ms / 3,708 | 1.192 ms / 3,872                  | **−4.2% / +4.4%**          |
+| truth-latency     | HTTP E2E avg / p95         | 0.505 / 0.813 ms | 0.509 / 0.710 ms                  | avg ±noise; p95 **−12.7%** |
+| security-audit    | pass                       | ✓                | ✓                                 | no regression              |
+
+Published overlay (`docs/project/benchmarks/benchmark_sqlite.mdx`, 7-run trend): Full Auth **0.457 ms**, ⚪ stable at **0.474 ms**. Reproduce: `BENCHMARK_RECORD=1 bun test tests/benchmarks/hooks-performance.test.ts`. Single-run variance ~±10%; the −20% middleware move is the two-run confirmation against 0.598 ms, not the WAF Deep Analysis clone+await floor.
+
+### 3.14 August 2026 — Hardware-adaptive tuning + honest 4-DB benchmark matrix
+
+One hardware detection at boot now drives every CPU-critical subsystem, and the benchmark matrix runs honest production-parity numbers on all 4 databases.
+
+**Hardware-adaptive profile (`@utils/hardware-profile`)** — detected once at process start (`hooks.server.ts` → `initHardwareProfile()`), published to the shared global registry; every module, chunk and worker import reads the same frozen object. Workload-prioritized CPU allocation under a global `HARDWARE_CPU_BUDGET` (default 0.75 = all-in-one VPS reserving headroom for co-hosted DB/Redis/nginx; `1` = dedicated app server): media/sharp gets the largest slice (up to 50% of physical budget), DB fan-out the most conservative (2 queries per budget core — the co-hosted DB server needs CPU per query), compile 75% / jobs 50% / module workers 50% (capped). Per-knob env overrides: `SHARP_CONCURRENCY`, `DB_POOL_SIZE`, `MONGO_MIN_POOL_SIZE`, `MODULE_WORKER_POOL_SIZE`, `COMPILE_CONCURRENCY`, `JOB_CONCURRENCY`, `UV_THREADPOOL_SIZE`. Wired into: `hooks.server.ts`, all 4 DB adapters (pool defaults were hardcoded 20/100/100 — now hardware-derived), `loader.server.ts` worker pool, `compile.ts` + `sync-content-state.server.ts`, `job-queue-service.ts`, `handle-compression.ts` (weak boxes cap gzip 4 / brotli 4), `database-resilience.ts` pool prewarm, setup wizard (surfaces the profile in the complete response) and dashboard (`/api/dashboard/system-info` returns the profile the CMS tuned itself to).
+
+**Media pipeline (validated on matrix)** — preset (width,format) dedup collapses 20 variant jobs into 12 unique files (records still expanded per referencing preset); responsive-variant generation for buffer uploads is deferred (fire-and-forget) so the HTTP response no longer blocks on it. Self-measured 2026-08-23: SDK media **210.0 → 116.3 ms (−45%)**, HTTP upload **208.4 → 105.2 ms (−50%)**.
+
+**CacheService pattern invalidation** — flat-key namespace bucketing fix: `tenant:global:<flat-key>` now lives under the `tenant:global` bucket so pattern purges hit one bucket instead of every key. Self-measured: **26 → 4.5 ms**.
+
+**Benchmark matrix run (2026-08-23)** — **200/200 green on the hardware-profile build** (SQLite 50/0 · MariaDB 50/0 · Postgres 50/0 · Mongo 50/0; run 2 was 199/200, the lone failure was `dev-dependency-load`: `bun run check` flags auto-generated benchmark MDX that drifts from oxfmt formatting — the reporter now runs oxfmt on every written report, keeping the DX toolchain honest and green). Seeder provisions `bench_index_pressure` + `bench_migration_large` (kills the 100k-row index audit `SQLITE_ERROR no such table`); SEO redirect source unique per run; state-machine accepted states widened (RECOVERY/DEGRADED/IDLE); MongoDB stress flakes fixed via pre-stress full readiness wait + bounded crash-retry in the harness. **Restart overhead cut ~20%**: post-destructive restarts are data-driven (two full 4-DB runs proved only `graphql-stress` → relational-performance and `large-payload-streaming` → migration-scale need the restart) — the other 5 destructive tests skip the ~12–16s server boot, saving ~4 min of the ~22 min run.
+
+**Pre-profile vs profile measurement (run 2 → run 3, same machine):** no systematic regression — the feared GQL-100c pool regression from smaller DB pools did NOT materialize (GQL 100c flat-to-better on all 4 DBs), media SDK −3%, and notable gains on Postgres (widget pipeline −44%, Yjs −37%, mixed workload −25%, SEO −17–27%) and Mongo (collection search −29%, uploads −17–20%). Remaining flags are sub-5 ms run-to-run noise (cache pattern-invalidation, Yjs CRDT, small payloads).
+
+Reproduce: `bun run scripts/benchmark-matrix/index.ts --continue-on-error` (4 DBs, ~23 min) · `bun run test:unit` (416 files / 3667 tests). GPU note: sharp/libvips exposes no GPU backend — media parallelism is CPU-tier capped; further media gains come from job dedup/deferral, not more threads.
+
+### 3.15 September 2026 — Intelligence consumption + request-pipeline lean
+
+Two follow-on sprints on top of the 3.14 profile build: the behavioral-learning engine stopped being dormant (renders predictions and heat), and the request pipeline lost its duplicate cache namespaces, duplicate compression, and per-SSR graph cloning.
+
+**Intelligence consumption** — `predictNextPath` was computed per request and rendered as a single `<link rel=prefetch>`; now it renders: (1) the sidebar nav link matching the server-predicted next path is tagged `data-preload="smart"` (`src/components/left-sidebar.svelte`); (2) the dashboard consumes the `hotCollections` already returned by its server load (`getHotCollections(tenant, 20)`) as compact quick-link chips above the widget grid; (3) heat-aware SWR in `collection-service.ts`: behaviorally-hot collections (top-20, hot set memoized 10 s per tenant so the per-request cost is one `Set.has()`) keep the 60 s fresh TTL but serve stale up to 15 min while revalidating; cold collections keep the default 5-min stale window. Roadmap follow-up kept honest: Smart Table "warm next page" viewport preload is still pending — pagination next/prev controls are button-driven today, so the `data-preload` viewport hook needs the controls converted to real links first.
+
+**Request-pipeline lean** (hooks + dispatcher): (1) **one canonical L2 key** — `handle-api-requests.ts` and the API dispatcher now share a single `buildUserCacheKey` (`{path}?search:u:{user}`) for the L2 body store; the duplicate `api:{tenant}:{user}:{path}` namespace (written/read only inside that one hook) was retired and invalidation clears the shared path prefix across users/searches; (2) **single compression per body** — the dispatcher marks its tagged L1 writes with a `compressed: {}` sentinel so `response-cache`'s internal br/gzip precompute never runs for a write the request hook replaces within the same request; the hook's one fire-and-forget compressor (br+gzip+zstd, size-gated, genuinely async above the sync threshold) then re-sets the L1 entry with real variants and writes the single canonical L2 entry; (3) **nav graph serialized once per (tenant, contentVersion)** — the admin sidebar payload was rebuilt + recursively deep-cloned (`stripNonSerializable`) on every SSR; it is now cached at `layout:contentStructure:{tid}:{version}` and the root layout's progressive tree at `navigation:tree:progressive:{tid}:{version}`, invalidated by the existing content-version signal; (4) **one session-cookie resolution per request** — authn/authz/turbo/dispatcher consumers now share one per-request slot resolved from the protocol-derived secure-context flag instead of re-parsing the cookie 4–5×. Deliberately NOT merged: the authz 1 h user-count cache (tenant-scope semantics differ — `bypassTenantCheck` vs tenant-null counts) and the layout's 15 s fresh user read (avatar/role badge freshness is intentional).
+
+Verified 2026-09-02 (SQLite): `bun run check` 0/0 · `test:unit` 453 files / 3,894 tests · `test:security` 262 · `risk:audit` 5/5 · `test:integration` 632 pass / 0 fail (19 adapter skips) · core benchmarks all green (incl. `cache-performance`, `hooks-performance`, `rest-api-performance`).
+
+## 4. Final Sprint Achievements (March 2026)
+
+Having secured the "Engine War" with superior performance and security, SveltyCMS has now closed the **Editorial Depth** gap.
+
+### 4.1 Visual In-Context Editing
+
+- **Features:** Drag-to-reorder blocks in preview, field-level pulsing highlights, and auto-scroll-to-field interactions via the Enterprise Handshake Bridge. **July 2026**: Website Starter integrates Svedit inline editing on the public site; license gate on `POST /api/preview/authorize` enforces paid bridge while CMS form saves remain free.
+- **Freemium model:** Public site rendering and CMS form editing (including Svedit JSON in `pages.content`) require no plugin license. Live Preview tab, iframe bidirectional sync, and inline Svedit click-to-edit require **Editable Website** (€14.99 marketplace, 14-day trial auto-started on Website Starter setup).
+- **Performance Optimization (March 2026):** Implemented **Deferred Rendering** for the preview iframe. The handshake and iframe mount are lazy-loaded only when the user first switches to the Live Preview tab, reducing initial page load CPU/Network by 60% while maintaining instant switching for subsequent use.
+- **Fail-Closed API Security (April 2026):** Implemented a central dispatcher gatekeeper requiring mandatory endpoint registration. Any unmapped or unauthorized request is denied by default, eliminating "Shadow API" data leaks.
+
+- **Widget Performance Auditing (April 2026):** Integrated an automated overhead pass into the Enterprise Matrix to measure the server-side "cost" of every core widget, ensuring "Zero-Overhead" standards are maintained as the ecosystem grows.
+- **Result:** Provides an editorial experience that feels "Magic" and exceeds the UX of legacy SaaS platforms.
+
+### 4.2 AI-as-a-Field-Type & Hosted Knowledge
+
+- **Features:** Native `AIEnrichment` field type, smart context-aware translation, and the **Hosted MCP Context Server** (`mcp.sveltycms.com`) for real-time agentic memory.
+- **Differentiator:** Local inference via Ollama ensures data privacy while maintaining high-speed content enrichment.
+
+### 4.3 Visual Workflow Engine (FSM)
+
+- **Features:** Node-based Finite State Machine editor for complex, non-linear content lifecycles. Includes transition guards, automated side effects, and HMAC-signed approval links for external stakeholders.
+- **Result:** Provides enterprise-grade governance comparable to high-end SaaS DXP platforms.
+
+### 4.4 Advanced Media Engine: Transcoding & Batch Hub
+
+- **Features:** Multi-resolution HLS/MP4 adaptive bitrate pipeline and bulk Sharp.js filter processing (Vivid, B&W, HDR) for 100+ assets simultaneously.
+- **Result:** Eliminates the need for external Digital Asset Management (DAM) or video processing services.
+
+### 4.5 Visual Logic Builder
+
+- **Features:** Recursive JSON-based conditional engine supporting nested AND/OR groups for complex `showIf` and `requiredIf` dependencies.
+
+### 4.6 Real-Time Collaboration & Concurrency
+
+- **Features:** Conflict-free Replicated Data Type (CRDT) concurrent editing powered by **Yjs**, transported over **adapter-node-compatible channels** — SSE (`/api/events` + `/api/collaboration/yjs`) for the default path, plus a native `ws`-based sync server on `/ws` (`yjs-sync-server`, wired in the production `index.cjs` entry). No uWebSockets / svelte-realtime dependency.
+- **Server state:** `yjs-service` (`src/services/collaboration/yjs-service.ts`) holds per-`docId` Yjs documents, keyed by tenant, applied from EventBus updates; `GET /api/collaboration/yjs` returns full state for client bootstrap.
+- **Client integration:** `collaboration-service.svelte.ts` + `SseProvider` (SSE transport), wired into the field editor (`fields.svelte`) when a collection enables `collaboration.enabled`. Awareness protocol carries cursor/presence per editor.
+- **Latency:** self-measured event-push latency is in the low-ms class on a local deployment; no sub-ms claim is made (network RTT dominates outside localhost).
+- **Result:** Production-oriented concurrent editing for collections that opt in; it is **not** a claim of Google Docs parity or of GraphQL-over-WebSocket subscriptions (not shipped).
+
+### 4.7 CLI Maintenance Suite & Global Accessibility
+
+- **Features:**
+  - **CLI Cache Control:** Native `bun run cache:clear` utility supporting system-wide, all-tenant, or specific tenant invalidation.
+  - **Performance Trends:** Automated trend analysis (🟢/🔴) in the Enterprise Benchmark Matrix, tracking regression across REST, GraphQL, and Widget layers.
+  - **Intelligent RTL support:** Automatic Right-to-Left detection and alignment in the RichText editor for Middle Eastern locales (AR, HE, FA).
+- **Result:** Reduces operational overhead for DevOps and ensures a first-class editorial experience for a global workforce.
+
+### 4.8 Q2 2026 Competitive Response Sprint
+
+In direct response to rapid iterations from Sveltia CMS and Directus 11, SveltyCMS has prioritized the following "Parity & Leapfrog" items for April 2026:
+
+- **Sveltia Parity Suite:** Implemented locale-agnostic slug preservation, improved regex normalization for international characters, and CI-linked "Publishing..." status indicators in the editor shell.
+- **Smart Diff UI:** A dedicated comparison modal within the Enterprise Monitor that filters for "only modified fields," allowing editors to review changes in 100+ field collections in seconds.
+- **Hardened Auth Security:** Field-level access control (FLAC) applied to internal authentication fields (email, provider, role), matching recent security hardening in Payload 3.81.
+- **One-Click Sveltia Importer:** A native migration utility that parses Sveltia `config.yml` files and Git-based content to instantly scaffold SveltyCMS collections and import markdown data.
+- **Managed Cloud Tier:** Collaborative infrastructure offering managed Postgres/Redis via Fly.io, targeting SaaS users who require SveltyCMS performance without operational overhead.
+
+**May 2026 Additions — Security & API Hardening:**
+
+- **4-Layer Defense-in-Depth Authorization**: Zero-trust re-validation at Middleware, Dispatcher, Handler, and Page Action layers. Cookie prefix hardening (RFC 6265bis), setup completion gating, admin verification, media permission checks, centralized permission guards.
+- **Timing-Safe Cryptography**: `crypto.timingSafeEqual` on all security-sensitive comparisons (test secrets, TOTP codes).
+- **ETag Conditional Requests**: SHA-256 ETag headers with `304 Not Modified` support for bandwidth-efficient client caching.
+- **API Versioning**: `X-API-Version: 1` header and `/api/v1/` path prefix routing for future-proof API evolution.
+- **56 New Security Tests**: Defense-in-depth unit tests (51) + session fixation prevention tests (5). Total test suite: 861 tests, 105 files, 0 regressions.
+
+## 5. Phase 3: The Enterprise Leap (Q2-Q3 2026) ✅ COMPLETE
+
+To cement its position as the undisputed category leader against platforms like Payload CMS, SveltyCMS is deploying three critical architectural features that transform it from a high-performance engine into a fully-fledged enterprise application platform.
+
+### 5.1 Database-Backed Background Jobs Queue
+
+- **The Gap:** Edge and serverless functions (like Vercel) time out during heavy operations (e.g., Sharp/WebP generation, AI enrichment), leading to brittle media workflows.
+- **The Solution:** A native `svelty_jobs` table managed by the database-agnostic `JobQueueService`.
+- **Advanced Features (March 2026):**
+  - **Concurrency Guard**: Implemented `IMPORT_CONCURRENT_MAX` to prevent server exhaustion during simultaneous multi-tenant bulk operations.
+  - **Real-Time Progress Tracking**: Jobs now support granular `progress` updates (e.g., "450/1000 items processed"), allowing for a more transparent editorial experience.
+  - **TTL-Based Temporary Store**: Large job payloads are offloaded to a temporary file-backed store with automatic TTL cleanup, preventing DB index bloat.
+- **Impact:** Heavy workloads are offloaded to a persistent polling worker (or CRON fallback), eliminating front-end blocking and save-failures entirely. This is the cornerstone of enterprise stability.
+
+✅ **Completed June 2026**: Adaptive job scheduler with exponential retries, API management, and audit integration.
+
+### 5.2 The Zero-Latency "Local SDK"
+
+- **The Gap:** Fetching content via HTTP within the same SvelteKit runtime adds unnecessary serialization overhead.
+- **The Solution:** Injected a formal, typed `cms` instance into `event.locals` via middleware.
+- **Impact:** Developers can query the database directly in `+page.server.ts` (`await locals.cms.find('posts')`) with zero HTTP latency, achieving true full-stack SvelteKit synergy.
+
+### 5.3 Virtual "Join" Fields
+
+- **The Gap:** Traditional relational graphs cause either N+1 query performance deaths or massive over-fetching. Traditional databases also struggle with "inverse" relationships (e.g., finding all comments for a post) without redundant field storage.
+- **The Solution:** Payload-style virtual join fields utilizing dynamic Drizzle queries. We introduced the **Smart Join** field type, which dynamically queries inverse relationships during the `populate` phase.
+- **Impact:** Keeps the sub-millisecond auth and fast SSR intact even on deeply nested, complex content trees. Developers can now model `Post -> Comments` or `Product -> Reviews` relationships with zero database bloat and maximum query efficiency.
+
+### 5.4 Durable Webhook Engine & DLQ
+
+- **The Gap:** Standard webhooks often fail silently or flood endpoints during high-traffic bursts. Retrying 4xx "Poison Pills" wastes server resources and clogs worker queues.
+- **The Solution:** A job-queue-driven delivery system with HTTP status awareness. Retries are reserved for 5xx/429/Network errors, while 4xx failures are instantly routed to a Dead-Letter Queue (DLQ) for admin review.
+- **Impact:** Improves delivery reliability (retry on 5xx/429/network; 4xx → DLQ). **Not** a mathematical 100% delivery guarantee under prolonged outages.
+
+### 5.5 Native Soft Deletes (Trash System)
+
+- **The Gap:** Accidental deletions in enterprise CMS environments often lead to permanent data loss or manual database restoration. Standard soft-deletes often face "Unique Index Collisions" when trying to re-use slugs of deleted items.
+- **The Solution:** A native trash system with "Mangle-on-Delete" logic. Unique fields are automatically suffixed with a deletion timestamp, and the `safeQuery` middleware ensures trashed items are globally isolated from production APIs by default.
+- **Impact:** Provides a safety net for content editors without the performance or indexing overhead of traditional archival strategies.
+
+### 5.6 Per-Field Content Localization ✅
+
+- **The Gap:** Document-level i18n requires switching entire documents per language, making side-by-side editing impossible.
+- **The Solution:** Per-field `Record<Locale, string>` storage with inline locale switchers and AI-powered translation.
+- **Impact:** Editors can see all language variants of a field simultaneously, translate with one click, and track per-field translation progress.
+
+## 6. Conclusion (truthful summary)
+
+**Is SveltyCMS “state of the art”?** That is a **product judgment**, not a single score. Against **our own** design goals and **self-measured** suites:
+
+| Dimension        | Evidence (self-described / self-measured)                                           | Limits                                                                  |
+| :--------------- | :---------------------------------------------------------------------------------- | :---------------------------------------------------------------------- |
+| **Architecture** | Svelte 5 + shared `SqlAdapterCore` + 4 production DB adapters                       | Still a full Node/Bun process; not magically edge-only for all features |
+| **Performance**  | SQLite sub-ms CRUD; networked ~0.5–2 ms RTT; `findPage` / count cache product layer | Not a global speed ranking; not same-harness vs Payload/Strapi/Directus |
+| **Security**     | Fail-closed API, hashed tokens, RBAC, audit chain; scanners in CI                   | ~99/100 is **self-assessment**; no substitute for your pentest          |
+| **Intelligence** | Behavioral learning, AI scaffolder, MCP, marketplace docs                           | Learning warms caches; does not rewrite engines under load              |
+| **Stability**    | Soak / leak benches exist in-repo                                                   | One 5-min soak is evidence of a path, not eternity                      |
+
+**Verdict (neutral):** SveltyCMS is a **self-hosted headless CMS** with strong **documented** security packaging in core, multi-DB adapters, and an automated benchmark culture. Use [Competitive Comparison](./competitive-comparison.mdx) for buyer trade-offs (React ecosystem, marketplace size, MSSQL). Prefer **reproduce** (`bun test tests/benchmarks/…`) over absolute ranking language.
+
+## 7. Milestone log (engineering, not trophies)
+
+Selected 2025–2026 engineering milestones. Metrics are self-measured unless noted.
+
+### 7.1 Core engine & DX
+
+- **Toolchain**: oxlint/oxfmt for fast lint/format (project-scale times vary by machine).
+- **SQL hot path**: prepared-statement / shared core work across SQLite, PostgreSQL, MariaDB.
+- **Client shell lean-down (August 2026)**: eliminated the last two `import * as m` wildcard Paraglide imports (`command-palette.svelte`, `modal.svelte.ts`) that forced the full 968-message catalog into the eager `(app)` shell. Replaced with named imports + static key map; eager admin shell dropped **705 KB → 502 KB raw (−29%, gzip 188 KB)** measured on the production build manifest. `scripts/check-bundle-size.ts` now detects the real admin-shell node (`nodes/N.js`) instead of only `layout*.js` files, so TipTap/email-preview leaks into the shell fail CI.
+- **Memory**: SDK allocation work targeting low growth under load (see soak benches).
+- **Middleware**: hooks pipeline optimized; full-auth HTTP is **ms-class**, not free. August 2026 hardening sprint measured **0.583 ms avg / 0.768 ms p95 / ~1,442 RPS** for the full security + auth pipeline (SQLite, self-measured 2026-08-10) vs the 0.856 ms July 31 baseline.
+- **Widgets**: `ComponentLoader` / tree-shakeable loaders.
+- **DB parity**: MongoDB, MariaDB, PostgreSQL, SQLite as production adapters.
+
+- **Enterprise Security & Automated Response**: Unified `SecurityResponseService` with Redis-backed state and a linear ReDoS-safe threat scanner (shared WAF + AuthGuard).
+- **CI Pipeline Restoration**: Playwright E2E suite stabilized across all supported databases.
+- **Active Database Driver Validation**: Eliminated "lazy connection" false positives in setup via mandatory `SELECT 1` pings.
+- **GraphQL JIT Execution Engine**: Multi-fold increase in RPS via `@envelop/graphql-jit`.
+- **API Benchmarking Suite**: Native tests (`test:bench:rest`, `test:bench:graphql`) to prove performance superiority.
+- **Advanced Security Isolation**: Implementation of COOP/COEP headers and refined multi-tenant cookie security for cross-origin isolation.
+- **High-Performance GraphQL**: Resolver memoization and JIT execution reducing API latency and redundant database hits.
+- **GraphQL.js 17 + Yoga (August 2026)**: Upgraded to `graphql@17.0.2` with native `graphql-yoga@5.22.0` support and zero-allocation AST visitors.
+
+- **Tenant Management Admin Dashboard (July 2026)**: Full-featured tenant administration UI at `/admin/tenants` with create/suspend/activate operations, real-time quota visualization (users, storage, collections), and plan-level resource enforcement. Gated behind system-admin `isAdmin && !tenantId` guard. Backed by the database-agnostic `ISystemAdapter.tenants` interface with dedicated MongoDB implementation (`MongoTenantMethods`) and shared SQL implementation (`RelationalSystemModule`) across PostgreSQL, MariaDB, and SQLite. Integrated into the sidebar navigation for instant access.
+
+- **CLI Maintenance Suite**: Native `cache:clear` utilities for system-wide and tenant-specific operations.
+- **5-Pillar Content Architecture**: Consolidation of 19 fragmented files into 5 high-performance pillars, reducing content system module overhead by **74%**.
+- **99.9% Self-Healing Cache (April 2026)**: Implemented granular "Smart Repair" and **Content Scanning** (mtime-hashing + Worker Pool), reducing structural reconciliation time by **99.9%** (210ms → 0.05ms).
+- **Real-Time SSE Synchronization (March 2026)**: Replaced 10s client polling with Push-based Server-Sent Events, achieving sub-100ms synchronization across all admin instances.
+
+- **Global Accessibility**: Intelligent RTL (Right-to-Left) support in the RichText editor for Arabic, Hebrew, and Farsi.
+- **Vectorized Request Modification**: Refactored the core data transformation pipeline to support chunked batch processing, reducing function call overhead by **70%** and ensuring the event loop remains responsive during 10,000+ item imports.
+- **Atomic Content Versioning**: Implemented `ContentVersionManager` utilizing native database atomic increments (`$inc` / `RETURNING`), eliminating race conditions in high-concurrency multi-tenant environments.
+- **System-Level SDK Context**: Enabled `system: true` execution in the Local SDK, allowing background services and migrations to bypass row-level permissions while maintaining high-performance direct access.
+- **Multi-Tenant Slug Uniqueness**: Dedicated Slug widget with `tenantScopedUnique` and `disableUnique` controls for granular identifier management.
+
+### 7.2 Visual Intelligence & Enterprise Collaboration
+
+- **Website Starter + Svedit (July 2026)**: Default Setup Wizard preset — in-repo SvelteKit site at `/`, Svedit block renderer, seeded homepage, headless toggle. Free site + form saves; paid Live Preview bridge.
+- **In-Context Live Preview**: Visual DnD, pulses, and editable highlights within the live site frame (Editable Website plugin).
+- **AI-as-a-Field-Type**: Native `AIEnrichment` widget and LLM-driven Smart Translation.
+- **Agent-Ready WebMCP Protocol (April 2026)**: Native `content.ts` WebMCP integration offering "Draft-by-Default" execution buffers and schema-aware, token-optimized context payload generation to power external Autonomous Agents.
+- **Multi-Cloud Storage Engine**: Universal strategy adapters for S3, R2, and Cloudinary.
+- **Hosted MCP Server**: Model Context Protocol server live at `mcp.sveltycms.com`.
+- **Active Visual Workflow Engine (FSM)**: Production-ready Node-based editor with strict RBAC transition guards, secure crypto IDs, and true `tenantId` isolation across all workflow logic.
+
+- **Enterprise Smart Diff View**: Hardened `diff-utils` implementation performing recursive zero-latency change analysis, protected against circular DOSt vulnerabilities and optimized with Svelte 5 `$derived` metrics.
+- **Multi-Tenant Hardening (July 2026)**: Production-hardened isolation across all layers:
+  - **PostgreSQL Row-Level Security**: Database-level `enforceTenantPolicy()` with `CREATE POLICY tenant_isolation` and per-request `SET SESSION app.tenant_id`. Defense-in-depth below the application layer.
+  - **Signed Media URLs**: HMAC-SHA256 time-limited file access with `crypto.timingSafeEqual` validation. Opt-in via `MEDIA_SIGNED_URL_ENABLED`.
+  - **Per-Tenant Rate Limiting**: Two-tier token bucket system (per-IP + per-tenant) with independent budgets, preventing noisy tenants from starving neighbors.
+  - **Tenant Analytics Dashboard**: Per-tenant usage widget showing storage, users, collections, entries, and 24h activity — scoped by `locals.tenantId`.
+  - **Tenant-Scoped API Keys**: Token management UI with tenant scope selector (Current Tenant / Global). Backend already supports `tenantId` in auth cache lookups.
+  - **Per-Tenant Database Connection Pooling**: Optional dedicated postgres.js pools per tenant with configurable `TENANT_DB_POOL_SIZE`. Visible as `application_name = tenant_{id}` in `pg_stat_activity`.
+  - **E2E Isolation Tests**: 5 Playwright tests verifying cross-tenant collection, file, content, global resource, and schema boundaries at the HTTP level.
+  - **19/19 architectural features** covered across CRUD guard, RLS, signed URLs, rate limits, GraphQL, file serving, media, plugins, SSE, batch ops, migration, and E2E testing.
+- **Durable Jobs & Webhooks**: Redis-backed job queue (`svelty_jobs`) and DLQ-aware webhook engine.
+- **Asynchronous Background Imports**: Off-thread processing for large datasets with concurrency control.
+- **Real-Time Collaboration**: CRDT-based concurrent editing (Yjs) over standard HTTP.
+- **Formal Server-Side SDK**: Native `locals.cms` for zero-latency SvelteKit integration.
+- **Essential Utilities**: Standardized high-performance `cn`, `pluralize`, and `slugify` utilities for robust UX foundation.
+
+- **Adaptive Job Scheduler**: Lightweight background job runner with adaptive polling and audit integration for scheduled publishing.
+- **Crypto-Chained Audit Logs**: SHA-256 tamper-evident audit trail with chain verification and per-content viewer.
+- **Per-Field Localization**: Record<Locale, string> field storage with inline locale switchers and one-click AI translation.
+- **Flexible system languages (September 2026)**: Admin UI ships **EN/DE**. Setup and System Settings use the same ISO 639-1 picker as content languages (RTL via `getTextDirection()` in `@utils/string`). Completing setup writes `project.inlang/settings.json` and runs `bun translate` + `bun run paraglide`. Guide: [System Languages](../guides/configuration/system-languages.mdx).
+- **Zero-Dependency Full-Text Search**: Database-native FTS across PostgreSQL, MariaDB, SQLite, and MongoDB with no additional npm packages.
+
+- **AI-Smart CMS Migration**: 5-format importer with heuristic field mapping, ACF/CMB2 detection, and drag-and-drop UI.
+- **Quick-Start Collection Templates**: 7 setup presets — Website Starter (default) plus Blog, Agency, SaaS, Corporate, E-commerce, and Blank.
+- **Website Starter Test Suite (July 2026)**: Unit, integration, and E2E smoke coverage for Svedit helpers, homepage seed, license gate, and public `/` route.
+- **Progressive Initialization UX**: Synchronous middleware init — zero-latency cold start without intermediate pages or polling, saving system resources.
+- **Behavioral Learning Engine (June 2026)**: Server-side access pattern tracking with exponential decay scoring, driving adaptive cache warming, smart prefetch, and automatic dashboard reordering.
+
+- **AI Widget Scaffolder (June 2026)**: On-demand code generation for custom 3-pillar widgets from a config object.
+- **Hosted Marketplace (June 2026)**: Plugin/widget ecosystem at marketplace.sveltycms.com with REST API, Stripe checkout, and License v1 verification.
+- **Marketplace Phase 2 — In-App Catalog & Dashboard Widget Packages (August 2026)**: Extensions → Marketplace tab with `GET /api/marketplace` offline-first merge; dashboard widgets refactored into marketplace-portable package folders (`widgets/<folder>/` + required `widget.json` + `.mdx`); `installDashboardWidget()`; local catalog listings with license/price badges. Server-side license gates for premium dashboard endpoints (`dashboard-license.ts` → `403 LICENSE_REQUIRED`, 14-day key-less trial) alongside client-side upgrade prompts — one Free / Freemium / Paid model shared with widgets, plugins, and the site starter. 22/22 core dashboard packages validated by `scripts/check-dashboard-widget-packages.mjs` (manual: `bun run lint:widgets`), including freemium **Commerce Orders** and **Commerce Inventory** (14-day trial).
+- **Dashboard first-paint lean-up (August 2026)**: `/dashboard` no longer eager-evals all 22 widget Svelte modules for picker metadata (`widget.json` via `getInstalledDashboardWidgets()` + `manifestsToPickerList()`); saved layout hydrates in `+page.server.ts` so the client skips `/api/system-preferences` on first paint; widgets are **optional** — Svelte chunks load only when added or visible (no first-6 prefetch); plugin-gated packages (`requiresPlugin`, e.g. Commerce Orders / Inventory) stay out of the picker until that plugin is enabled; AI `GenerativeDashboard` / `json-render-svelte` load on demand; `base-widget` pauses polls while `document.hidden` and dropped `_=Date.now()` cache-bust query strings. Helper coverage: `tests/unit/dashboard/dashboard-runtime.test.ts`.
+- **Access management lean-up + fail-closed RBAC writes (August 2026)**: `/config/access-management` stays admin-only; `POST /api/user/update-roles` is denied to `user:write` editors at the dispatcher **and** handler; website-token mutations require admin; unused `access.remote.ts` `query("unchecked")` token RPCs removed; tabs (permissions/roles/admin/tokens) load on demand; role/permission SSR payloads are field-allowlisted; token user picker drops password/2FA fields. Coverage: `tests/unit/api/user.test.ts`, `tests/unit/api/dispatcher-security-matrix.test.ts`, `tests/unit/routes/access-management-page-server.test.ts`, `tests/unit/config/website-tokens-api.test.ts`.
+- **Media gallery → image editor lean-up (August 2026)**: `/mediagallery` grid/table previews use `mediaDisplayUrl()` (thumbnail/sm/md) instead of the original file; SSR rows are `toGalleryListItem()` allowlists; Sharp/`MediaService` is not imported for gallery `load()`; `ImageEditorModal` / details / table / advanced search / tag editor / drag-preview / folder prompt load via `import()` on use; published-in-use gating is one `getPublishedReferencedIds()` pass (coalesced index rebuild) instead of N parallel `isReferencedByPublishedContent()` scans. Coverage: `tests/unit/media/media-utils.test.ts`, `tests/unit/media/media-reference-index.test.ts`, `tests/unit/media/gallery-list-item.test.ts`.
+- **Plugin Admin Pages (`page` part, August 2026)**: plugins contribute full admin pages under `/plugin/<path>` (catch-all route + isomorphic registry + server `load` + RBAC 403 gate) with declarative sidebar nav, plus the `<AdminZone>` renderer that activates the previously dormant `adminTool` and `AdminAreaExtension` registries (sidebar/header/footer/toolbar/dashboard/config/content zones).
+- **Zero-Allocation Driver & GraphQL Fast-Path Acceleration (August 2026)**: Static ESM binding for hot API domain handlers (`collections`, `content`, `auth`, `system`, `tokens`, `media`, `dashboard`) eliminating dynamic-import resolution on 95%+ of traffic; bounded FIFO route resource state machine (1024 entries); zero-allocation SQLite/relational query parameter coercion (direct array reuse when values need no conversion); pre-compiled fast-JSON envelope serializers; and expanded single-collection GraphQL fast-path supporting filters and sorts directly via `LocalCMS` (bypassing Yoga GraphQL AST generation). Verified with reproducible benchmarks: direct adapter reads at 0.013ms (48.4k RPS), LocalCMS SDK calls at 0.017ms (54.9k RPS), cached counts at 0.003ms (145.8k RPS), and GraphQL collection throughput of 759 RPS.
+- **Cache 2026 Next-Gen Architecture & Multi-Node Cluster Suite (Late August 2026)**:
+  - **GraphQL Automatic Persisted Queries (APQ)**: Implemented standard Apollo APQ protocol (`extensions.persistedQuery.sha256Hash` and GET `?extensions=` / `?hash=`) with fail-open handshake (`PERSISTED_QUERY_NOT_FOUND`) and L1 RAM / L2 Redis query registration (7-day TTL), eliminating AST compilation overhead on cached queries.
+  - **AI-Driven Speculative Pre-Warming**: Integrated `routeResourceStateMachine` with the `Behavioral Learning Engine` (`predictNextPath` Markov transitions). The highest-scoring transition triggers non-blocking, single-flight pre-warming of target endpoints before the user clicks.
+  - **Zero-CPU Pre-Compressed Binary Byte-Serving**: `responseCache` asynchronously computes Brotli and Gzip binary chunks (`Uint8Array`) for responses $>1\text{ KB}$. TURBO-HIT and GraphQL hit paths serve binary chunks directly with zero on-the-fly CPU compression during traffic spikes.
+  - **$O(1)$ Circular Ring-Buffers**: Converted cache metrics buffers to fixed $O(1)$ circular ring buffers, eliminating continuous 1,024-element GC array re-allocations on every request.
+  - **Empirical Validation**: Benchmarks verified Local SDK at **0.004 ms** (195.2k RPS), HTTP E2E at **0.440 ms** (2,262 RPS), GraphQL peak stress capacity at **4,785 RPS** (100 concurrent connections), and Direct findOne at **0.006 ms** (167.3k RPS).
+- **Middleware Pipeline Streamlining & Tag-Based Invalidation (August 2026)**: Pruned mutation-only hooks (`handleRateLimit`, `handleAuditLogging`) from `API_READ` (GET) and `token-resolution` from `API_WRITE`; merged `handleLocalSdk` + `handleContentInitialization` into atomic `handleLocalContext`; unified AEO headers directly into `applyAllSecurityHeaders` eliminating standalone middleware; tag-based cache invalidation across all 4 database adapters (`res:graphql`, `res:col:*`) resolving GQL-after-write caching; and `$state.raw` frontend table runes. Verified via `tests/benchmarks/hooks-performance.test.ts`: REST with API Caching latency reduced to 1.27ms (604 RPS, +11.2% throughput), mutation latency reduced to 2.10ms (-14.3%), and p95 auth pipeline down to 4.34ms.
+- **LiteRT.js AI Client (July 2026)**: Client-side browser ML inference via LiteRT.js in an isolated Web Worker — WebGPU primary, XNNPACK fallback, transparent Ollama fallback. First use case: alt-text generation (`ai.generateAltText()`) for direct WCAG/ATAG compliance. CSP-safe — admin page security headers never modified. SvelteKit remote function API (`import { ai } from \"@services/ai-client\"`). Dedicated `/ai/worker` endpoint with isolated WASM-allowing CSP. 13 files, 3K+ lines, 100% TypeScript, 4 unit tests.
+
+- **Unified Data Hub v2.4.0 (REST write-back)**: All 5 connector types (Postgres, MariaDB, SQLite, MongoDB, REST) support read+write. REST writes are opt-in (`writesEnabled`), SSRF-safe, with Idempotency-Key dedup and circuit breaker. GraphQL mutations (`createVirtualEntry`, `updateVirtualEntry`, `deleteVirtualEntry`) for headless clients. Full API parity across LocalCMS, HTTP, GraphQL, and WebMCP agents. 96 unit tests.
+- **Unified Data Hub v2.2 (stable)**: Marketplace plugin — Postgres + REST federation, same-source joins, native stitch enrich, Collection Builder enrichment picker, GraphQL/WebMCP parity, per-source cursor pagination, decomposition telemetry, headless contracts, cross-source alpha (opt-in). See [unified-data-hub.mdx](/src/plugins/unified-data-hub/unified-data-hub.mdx).
+- **E2E Architecture Simplification**: Collapsed 20 Playwright projects → 4 (wizard, firstuser, auth-setup, chromium). Reduced CI jobs from 19 to 6, server startups from 19 to 1. Total E2E time ~70–110 min → ~12–15 min.
+- **Intelligence Consumption, Predictive Navigation & Smart Table Saved Views (September 2026)**:
+  - **Behavioral Navigation & Collection Tree Smart-Tag**: Confidence-gated adaptive prediction (`predictNextPathAdaptive`) eliminates cold-start guesses; `<Collections />` and `TreeView` render polymorphic `<a>` links with `data-preload="smart"` for the server-predicted collection destination alongside pinned and plugin links.
+  - **"Warm Next Page" on Smart Tables**: Converted table pagination controls (`pagination.svelte`) to predictive links; the Next Page button uses `data-preload="viewport"` to trigger automatic route pre-warming (`/api/system/prewarm-route`) and data preloading via `IntersectionObserver` before click.
+  - **Heat-Aware SWR & Dashboard Quick Chips**: Top-20 hot collections keep a 60s fresh window but serve stale up to 15 min with background revalidation; the admin dashboard surfaces quick-access chips from `hotCollections`.
+  - **Smart Table Saved Views 100% Platform Completion**: Extended `SmartTableSavedViewsMenu` to Media Gallery (`mediagallery/+page.svelte`) and User Management (`admin-area.svelte`), achieving 100% coverage across all 4 list surfaces (Collections, Website Tokens, Users, and Media Gallery).
+  - **SSR & Pipeline Lean Execution**:
+    - _Zero Redundant User Reads_: Synchronized `userCount` between authz hook and SSR layout cache; seeded `layout:user:${_id}` upon auth resolution, eliminating secondary DB user queries on layout render.
+    - _Content Structure SSR Fast-Path_: Eliminated unused `getNavigationStructure` execution from `contentPromise` and added synchronous L1 retrieval for cached sidebar structure.
+    - _GraphQL AST Re-Parse Elimination_: Stashed pre-parsed GraphQL AST from `handle-security.ts` complexity checks onto `event.locals.__graphqlAst` and wired into GraphQL Yoga's `onParse`, avoiding duplicate AST parsing on `/api/graphql` POST requests. Peak throughput reached 4,563 RPS.
+- **Admin Session Console & Smart Table List Platform Expansion (September 2026)**:
+  - **Admin Session Console UI**: Shipped dedicated `ModalUserSessions` dialog in User Management (`admin-area.svelte`) allowing administrators to inspect active sessions per user (device type, browser, OS, client IP, last active timestamp) and revoke individual sessions or all other sessions with CSRF protection.
+  - **Status & Role Facet Chips**: Added interactive facet chips above the users table (`All`, `Admins`, `Users`, `Active`, `Blocked`) with sub-millisecond filtering and dynamic state management.
+  - **List Query Observability**: Instrumented `recordListQuery` across `/api/user` and `/api/token` and connected `SmartTableMetricsBadge` to user management and token tables for real-time p50/p95 latency and hit-rate telemetry.
+  - **Filter Engine Reuse**: Added allowlisted field filtering (`role`, `blocked`, `email`, `username`, `createdAt`) across `auth.ts` and `AuthNamespace.listUsers`.
+- **Adapter-agnostic speculative Turbo fill & 100k write-burst integrity (September 2026)**:
+  - **Functional loop (measured)**: hover/predict/viewport/smart → `GET /api/system/prewarm-route` → LocalCMS `findById`/`find` (all 4 adapters) → `{success,data}` stringified once → `responseCache.buffer` (`Uint8Array`) → next collection GET returns `X-Cache: TURBO-HIT` (zero DB, no per-request `JSON.stringify`). Proven by `tests/benchmarks/speculative-turbo-hit.test.ts`.
+  - **What this is not**: no frozen radix trie / O(1) segment-offset dispatch (`classifyRouteSpec` is a 15-entry exact Map + `startsWith` + 1024 LRU). Prediction is `predictNextPathAdaptive` (**≥5 samples and 30% accuracy**, not an 82% example). Extinction is 0.8 on non-chosen alternatives at navigation time, not a 10s timer. Transition cap is **10,000 per tenant** (prediction-stats cap is 5,000). Turbo GET still goes through SvelteKit `Response` + security headers — JSON/GC cost is gone; there is no raw TCP-socket bypass.
+  - **Write-lane TTL slide**: `getTurboAuthContext` slides expiry on every hit; the collection write lane falls through to full auth instead of 401 when turbo is cold. Node `headersTimeout` on `index.cjs` / `index.bun.ts` is 10 minutes (was 60s 408 with no CMS log). That pair aborted **14/100k** Postgres seed rows at ~60s.
+  - **Seed integrity**: HTTP seed bursts retry 401/408/429/503/socket drops and fail if `created !== requested`. Verified `BENCH_DOCS=100000` competitive replica on PostgreSQL: **100,000/100,000 seeded**, 87s wall (self-measured 2026-09-02).
+  - **Scale-spectrum ledger (executed)**: `exportResult` per step + `printTruthTable`; `BENCHMARK_RECORD=1` wrote `history.sqlite` (`test_id=scale-spectrum`) and MDX ledgers. Self-measured 2026-09-02, 1-row vs largest-step retention:
+
+    | Engine         | Steps  |        findByIdRandom |    listFilterSort |           GraphQL |            Create |
+    | -------------- | ------ | --------------------: | ----------------: | ----------------: | ----------------: |
+    | SQLite (entry) | 1→10k  | 2271→1581 RPS (0.70×) | 2444→4602 (1.89×) | 2047→3873 (1.89×) | 1474→2540 (1.73×) |
+    | PostgreSQL     | 1→100k |     2379→1372 (0.57×) | 2185→4410 (2.03×) | 1923→3294 (1.71×) | 1084→1482 (1.40×) |
+    | MariaDB        | 1→100k |     2303→1366 (0.60×) | 2124→4329 (2.04×) | 2098→4021 (1.91×) | 1132→1002 (0.90×) |
+    | MongoDB        | 1→100k |     2420→1905 (0.78×) | 2193→3971 (1.81×) | 2179→3085 (1.41×) | 1370→2521 (1.84×) |
+
+    LIMIT/PK paths stay flat-to-faster with N. Random PK retains 57–78% at 100k (B-tree depth + cache misses), not an O(N) collapse. MariaDB create at 100k is the only write dip (0.90×).
+
+  - **SQLite `mixed` trend (not a new cliff)**: ledger 🔴 +34% seq / +45% con vs the 7-run mean (~0.43 / 1.89 ms). This session's **pre-change** baseline was already 0.47 / 2.80 ms; post-change re-runs sit at 0.58 / 2.74–3.47 ms. Mixed is write-growing (1/10 creates) and runs last after 300 creates + 300 updates, so it is noisier than isolated lanes. Not treated as a product regression.
+  - **Bootstrap skip**: `routeSpec.skipMiddlewares` is honored (`preferences` / `media`) instead of being classified and ignored.
+
+- **Point-lookup slab & hot-path serialization (September 2026)**:
+  - **Random-access slab cache**: Implemented dedicated 2,000-slot FIFO cache (`randomAccessSlab`, 30s TTL) for point lookups, automatically invalidated on node/collection mutations. Boosted warm `findByIdRandom` from 1,488 RPS to **4,404 RPS (+196% cold-to-warm boost)**, bringing random point-reads to parity with sequential `findById` (4,643 RPS).
+  - **LRU lock contention elimination**: Disabled `updateAgeOnGet` on `ENTRY` and `CONTENT` categories in `cache-service.ts`, removing unnecessary LRU reorder lock overhead on read-heavy hot paths.
+  - **Pattern invalidation acceleration**: Invalidation latency reduced by −87% (**4.11ms → 0.53ms, +676% RPS**, 243 → 1,884 RPS).
+  - **Single-pass O(N) array serialization**: Refactored `serializeArrayFast` in `src/utils/fast-json.ts` into a single-pass join (`[${out.join(",")}]`), avoiding multi-slice concatenation and GC overhead on large array payloads (`listLarge` reaching 3,538 RPS in SQLite replica).
+  - **High-concurrency pool floor**: Increased base connection pool floor from 20 to 32 on 8c+ hardware profiles (`src/databases/postgresql/adapter-core.ts`), preventing connection pool starvation under 32 concurrent clients.
+  - **Transactional mail pool hardening**: Enforced `maxRecipients: 1`, `maxMessages: Infinity`, `connectionTimeout: 10_000`, and `socketTimeout: 30_000` on pooled Nodemailer transports (`src/utils/email.server.ts`), guaranteeing forward-compatibility with Nodemailer 10.0.0.
+- **Lean Architecture, Route Centralization & Storage Deduplication (September 2026)**:
+  - **Catch-All Gatekeeper Centralization**: Eliminated rogue standalone API routes (`/api/seo/link-suggestions`, `/api/chat`, `/api/remoteVideo`), consolidating their logic into the central dispatcher (`src/routes/api/[...path]/+server.ts`) and `handlers/utility.ts`. All endpoints now strictly enforce central `ENDPOINT_PERMISSIONS`, fail-closed defaults, and RBAC matrix validation.
+  - **Storage & Connection Pool Deduplication**: Re-architected `src/utils/temp-store.ts` to delegate directly to `cacheService` (`CacheCategory.SESSION`), eliminating duplicate Redis client instances, redundant pool allocations, and manual Map fallbacks.
+  - **Dead Code & Micro-File Pruning**: Eliminated ~1,200 LOC of dead code across 12 obsolete files (`file-uploading.ts`, `security.worker.ts`, `fs-mock.ts`, `path-mock.ts`, `response-headers.ts`, `field-selection.ts`, `memory-optimizer.svelte.ts`, `schema-diff.ts`, `server-utils.ts`, `system-integrity.ts`, `migration-manager.ts`, `lazy-rune.ts`), eliminating micro-file fragmentation and legacy bridges.
+  - **Shared Logic & Security Hardening**: Consolidated email normalization with Unicode NFC normalization against homoglyph attacks; unified database connection string parsing in Setup with `@utils/connection-parser`; wired client `Save-Data` and connection quality detection into `@utils/predictive-preload`.
+  - **AGENTS.md Contract Compliance**: Enforced `raise()` error handling contract across preview endpoints and eliminated `catch (err: any)` in favor of typed `catch (err: unknown)` with safe stringification.
+- **Enterprise Review Workflows, Visual Block Builder & In-App API Playground (September 2026)**:
+  - **Multi-Stage Review Workflows**: Shipped complete content lifecycle FSM (`WorkflowService`) with RBAC-gated stage transitions (`workflow:transition`), audit history logging, collection binding, and visual state editor at `/config/workflows`. Editors transition entries with optional review comments directly inside the content view via `<WorkflowActions>`.
+  - **Visual Polymorphic Block Builder Widget**: Shipped custom `BlockBuilder` widget (`src/widgets/custom/block-builder/`) enabling component-driven page design with 8 production presets (Hero, Text & Prose, Media Showcase, Call to Action, Features Grid, Quote/Testimonial, FAQ, Rich Text), Valibot schema validation, keyboard-accessible reordering, duplicate/delete operations, and framework-agnostic JSON output for modern headless frontends.
+  - **In-App Developer & API Playground**: Shipped unified developer console at `/config/api` inside `<AdminPageShell>`, providing live REST execution against the OpenAPI 3.1 specification, interactive GraphQL query testing against `/api/graphql`, and multi-language client code generation (cURL, TypeScript fetch, Python requests, zero-latency SvelteKit `LocalCMS`).
+- **Enterprise OIDC / SSO with RFC 7636 PKCE & JIT Role Mapping (September 2026)**:
+  - **RFC 7636 PKCE (S256)**: Cryptographic Proof Key for Code Exchange support with high-entropy code verifier generation and SHA-256 code challenge computation on every authorization code login flow (`buildOidcAuthorizationUrl` and `exchangeOidcCode`).
+  - **Just-In-Time (JIT) Auto-Provisioning & Claim Role Mapping**: Automated new user registration on successful OIDC callback, mapping IdP claims/groups (e.g. `groups`, `roles`) to local CMS roles (`resolveJitRole`), with optional role synchronization on each login.
+  - **Dynamic Branded IdP Login Buttons**: Front-end login screen (`/login`) now dynamically discovers and renders branded IdP login buttons (Google Workspace, Microsoft Entra ID, Okta, Auth0, Keycloak) with official icons, accessible ARIA labels, and predictive hover preloading.
+  - **SSO & OIDC Management Console**: Dedicated tab in Access Management (`/config/access-management`) with provider presets, issuer OIDC discovery validation, redirect URI allowlisting, and granular JIT claim rule management backed by `/api/auth/sso-providers`.
+- **Enterprise Collection Builder, Split-View & Database Schema Ingestion (September 2026)**:
+  - **Smart Type Inference & Natural-Language Quick-Add**: Built a zero-dependency client-side heuristic engine (`src/routes/(app)/config/collectionbuilder/smart-inference.ts`) enabling instant natural-language field creation (e.g. `email`, `price`, `cover_image`, `tags`, `is_published`, `author_id`, `rating`, `birth_date`). Automatically resolves widget types, icons, database field names, and pre-configured validation constraints on `Enter ↵`, eliminating tedious modal clicks.
+  - **Dual-Pane Live "Visual Canvas ↔ TypeScript Code" Split-View**: Implemented real-time bi-directional code ↔ GUI awareness in `collection-widget.svelte` with a 3-way view toggle (`Canvas` | `Split View` | `TypeScript`). In Split View, visual canvas edits reactively reflect in the generated production-ready `defineCollection({ ... })` TypeScript schema (`collection-code-generator.ts`) with zero disk overhead, 100% parity with SveltyCMS AST compilation, and 1-click clipboard export.
+  - **Database DDL & Schema Ingestion Engine**: Engineered `ddl-schema-parser.ts` and `modal-schema-ingestion.svelte`, enabling instant reverse-engineering of SQL `CREATE TABLE` definitions across PostgreSQL, MySQL, MariaDB, and SQLite directly into SveltyCMS collections. Automatically resolves `FOREIGN KEY ... REFERENCES other_table(id)` to `Relation` widgets, `ENUM(...)` to populated `Select` widgets, and parses arbitrary REST API JSON payloads into structured collections.
+  - **Tree-View Hierarchy & Drag-and-Drop Hardening**: Corrected RTL off-screen coordinate mapping in `tree-drag-preview.svelte` with floating nesting targets (`↳ Inside {category}`), added live collection/category statistics, and implemented full keyboard reordering (`Alt+Up/Down`) with roving tabindex.
+  - **Unified Favorites & Tagging System with LeftSidebar Integration**: Introduced `collectionMetadataStore` with Svelte 5 runes (`$state`), deterministic WCAG 2.2 AA token-based tag color palettes, and cross-component/cross-tab synchronization. Enables 1-click starring (★) of collections and categories in both the builder board and the left sidebar, color-coded tag taxonomy, dual-toolbar filtering chips (`Favorites` and `All Tags`), in-form tag configuration, and instant navigation from the sidebar header.
+- **Per-Role Multi-Factor Authentication Enforcement (MFA-RBAC) (September 2026)**:
+  - **Role-Level MFA Requirement**: Added `Role.mfaRequired` attribute with full database schema support across all 4 database adapters (SQLite, PostgreSQL, MariaDB, MongoDB).
+  - **Session AMR Lifecycle Tracking (RFC 8176)**: Sessions capture Authentication Methods References (`amr: ["pwd"]` vs `amr: ["pwd", "mfa"]`) and `mfaVerifiedAt` timestamps across in-memory and Redis stores.
+  - **Centralized Endpoint Gating**: Requests made under mandatory-MFA roles carrying non-MFA sessions are rejected at the gateway (`_checkEndpointPermission`) with HTTP 403 `MFA_REQUIRED`.
+  - **Zero-Bypass Device Policy**: Device trust cookies (`__Host-2fa-trusted-device`) are strictly overridden for roles with `mfaRequired: true`, mandating interactive second-factor verification on every session.
+- **Token-Bucket Rate Limiter with Redis-Fallback & Adaptive Throttling (September 2026)**:
+  - **Continuous Token Replenishment**: Replaced coarse fixed-window counters with a high-precision Token-Bucket algorithm (`handle-rate-limit.ts`) for smooth burst management, eliminating 2x spike artifacts at window boundaries.
+  - **Redis-Primary with Automatic Memory Fallback**: Distributed token accounting via atomic Lua script on Redis L2 with a strict 15ms timeout and 5-second circuit-breaker backoff. Falls back seamlessly and instantaneously to local in-memory token buckets without failing requests or degrading user latency.
+  - **Zero-Tax Adaptive Sizing**: Dynamically scales bucket capacities based on user profile (Admin 10x, Authenticated User 2x, Anonymous 1x) and system hardware pressure from `SystemMonitor` (0.8x–2.0x), utilizing a zero-overhead synchronous session cache peeker in `handle-authentication.ts`.
+- **Application-Layer Encryption (ALE) Zero-Tax Performance Benchmark (September 2026)**:
+  - **Empirical Benchmarking Suite**: Created `tests/benchmarks/ale-encryption-impact.test.ts` profiling AES-256-GCM field encryption on `content_nodes` and `audit_logs` across 256 B, 4 KB, and 64 KB payloads.
+  - **Zero-Tax Cryptographic Optimization**: Optimized `field-encryption.ts` with static crypto imports, synchronous key resolution (`getFieldKeysSync()`), direct GCM ciphertext extraction, and synchronous primitives (`encryptFieldValueSync`, `decryptFieldValueSync`).
+  - **Tolerance Gate Verification**: Achieved sub-18 µs encryption latency (<3% of total write time), >213 MB/s memory throughput, and 0.20–0.55 ms transactional DB write speeds, confirming compliance with the <5% write overhead tolerance budget. Documented in [Encryption Impact Benchmark](../benchmarks/encryption_impact.mdx).
+- **Centralized Build Orchestrator & Scripts Consolidation (September 2026)**:
+  - **TypeScript Build Orchestration (`scripts/build.ts`)**: Programmatic builder utilizing the native `esbuild` JavaScript API to bundle `src/collaboration/yjs-sync-server.ts` and sync `module-worker.server.ts`, replacing 9 fragile, duplicated ~250-character inline shell strings in `package.json`.
+  - **Scanner-Enforced Security**: Eliminates `shell: true` execution in build scripts, strictly adhering to `scripts/scan-security-risk.ts` process safety rules.
+  - **Lean CLI Surface**: Consolidated fragmented `config:*` sub-commands into `"config": "bun run scripts/config-cli.ts"` and eliminated redundant Vitest flag duplicates, preserving 100% CI parity with zero performance or build regression.
+- **Paraglide i18n Tree-Shaking Audit & Copy Scanner (September 2026)**:
+  - **Strict Tree-Shaking (Rule 3.1)**: Eliminated wildcard imports (`import * as m from '@src/paraglide/messages'`) across dashboard widgets in favor of explicit named imports, preventing dead message bundle bloat.
+  - **Automated Hardcoded Copy Scanner (`scripts/check-hardcoded-copy.ts`)**: Introduced an automated scanner and CI check guarding against wildcard paraglide imports and untranslated strings across admin Svelte routes.
+
+---
+
+**References:**
+
+- [Performance Benchmarks](../../tests/benchmarks/hooks-performance.test.ts)
+- [Database Performance](../../tests/benchmarks/database-performance.test.ts)
+- [Live Preview Architecture](../reference/architecture/live-preview-architecture.mdx)
+
+---
+
+## Related
+
+- [Project Roadmap](./roadmap-2026.mdx)
+- [Competitive Comparison](./competitive-comparison.mdx)
+- [Site Starter](/docs/development/site-starter.mdx)
+- [Performance Benchmarks](./benchmarks/index.mdx)
+- [Getting Started](../getting-started.mdx)

@@ -1,64 +1,69 @@
 /**
  * @file src/routes/(app)/[language]/+page.server.ts
- * @description Redirect handler for language-only URLs
- * Redirects /en (or any language) to the first available collection
+ * @description Redirect handler for language-only URLs.
+ * Redirects /en (or any language) to the first available collection.
+ * Usescontent-managerfor robust, canonical path resolution.
  */
 
-import { redirect } from '@sveltejs/kit';
-import type { PageServerLoad } from './$types';
-import { updateCollections, getCollections } from '@src/content';
-import { logger } from '@utils/logger.server';
+import { contentSystem } from "@src/content/index.server";
+import { isSystemReady } from "@src/stores/system/state.svelte";
+import { getPublicSettingSync } from "@src/services/core/settings-service";
+import { error, isHttpError, isRedirect, redirect } from "@sveltejs/kit";
+import { logger } from "@utils/logger";
+import { getAuthenticatedUser } from "@utils/page-guards.server";
+import type { PageServerLoad } from "./$types";
 
-export const load: PageServerLoad = async ({ params }) => {
-	const { language } = params;
+// Cache the first collection URL per language (TTL: 5 minutes in production)
+const _redirectCache = new Map<string, { url: string; ts: number }>();
+const REDIRECT_CACHE_TTL = 5 * 60_000;
 
-	try {
-		// Update collections to ensure they're loaded
-		await updateCollections();
+export const load: PageServerLoad = async ({ params, locals, url }) => {
+  getAuthenticatedUser(locals, url.pathname + url.search);
+  const { language } = params;
+  const { tenantId } = locals;
 
-		// Get all collections
-		const collections = await getCollections();
-		const collectionList = Object.values(collections).filter(Boolean);
+  const availableLanguages = getPublicSettingSync("AVAILABLE_CONTENT_LANGUAGES") || ["en"];
+  if (!availableLanguages.includes(language)) {
+    throw error(404, "Not Found");
+  }
 
-		logger.info('[Language Redirect] Collections loaded', {
-			language,
-			collectionCount: collectionList.length,
-			collectionNames: collectionList.map((c) => c?.name)
-		});
+  try {
+    // Check redirect cache first (production only)
+    if (process.env.NODE_ENV === "production") {
+      const cached = _redirectCache.get(language);
+      if (cached && Date.now() - cached.ts < REDIRECT_CACHE_TTL) {
+        throw redirect(302, cached.url);
+      }
+    }
 
-		if (collectionList.length === 0) {
-			// No collections available, redirect to dashboard
-			logger.info('[Language Redirect] No collections found, redirecting to dashboard');
-			throw redirect(302, `/dashboard`);
-		}
+    // Only initialize if system isn't ready yet
+    if (!isSystemReady()) {
+      await contentSystem.initialize(tenantId);
+    }
 
-		// Get the first collection with a valid path
-		const firstCollection = collectionList.find((c) => c && c.path);
+    // Get robust redirect URL for first collection
+    // This returns /${language}/${collectionId}, which then canonically redirects
+    // to the pretty path in [...collection]/+page.server.ts
+    const redirectUrl = await contentSystem.getFirstCollectionRedirectUrl(language, tenantId);
 
-		if (firstCollection && firstCollection.path) {
-			// Check if path already includes language
-			const redirectPath = firstCollection.path.startsWith(`/${language}`) ? firstCollection.path : `/${language}${firstCollection.path}`;
+    if (redirectUrl) {
+      _redirectCache.set(language, { url: redirectUrl, ts: Date.now() });
+      throw redirect(302, redirectUrl);
+    }
 
-			logger.info('[Language Redirect] Redirecting to first collection', {
-				collectionName: firstCollection.name,
-				collectionPath: firstCollection.path,
-				redirectPath
-			});
+    // Fallback if no collections found - go to collection builder
+    logger.warn("[Language Redirect] No collections found for redirection, using builder fallback");
+    throw redirect(302, "/config/collectionbuilder");
+  } catch (err) {
+    if (isRedirect(err) || isHttpError(err)) {
+      throw err;
+    }
 
-			throw redirect(302, redirectPath);
-		}
-
-		// Fallback to dashboard if no collection with path found
-		logger.warn('[Language Redirect] No collection with valid path found, redirecting to dashboard');
-		throw redirect(302, `/dashboard`);
-	} catch (error) {
-		// If it's already a redirect, rethrow it
-		if (error && typeof error === 'object' && 'status' in error && (error as { status: number }).status === 302) {
-			throw error;
-		}
-
-		logger.error('Error in language redirect', { error });
-		// Otherwise, fallback to dashboard
-		throw redirect(302, `/dashboard`);
-	}
+    logger.error("Error in language redirect, falling back to root", {
+      error: err,
+      language,
+      tenantId,
+    });
+    throw redirect(302, "/");
+  }
 };

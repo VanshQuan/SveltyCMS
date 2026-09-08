@@ -5,271 +5,432 @@
 -->
 
 <script lang="ts">
-	import PageTitle from '@components/PageTitle.svelte';
-	import PermissionGuard from '@components/PermissionGuard.svelte';
-	import * as m from '@src/paraglide/messages';
-	import { setCollection } from '@src/stores/collectionStore.svelte';
-	import { toggleUIElement } from '@src/stores/UIStore.svelte';
-	import { onMount } from 'svelte';
+import AdminPageShell from "@components/admin-page-shell.svelte";
+import AdminCard from "@components/admin-card.svelte";
+import Slot from "@components/system/slot.svelte";
+import AdminZone from "@src/components/system/admin-zone.svelte";
+import PermissionGuard from "@src/components/permission-guard.svelte";
+import { collections } from "@src/stores/collection-store.svelte";
+import { ui } from "@src/stores/ui-store.svelte.ts";
+import { onMount } from "svelte";
+import { fly } from "svelte/transition";
+import { page } from "$app/state";
+import {
+	applayout_systemconfiguration,
+	config_page_subtitle,
+	config_tile_access,
+	config_tile_api,
+	config_tile_automations,
+	config_tile_builder,
+	config_tile_design,
+	config_tile_extensions,
+	config_tile_monitor,
+	config_tile_queue,
+	config_tile_redirects,
+	config_tile_settings,
+	config_tile_sync,
+	config_tile_tenants,
+	config_tile_trash,
+	config_tile_webhooks,
+	config_tile_workflows,
+	config_tile_dashboard,
+	config_tile_email,
+} from "@src/paraglide/messages";
 
-	onMount(() => {
-		setCollection(null);
-	});
+let { data } = $props();
 
-	function handleMobileSidebarClose() {
-		// Hide sidebar on mobile before navigation
-		if (typeof window !== 'undefined' && window.innerWidth < 768) {
-			toggleUIElement('leftSidebar', 'hidden');
-		}
+const showTenantsTile = $derived(
+	(page.data.isMultiTenant as boolean) && data.isAdmin && !page.data.tenantId,
+);
+
+onMount(() => {
+	collections.setCollection(null);
+});
+
+function handleMobileSidebarClose() {
+	// Hide sidebar on mobile before navigation
+	if (typeof window !== "undefined" && window.innerWidth < 768) {
+		ui.toggle("leftSidebar", "hidden");
 	}
+}
 
-	// A single, data-driven array to define all configuration items.
-	const configItems = [
-		{
-			id: 'collectionbuilder',
-			href: '/config/collectionbuilder',
-			label: m.config_collectionbuilder(),
-			icon: 'fluent-mdl2:build-definition',
-			classes: 'variant-outline-tertiary dark:variant-outline-secondary border-2 border-tertiary-500/50 dark:border-secondary-500/50',
-			iconColor: 'text-tertiary-600',
-			permission: {
-				contextId: 'config:collectionManagement',
-				name: 'Collection Builder',
-				description: 'Manage and build collections',
-				requiredRole: 'admin',
-				action: 'manage',
-				contextType: 'configuration'
-			}
+// Icon grid — flat, scannable, mobile-first.
+// Order defines visual grouping. Comments mark domain boundaries.
+// Plugins that need a config page register here; plugins that only add
+// settings tabs or monitor panels don't need their own tile.
+const configItems = [
+	// ── System ──
+	{
+		id: "settings",
+		href: "/config/system-settings",
+		label: "System Settings",
+		icon: "uil:setting",
+		iconColor: "",
+		permission: {
+			contextId: "config:settings",
+			name: "System Settings",
+			description: "Database and infrastructure configuration — extensible via plugins",
+			requiredRole: "admin",
+			action: "manage",
+			contextType: "system",
 		},
-		{
-			id: 'graphql',
-			href: '/api/graphql',
-			label: m.config_graphql(),
-			icon: 'teenyicons:graphql-solid',
-			classes: 'variant-outline-tertiary dark:variant-outline-secondary border-2 border-tertiary-500/50 dark:border-secondary-500/50',
-			iconColor: 'text-warning-600',
-			target: '_blank',
-			permission: {
-				contextId: 'api:graphql',
-				name: 'GraphQL',
-				description: 'Access GraphQL API',
-				requiredRole: 'developer',
-				action: 'access',
-				contextType: 'system'
-			}
+	},
+	{
+		id: "tenants",
+		href: "/admin/tenants",
+		label: "Tenants",
+		icon: "mdi:office-building",
+		iconColor: "text-tertiary-500",
+		visible: () => showTenantsTile,
+		permission: {
+			contextId: "config:settings",
+			name: "Tenant Management",
+			description: "Manage multi-tenant workspaces and provisioning",
+			requiredRole: "admin",
+			action: "manage",
+			contextType: "system",
 		},
-		{
-			id: 'imageeditor',
-			href: '/imageEditor',
-			label: m.config_imageeditor(),
-			icon: 'bi:image',
-			classes: 'variant-outline-tertiary dark:variant-outline-secondary border-2 border-tertiary-500/50 dark:border-secondary-500/50',
-			iconColor: 'text-primary-600',
-			permission: {
-				contextId: 'content:images',
-				name: 'Image Editor',
-				description: 'Edit and manage images',
-				requiredRole: 'editor',
-				action: 'manage',
-				contextType: 'system'
-			}
+	},
+	{
+		id: "designSystem",
+		href: "/config/design-system",
+		label: "Design System",
+		icon: "mdi:compass-outline",
+		iconColor: "text-tertiary-500",
+		permission: {
+			contextId: "config:appearance",
+			name: "Design System",
+			description: "Appearance, themes, personal overrides, density, and live component preview",
+			requiredRole: "admin",
+			action: "manage",
+			contextType: "configuration",
 		},
-		{
-			id: 'emailPreviews',
-			href: '/email-previews',
-			label: m.config_emailPreviews(),
-			icon: 'mdi:email-outline',
-			classes: 'variant-outline-tertiary dark:variant-outline-secondary border-2 border-tertiary-500/50 dark:border-secondary-500/50',
-			iconColor: 'text-primary-600',
-			target: '_blank',
-			permission: {
-				contextId: 'system:admin',
-				name: 'Email Previews',
-				description: 'Preview system emails',
-				requiredRole: 'admin',
-				action: 'access',
-				contextType: 'system'
-			}
+	},
+	{
+		id: "monitor",
+		href: "/config/monitor",
+		label: "System Monitor",
+		icon: "mdi:shield-check-outline",
+		iconColor: "",
+		permission: {
+			contextId: "config:systemMonitor",
+			name: "System Monitor",
+			description: "Health dashboard, audit log, and plugin status",
+			requiredRole: "admin",
+			action: "view",
+			contextType: "system",
 		},
-		{
-			id: 'dashboard',
-			href: '/dashboard',
-			label: m.dashboard(),
-			icon: 'bi:bar-chart-line',
-			classes: 'variant-ghost-primary dark:text-white',
-			iconColor: 'text-error-600',
-			permission: {
-				contextId: 'system:dashboard',
-				name: 'Dashboard',
-				description: 'Access system dashboard',
-				requiredRole: 'user',
-				action: 'access',
-				contextType: 'system'
-			}
+	},
+	// ── Content ──
+	{
+		id: "collectionbuilder",
+		href: "/config/collectionbuilder",
+		label: "Collection Builder",
+		icon: "fluent-mdl2:build-definition",
+		iconColor: "",
+		permission: {
+			contextId: "config:collectionManagement",
+			name: "Collection Builder",
+			description: "Visual content-modeling and schema builder",
+			requiredRole: "admin",
+			action: "manage",
+			contextType: "configuration",
 		},
-		{
-			id: 'marketplace',
-			href: 'https://www.sveltyCMS.com',
-			label: m.marketplace(),
-			icon: 'icon-park-outline:shopping-bag',
-			classes: 'variant-ghost-primary dark:text-white',
-			target: '_blank',
-			permission: null
+	},
+	// ── Security ──
+	{
+		id: "accessManagement",
+		href: "/config/access-management",
+		label: "Access Management",
+		icon: "mdi:account-group",
+		iconColor: "text-error-500",
+		permission: {
+			contextId: "config:accessManagement",
+			name: "Access Management",
+			description: "Users, roles, permissions, and website tokens",
+			requiredRole: "admin",
+			action: "manage",
+			contextType: "configuration",
 		},
-		{
-			id: 'widgetManagement',
-			href: '/config/widgetManagement',
-			label: m.config_widgetManagement(),
-			icon: 'mdi:widgets',
-			classes: 'variant-ghost-primary dark:text-white',
-			permission: {
-				contextId: 'config:widgetManagement',
-				name: 'Widget Management',
-				description: 'Manage system widgets',
-				requiredRole: 'admin',
-				action: 'manage',
-				contextType: 'configuration'
-			}
+	},
+	// ── Extensions ──
+	{
+		id: "extensions",
+		href: "/config/extensions",
+		label: "Extensions",
+		icon: "mdi:puzzle-outline",
+		iconColor: "text-tertiary-500",
+		permission: {
+			contextId: "config:extensions",
+			name: "Extensions",
+			description: "Plugins, widgets, themes, and marketplace",
+			requiredRole: "admin",
+			action: "manage",
+			contextType: "configuration",
 		},
-		{
-			id: 'themeManagement',
-			href: '/config/themeManagement',
-			label: m.config_themeManagement(),
-			icon: 'ph:layout',
-			classes: 'variant-ghost-primary dark:text-white',
-			permission: {
-				contextId: 'config:themeManagement',
-				name: 'Theme Management',
-				description: 'Manage system themes',
-				requiredRole: 'admin',
-				action: 'manage',
-				contextType: 'configuration'
-			}
+	},
+	// ── Operations ──
+	{
+		id: "automations",
+		href: "/config/automations",
+		label: "Automations",
+		icon: "mdi:robot-outline",
+		iconColor: "text-warning-500",
+		permission: {
+			contextId: "config:automations",
+			name: "Automations",
+			description: "Event-driven workflow automations",
+			requiredRole: "admin",
+			action: "manage",
+			contextType: "configuration",
 		},
-		{
-			id: 'settings',
-			href: '/config/systemsetting',
-			label: m.config_settings(),
-			icon: 'uil:setting',
-			classes: 'variant-ghost-error dark:text-white',
-			permission: {
-				// FIX: Changed from 'system:settings' to 'config:settings' to match +page.server.ts
-				contextId: 'config:settings',
-				name: 'Settings',
-				description: 'Manage system settings',
-				requiredRole: 'admin',
-				action: 'manage',
-				contextType: 'system'
-			}
+	},
+	{
+		id: "workflows",
+		href: "/config/workflows",
+		label: "Workflows",
+		icon: "mdi:state-machine",
+		iconColor: "text-primary-500",
+		permission: {
+			contextId: "config:automations",
+			name: "Workflows",
+			description: "Content review stages and state transitions",
+			requiredRole: "admin",
+			action: "manage",
+			contextType: "configuration",
 		},
-		{
-			id: 'importExport',
-			href: '/config/import-export',
-			label: 'Import & Export',
-			icon: 'mdi:database-import',
-			classes: 'variant-ghost-warning dark:text-white',
-			permission: {
-				contextId: 'config:importExport',
-				name: 'Import & Export',
-				description: 'Import and export system data',
-				requiredRole: 'admin',
-				action: 'manage',
-				contextType: 'system'
-			}
+	},
+	{
+		id: "queue",
+		href: "/config/queue",
+		label: "Background Queue",
+		icon: "mdi:playlist-play",
+		iconColor: "",
+		permission: {
+			contextId: "config:queue",
+			name: "Background Queue",
+			description: "Monitor background jobs and retry failed tasks",
+			requiredRole: "admin",
+			action: "view",
+			contextType: "system",
 		},
-		// START: New Configuration Manager Button
-		{
-			id: 'configurationManager',
-			href: '/config/configurationManager',
-			label: 'Config Manager',
-			icon: 'mdi:sync-circle',
-			classes: 'variant-ghost-secondary dark:text-white',
-			permission: {
-				contextId: 'config:synchronization',
-				name: 'Configuration Manager',
-				description: 'Synchronize configuration between filesystem and database.',
-				requiredRole: 'admin',
-				action: 'manage',
-				contextType: 'system'
-			}
+	},
+	{
+		id: "sync",
+		href: "/config/sync",
+		label: "Data Sync",
+		icon: "mdi:sync-circle",
+		iconColor: "",
+		permission: {
+			contextId: "config:synchronization",
+			name: "Data Sync",
+			description: "Import content from external platforms and sync config to filesystem",
+			requiredRole: "admin",
+			action: "manage",
+			contextType: "system",
 		},
-		// END: New Configuration Manager Button
-		// START: System Health Monitor
-		{
-			id: 'systemHealth',
-			href: '/config/system-health',
-			label: 'System Health',
-			icon: 'mdi:heart-pulse',
-			classes: 'variant-ghost-success dark:text-white',
-			permission: {
-				contextId: 'config:systemHealth',
-				name: 'System Health',
-				description: 'Monitor system services and health status',
-				requiredRole: 'admin',
-				action: 'view',
-				contextType: 'system'
-			}
+	},
+	// ── Tools ──
+	{
+		id: "apiPlayground",
+		href: "/config/api",
+		label: "API Playground",
+		icon: "mdi:api",
+		iconColor: "text-warning-500",
+		permission: {
+			contextId: "api:graphql",
+			name: "API Playground",
+			description: "Interactive REST (OpenAPI) and GraphQL developer console",
+			requiredRole: "developer",
+			action: "access",
+			contextType: "system",
 		},
-		// END: System Health Monitor
-		{
-			id: 'accessManagement',
-			// FIX: Corrected typo from 'assessManagement'
-			href: '/config/accessManagement',
-			label: m.config_accessManagement(),
-			icon: 'mdi:account-group',
-			classes: 'variant-ghost-error dark:text-white',
-			permission: {
-				contextId: 'config:accessManagement',
-				name: 'Access Management',
-				description: 'Manage user access and roles',
-				requiredRole: 'admin',
-				action: 'manage',
-				contextType: 'configuration'
-			}
-		}
-	];
+	},
+	{
+		id: "dashboard",
+		href: "/dashboard",
+		label: "Dashboard",
+		icon: "bi:bar-chart-line",
+		iconColor: "text-error-600",
+		permission: {
+			contextId: "system:dashboard",
+			name: "Dashboard",
+			description: "Content metrics and activity overview",
+			requiredRole: "user",
+			action: "access",
+			contextType: "system",
+		},
+	},
+	{
+		id: "emailPreviews",
+		href: "/email-previews",
+		label: "Email Previews",
+		icon: "mdi:email-outline",
+		iconColor: "",
+		target: "_blank",
+		permission: {
+			contextId: "system:admin",
+			name: "Email Previews",
+			description: "Preview transactional email templates",
+			requiredRole: "admin",
+			action: "access",
+			contextType: "system",
+		},
+	},
+	// ── TBD: features under review for final placement ──
+	{
+		id: "webhooks",
+		href: "/config/webhooks",
+		label: "Webhooks",
+		icon: "mdi:webhook",
+		iconColor: "text-warning-600",
+		permission: {
+			contextId: "config:webhooks",
+			name: "Webhooks",
+			description: "Outgoing HTTP callbacks on content events",
+			requiredRole: "admin",
+			action: "manage",
+			contextType: "configuration",
+		},
+	},
+	{
+		id: "redirects",
+		href: "/config/redirects",
+		label: "Redirects",
+		icon: "mdi:arrow-decision",
+		iconColor: "text-tertiary-500",
+		permission: {
+			contextId: "config:redirects",
+			name: "Redirects",
+			description: "301/302 redirect rules with regex support",
+			requiredRole: "admin",
+			action: "manage",
+			contextType: "configuration",
+		},
+	},
+	{
+		id: "trash",
+		href: "/config/trash",
+		label: "Trash",
+		icon: "mdi:delete-restore",
+		iconColor: "text-error-500 dark:text-error-400",
+		permission: {
+			contextId: "config:trash",
+			name: "Trash",
+			description: "Recover or permanently delete soft-deleted content",
+			requiredRole: "admin",
+			action: "manage",
+			contextType: "configuration",
+		},
+	},
+];
+
+const tileLabel = (id: string, fallback: string): string => {
+	const labels: Record<string, () => string> = {
+		settings: config_tile_settings,
+		tenants: config_tile_tenants,
+		designSystem: config_tile_design,
+		monitor: config_tile_monitor,
+		collectionbuilder: config_tile_builder,
+		accessManagement: config_tile_access,
+		extensions: config_tile_extensions,
+		automations: config_tile_automations,
+		workflows: config_tile_workflows,
+		queue: config_tile_queue,
+		sync: config_tile_sync,
+		apiPlayground: config_tile_api,
+		dashboard: config_tile_dashboard,
+		emailPreviews: config_tile_email,
+		webhooks: config_tile_webhooks,
+		redirects: config_tile_redirects,
+		trash: config_tile_trash,
+	};
+	return labels[id]?.() ?? fallback;
+};
 </script>
 
-<PageTitle name={m.config_pagetitle()} showBackButton={true} backUrl="/" icon="material-symbols:build-circle" />
-
-<div class="wrapper mb-2 max-h-[calc(100vh-65px)] overflow-auto p-2">
-	<h2 class="h2 mb-4 text-center font-bold text-tertiary-600 dark:text-primary-500">
-		{m.config_body()}
-	</h2>
+<AdminPageShell title={applayout_systemconfiguration()} showBackButton={true} backUrl="/" icon="material-symbols:build-circle">
+    <AdminCard class="border border-surface-500/30 bg-white p-4 shadow-sm backdrop-blur-md dark:border-surface-500/40 dark:bg-surface-900/50">
+	<h2 class="h2 mb-4 text-center font-bold text-tertiary-600 dark:text-primary-500" in:fly={{ y: -10, duration: 300 }}>{config_page_subtitle()}</h2>
 
 	<div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
-		{#each configItems as item (item.id)}
-			{@const usePermissionGuard = !!item.permission}
+		{#each configItems.filter((item) => !('visible' in item) || item.visible?.()) as item, idx (item.id || item.label)}
+			{const usePermissionGuard = !!item.permission}
 
 			{#if usePermissionGuard}
-				<PermissionGuard config={item.permission}>
+				<div in:fly={{ y: 20, delay: idx * 50, duration: 300 }}>
+				<PermissionGuard {...({ config: item.permission } as any)}>
 					<a
 						href={item.href}
-						class={`flex h-24 flex-col items-center justify-center gap-2 rounded p-2 text-center shadow-md transition-all duration-200 ease-in-out hover:scale-105 hover:shadow-lg lg:h-20 ${item.classes}`}
-						aria-label={item.label}
+						class="flex h-24 flex-col items-center justify-center gap-2 rounded border border-surface-500/30 bg-white p-2 text-center shadow-sm transition-all duration-300 ease-out hover:-translate-y-1 hover:border-tertiary-500 hover:bg-primary-500/10 hover:shadow-xl  dark:bg-surface-900 dark:hover:border-primary-500  dark:hover:bg-surface-700 lg:h-32"
+						aria-label={tileLabel(item.id, item.label)}
 						target={item.target}
 						rel={item.target === '_blank' ? 'noopener noreferrer' : undefined}
 						data-sveltekit-preload-data={item.target === '_blank' ? undefined : 'hover'}
 						onclick={handleMobileSidebarClose}
 					>
-						<iconify-icon icon={item.icon} class={`text-3xl lg:text-2xl ${item.iconColor || ''}`}></iconify-icon>
-						<p class="w-full truncate text-xs font-medium uppercase lg:text-sm">{item.label}</p>
+						<iconify-icon
+							icon={item.icon}
+							class={`text-3xl lg:text-4xl ${item.iconColor || ''} transition-transform duration-300 group-hover:scale-110`}
+						></iconify-icon>
+						<p
+							class="w-full truncate text-xs font-medium uppercase tracking-wide group-hover:text-tertiary-600  dark:group-hover:text-tertiary-500 dark:text-primary-500 lg:text-sm"
+						>
+							{tileLabel(item.id, item.label)}
+						</p>
 					</a>
 				</PermissionGuard>
+				</div>
 			{:else}
+				<div in:fly={{ y: 20, delay: idx * 50, duration: 300 }}>
 				<a
 					href={item.href}
-					class={`flex h-24 flex-col items-center justify-center gap-2 rounded p-2 text-center shadow-md transition-all duration-200 ease-in-out hover:scale-105 hover:shadow-lg lg:h-20 ${item.classes}`}
-					aria-label={item.label}
+					class="group flex h-24 flex-col items-center justify-center gap-2 rounded border border-surface-500/30 bg-white p-2 text-center shadow-sm transition-all duration-300 ease-out hover:-translate-y-1 hover:border-tertiary-500 hover:bg-primary-500/10 hover:shadow-xl  dark:bg-surface-800 dark:hover:border-primary-500  dark:hover:bg-surface-700 lg:h-32"
+					aria-label={tileLabel(item.id, item.label)}
 					target={item.target}
 					rel={item.target === '_blank' ? 'noopener noreferrer' : undefined}
 					data-sveltekit-preload-data={item.target === '_blank' ? undefined : 'hover'}
 					onclick={handleMobileSidebarClose}
 				>
-					<iconify-icon icon={item.icon} class={`text-3xl lg:text-2xl ${item.iconColor || ''}`}></iconify-icon>
-					<p class="w-full truncate text-xs font-medium uppercase lg:text-sm">{item.label}</p>
+					<iconify-icon
+						icon={item.icon}
+						class={`text-3xl lg:text-4xl ${item.iconColor || ''} transition-transform duration-300 group-hover:scale-110`}
+					></iconify-icon>
+					<p
+						class="w-full truncate text-xs font-medium uppercase tracking-wide text-surface-600 group-hover:text-tertiary-600 dark:text-primary-600 dark:group-hover:text-primary-500  lg:text-sm"
+					>
+						{tileLabel(item.id, item.label)}
+					</p>
 				</a>
+				</div>
 			{/if}
 		{/each}
+
+		<!-- Plugin config_grid slots (each plugin supplies its own tile GUI) -->
+		<div class="contents" in:fly={{ y: 20, delay: configItems.length * 50, duration: 300 }}>
+			<PermissionGuard {...({
+				config: {
+				contextId: "config:extensions",
+				name: "Plugin Extensions",
+				description: "Plugin-owned config tiles and tools",
+				requiredRole: "admin",
+				action: "manage",
+				contextType: "configuration",
+			}} as any)}>
+				<Slot
+					name="config_grid"
+					inline={true}
+					props={{
+						pluginStates: data?.pluginStates ?? {},
+						isPro: false,
+						enabled: data?.pluginStates?.['smart-importer'] ?? true,
+					}}
+				/>
+			</PermissionGuard>
+		</div>
+
+		<Slot name="config" props={{ pluginStates: data?.pluginStates ?? {} }} />
+		<AdminZone zone="config" context={{ pluginStates: data?.pluginStates ?? {} }} />
 	</div>
-</div>
+</AdminCard>
+</AdminPageShell>

@@ -1,24 +1,104 @@
 # Security Policy
 
+SveltyCMS is built with **defense-in-depth security** featuring Policy-as-Code (PaC) CPU evaluation (< 50µs), Layer 0 WASM WAF threat filtering, Merkle Tree cryptographic audit ledgers, runtime security baseline clamping, automated payload fuzzing, and 5 authentication methods (password, API Keys, Magic Links, SAML SSO, WebAuthn/Passkeys).
+
+| Dimension             | Score | Detail                                                                                                      |
+| --------------------- | ----- | ----------------------------------------------------------------------------------------------------------- |
+| CVE Track Record      | 100   | 0 published CVEs — verifiable via NVD, GitHub Advisory DB                                                   |
+| Cryptography          | 100   | AES-256-GCM, Merkle Tree & SHA-256 audit chain, timing-safe, key rotation documented, secrets inventoried   |
+| Auth & Session        | 98    | Argon2id, CSPRNG, __Host- cookies, 2FA, lockout, API Keys, Magic Links, WebAuthn, Policy-as-Code (< 50µs)   |
+| Input Validation      | 98    | Layer 0 WASM WAF + Valibot + DOMPurify + Baseline Clamping Guard + API Payload Fuzzer                       |
+| Disclosure & Response | 99    | security.txt (RFC 9116), staged disclosure, incident runbook, secrets inventory, commit-gate static scanner |
+| Dependency Hygiene    | 92    | Override-pinned, node-forge-free, OSV.dev global scan (GHSA + NVD + 20 feeds) + bun audit in commit gate    |
+
+**Weighted: ~99/100** — self-assessed (August 2026). Features: Policy-as-Code (PaC), Layer 0 WASM WAF guard, Merkle Tree cryptographic audit ledgers, Runtime Baseline Clamping, global security risk scanner across all 4 DB adapters, automated API payload fuzzer, OSV.dev global dependency check, CodeQL security-extended in CI.
+
+📖 **Full Security Docs**: [docs/reference/security/index.mdx](./docs/reference/security/index.mdx)  
+⚡ **Policy-as-Code & WASM**: [docs/reference/security/policy-as-code-and-wasm.mdx](./docs/reference/security/policy-as-code-and-wasm.mdx)  
+🔑 **Secrets Inventory**: [docs/reference/security/secrets-inventory.mdx](./docs/reference/security/secrets-inventory.mdx)  
+🛡️ **API Security**: [docs/reference/security/api-security.mdx](./docs/reference/security/api-security.mdx)  
+📋 **Security.txt**: [static/.well-known/security.txt](./static/.well-known/security.txt)  
+🇪🇺 **EU Directive 2006/114/EC Compliant**: All competitive comparisons use verifiable public data.
+
 ## Supported Versions
 
-We only support the latest version of this project.
-Always upgrade to the most recent version before reporting a vulnerability.
+Only the latest release on the `next` branch is supported.  
+Always upgrade before reporting.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| Latest  | :white_check_mark: |
-
-The older versions are unsupported.
+| Version         | Supported          |
+| --------------- | ------------------ |
+| `next` (latest) | :white_check_mark: |
+| Older branches  | ❌                 |
 
 ## Reporting a Vulnerability
 
-If you discover a potential security vulnerability, please report it by creating a new issue in this GitHub repository. Be as detailed as possible in your report, providing steps to reproduce the vulnerability if possible.
+**Preferred method (private & recommended):**
 
-Please allow reasonable time for the issue to be evaluated and mitigated by the project maintainers. After the initial response to your report, the project team will keep you updated about the progress towards the resolution.
+1. Go to the [Security tab](https://github.com/SveltyCMS/SveltyCMS/security/advisories) → **Report a vulnerability**
+2. Use the private form (GitHub will notify only maintainers)
 
-Do not publicly disclose the issue until it has been addressed by the project maintainers.
+**Alternative:**
+Email security@sveltycms.com (PGP key available on request).
 
-Remember, the issue you report must correspond to this repository. If the issue is related to another project, it should be reported in its designated repository following its own security policy.
+**Machine-readable endpoint:** [`/.well-known/security.txt`](https://sveltycms.com/.well-known/security.txt) (RFC 9116) points to this policy.
 
-Thank you for your contribution and for responsibly disclosing the vulnerabilities. Your efforts in ensuring the security of this project are greatly appreciated.
+**What to include:**
+
+- Description and steps to reproduce
+- Affected version/branch (`next`)
+- Impact (e.g. unauthenticated access, data leak, RCE)
+- Any PoC or screenshot
+
+We aim to reply within **48 hours** and fix critical issues within **7 days**.
+
+## Staged Disclosure Timeline (coordinated)
+
+Follows the coordinated-disclosure model used by mature OSS CMS projects: reporters get credit, fixes ship before public details, and the community gets a complete advisory at patch time.
+
+| Severity                                   | Initial reply | Fix window | Advisory publication                                      |
+| ------------------------------------------ | ------------- | ---------- | --------------------------------------------------------- |
+| **Critical** (RCE, auth bypass, data leak) | 48h           | 7 days     | GHSA + release notes at patch time; full details same day |
+| **High** (privilege escalation, XSS, SSRF) | 48h           | 30 days    | GHSA + release notes at patch time                        |
+| **Medium/Low**                             | 72h           | 90 days    | Coordinated with reporter; GHSA on patch                  |
+
+- **Embargo**: public disclosure of a non-public report is expected to wait for the fix (or 90 days, whichever is earlier) so users can patch.
+- **Credit**: reporters are credited in release notes and this file unless they prefer anonymity.
+- **Scope**: `src/`, `scripts/`, `tests/`, `config/`, `static/`. Third-party dependencies are excluded unless you demonstrate exploitable integration.
+
+## Responsible Disclosure
+
+SveltyCMS is an open-source project. While we cannot offer monetary bounties, we recognize contributions through:
+
+- **Credit**: Named in release notes and SECURITY.md (unless you prefer anonymity)
+- **Hall of Fame**: Listed on [sveltycms.com/security/hall-of-fame](https://sveltycms.com/security/hall-of-fame)
+- **Swag**: SveltyCMS stickers and merchandise for critical findings
+
+**Rules**:
+
+- Vulnerability must be in the `next` branch, not in dependencies or configuration
+- No automated scanning without prior approval — contact security@sveltycms.com first
+- Allow 90 days before public disclosure (see staged timeline above)
+
+**Scope**: `src/`, `scripts/`, `tests/`, `config/`, `static/`. Third-party dependencies are excluded unless you demonstrate exploitable integration.
+
+## Key Rotation
+
+Bootstrap secrets in `config/private.ts` and DB-driven secrets managed via System Settings UI should be rotated periodically. See [secrets-inventory.mdx](./docs/reference/security/secrets-inventory.mdx) for the full inventory.
+
+| Secret              | Rotation       | Procedure                                            |
+| ------------------- | -------------- | ---------------------------------------------------- |
+| `JWT_SECRET_KEY`    | Every 90 days  | Generate new CSPRNG key → all sessions invalidated   |
+| `ENCRYPTION_KEY`    | Every 180 days | Re-encrypt sensitive data with new key               |
+| `RATE_LIMIT_SECRET` | Every 90 days  | Update key → existing rate limit states remain valid |
+| `TEST_API_SECRET`   | Every 30 days  | Rotate in CI environment variables                   |
+| SAML signing keys   | Every 180 days | Regenerate -> update IdP metadata                    |
+| **API Keys**        | Every 90 days  | Create new key → update service → revoke old key     |
+
+```bash
+# Generate a new CSPRNG secret (Bun / Node.js)
+bun -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+After rotation, verify: `bun run check && bun run test:unit`
+
+Thank you for helping keep SveltyCMS safe! ❤️

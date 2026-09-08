@@ -1,0 +1,463 @@
+/**
+ * @file src/utilities.css
+ * @description SveltyCMS utility classes: gradients, wrappers, accessibility, focus rings.
+ * Imported by app.css — these are independent of the theme and survive copy-paste theme swaps.
+ */
+
+/* ------------------------------------------------------------------ */
+/* Button Base — REMOVED, see src/app.css @layer components .btn        */
+/* ------------------------------------------------------------------ */
+/* There used to be an UNLAYERED rule here:
+ *
+ *     .btn { padding: calc(var(--spacing) * 2); }   // 8px, all sides
+ *
+ * Unlayered CSS outranks every @layer, including Tailwind's `utilities`
+ * layer. So that single declaration beat every padding utility in the
+ * product: `.btn px-6` computed to 8px, and Button's whole size scale
+ * (sm px-3 / md px-4 / lg px-6 / xl px-8) collapsed — every button in
+ * SveltyCMS rendered at the same 8px inset regardless of its size prop.
+ *
+ * The base is now defined once, inside @layer components in app.css, so
+ * `px-*` utilities and per-call-site overrides win again as intended.
+ * Do not re-add an unlayered .btn here.
+ */
+
+/* ------------------------------------------------------------------ */
+/* Gradient Utilities (Tailwind v4 — @layer components)                */
+/*                                                                      */
+/* COLOR SCHEME:                                                        */
+/*   Light mode: Blue gradients (tertiary colors)                       */
+/*   Dark mode:  Green gradients (primary colors)                       */
+/* ------------------------------------------------------------------ */
+@layer components {
+  /* Primary Gradients - Uses Adaptive var(--color-primary-X) */
+  .gradient-primary {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-primary-700),
+      var(--color-primary-600),
+      var(--color-primary-500)
+    );
+  }
+
+  :where(.dark) .gradient-primary,
+  .dark.gradient-primary {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-primary-800),
+      var(--color-primary-600),
+      var(--color-primary-400)
+    );
+  }
+
+  .gradient-primary-hover:hover {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-primary-700),
+      var(--color-primary-600),
+      var(--color-primary-500)
+    );
+  }
+
+  :where(.dark) .gradient-primary-hover:hover,
+  .dark.gradient-primary-hover:hover {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-primary-800),
+      var(--color-primary-600),
+      var(--color-primary-400)
+    );
+  }
+
+  .gradient-primary-focus:focus {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-primary-800),
+      var(--color-primary-600),
+      var(--color-primary-500)
+    );
+  }
+
+  :where(.dark) .gradient-primary-focus:focus,
+  .dark.gradient-primary-focus:focus {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-primary-700),
+      var(--color-primary-600),
+      var(--color-primary-400)
+    );
+  }
+
+  /* Secondary Gradients */
+  .gradient-secondary {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-surface-500),
+      var(--color-surface-400),
+      var(--color-surface-300)
+    );
+  }
+
+  :where(.dark) .gradient-secondary,
+  .dark.gradient-secondary {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-surface-600),
+      var(--color-surface-500),
+      var(--color-surface-400)
+    );
+  }
+
+  /* Error Gradients */
+  .gradient-error {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-error-600),
+      var(--color-error-500),
+      var(--color-error-300)
+    );
+  }
+
+  :where(.dark) .gradient-error,
+  .dark.gradient-error {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-error-700),
+      var(--color-error-500),
+      var(--color-error-300)
+    );
+  }
+
+  /* Tertiary Gradients - BLUE in light mode, GREEN in dark mode */
+  .gradient-tertiary {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-tertiary-600),
+      var(--color-tertiary-500),
+      var(--color-tertiary-400)
+    );
+  }
+
+  :where(.dark) .gradient-tertiary,
+  .dark.gradient-tertiary {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-primary-800),
+      var(--color-primary-600),
+      var(--color-primary-400)
+    );
+  }
+
+  /* Warning/Yellow Gradients */
+  .gradient-yellow,
+  .gradient-warning {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-warning-600),
+      var(--color-warning-500),
+      var(--color-warning-300)
+    );
+  }
+
+  :where(.dark) .gradient-yellow,
+  :where(.dark) .gradient-warning,
+  .dark.gradient-yellow,
+  .dark.gradient-warning {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-warning-700),
+      var(--color-warning-600),
+      var(--color-warning-300)
+    );
+  }
+
+  /* Success Gradients */
+  .gradient-success {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-success-600),
+      var(--color-success-500),
+      var(--color-success-300)
+    );
+  }
+
+  :where(.dark) .gradient-success,
+  .dark.gradient-success {
+    background-image: linear-gradient(
+      to bottom right,
+      var(--color-success-700),
+      var(--color-success-600),
+      var(--color-success-400)
+    );
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Wrapper Utilities                                                   */
+/* ------------------------------------------------------------------ */
+.wrapper {
+  padding: 1.5rem 1rem;
+  background-color: var(--color-surface-50);
+  border-color: var(--color-surface-200);
+  border-width: 1px;
+  border-radius: var(--radius-base, 0.375rem);
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  backdrop-filter: blur(12px);
+  transition:
+    background-color 0.3s ease,
+    border-color 0.3s ease;
+}
+
+.dark .wrapper {
+  background-color: color-mix(in srgb, var(--color-surface-900) 50%, transparent);
+  border-color: var(--color-surface-800);
+}
+
+/* ------------------------------------------------------------------ */
+/* Global Accessibility Enhancements                                   */
+/* ------------------------------------------------------------------ */
+
+/* Global Focus Ring for Keyboard Navigation (excluding form controls).
+   --admin-focus-ring is set on :root / html.dark so every focus indicator
+   keeps >=3:1 contrast in both modes and follows the active theme. */
+:focus-visible:not(input, textarea, select) {
+  outline: 2px solid var(--admin-focus-ring, var(--color-tertiary-500));
+  outline-offset: 2px;
+}
+:where(.dark) :focus-visible:not(input, textarea, select) {
+  outline-color: var(--admin-focus-ring, var(--color-primary-400));
+}
+
+/* Specific Focus logic for raw form controls (native components bring their
+   own ring via utilities; this is the baseline for untouched inputs). */
+input:focus,
+textarea:focus,
+select:focus {
+  box-shadow: 0 0 0 1px inset var(--color-tertiary-500) !important;
+  border-color: var(--color-tertiary-500) !important;
+  outline: none !important;
+}
+
+:where(.dark) input:focus,
+:where(.dark) textarea:focus,
+:where(.dark) select:focus {
+  background-color: var(--color-surface-900) !important;
+  color: white !important;
+  box-shadow: 0 0 0 1px inset var(--color-primary-400) !important;
+  border-color: var(--color-primary-400) !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* Reduced Motion Preference                                           */
+/* ------------------------------------------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Administrative Theme & Adaptive Workspaces Dynamic CSS Variables    */
+/*                                                                      */
+/* These variables control the admin UI's structural appearance         */
+/* (density, spacing, radii, shadows, layout sizes) and are             */
+/* independent of color theming.                                        */
+/*                                                                      */
+/* ALL values here are the COZY defaults — the current production       */
+/* design.  Compact and Spacious overrides live in [data-density]       */
+/* attribute selectors below.                                           */
+/* ------------------------------------------------------------------ */
+:root {
+  /* Motion tokens — enterprise tier (subtle, fast) */
+  --admin-motion-fast: 150ms;
+  --admin-motion-base: 200ms;
+  --admin-motion-slow: 300ms;
+  --admin-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --admin-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Focus ring — >=3:1 on the page surface in both modes */
+  --admin-focus-ring: var(--color-tertiary-500);
+
+  /* Density Scale (0.85 = compact, 1.0 = cozy, 1.25 = spacious) */
+  --admin-density: 1;
+
+  /* Radii */
+  --admin-radius-base: 0.75rem;
+  --admin-radius-card: 0.75rem;
+  --admin-radius-input: 0.375rem;
+  --admin-radius-button: 0.25rem;
+
+  /* Borders & Shadows */
+  --admin-border-width: 1px;
+  --admin-shadow-elevation: 0 1px 3px 0 rgb(0 0 0 / 0.1);
+  --admin-shadow-elevated: 0 10px 15px -3px rgb(0 0 0 / 0.05);
+
+  /* Semantic surface roles (light defaults)
+     Cards sit one step above the page so dark mode keeps readable elevation
+     without hardcoding dual dark: classes in every shell. Shadows still come
+     from --admin-shadow-* / AdminTheme.variant (flat | bordered | elevated). */
+  --admin-bg-page: var(--color-surface-50);
+  --admin-bg-card: var(--color-surface-50);
+  --admin-bg-sidebar: var(--color-surface-100);
+  --admin-border-default: var(--color-surface-200);
+  --admin-border-subtle: var(--color-surface-100);
+  --admin-text-body: var(--color-surface-900);
+  --admin-text-muted: var(--color-surface-500);
+
+  /* Form-control surfaces. Split out so a theme can restyle every input,
+     select and textarea in the product from one place instead of the dual
+     light/dark utility stacks that used to be baked into .input. */
+  --admin-bg-input: color-mix(in oklch, var(--color-surface-50) 50%, transparent);
+  --admin-bg-input-hover: #fff;
+  --admin-bg-input-focus: #fff;
+  --admin-bg-input-disabled: var(--color-surface-100);
+  --admin-bg-chip: color-mix(in oklch, var(--color-surface-500) 12%, transparent);
+
+  /* Overlay surfaces — modal / drawer / popover / tooltip.
+     These are rendered through a portal into <body>, so they sit OUTSIDE the
+     app layout element. Keeping the tokens on :root is what lets an overlay
+     match the page it was opened from. */
+  --admin-bg-overlay: var(--color-surface-100);
+  --admin-bg-backdrop: rgb(0 0 0 / 0.5);
+  --admin-bg-tooltip: var(--color-surface-900);
+  --admin-text-tooltip: var(--color-surface-50);
+
+  /* Layout Sizing */
+  --admin-sidebar-width: 240px;
+  --admin-header-height: 64px;
+
+  /* Features */
+  --admin-sticky-bar-height: 56px;
+
+  /* Editorial Status Colors */
+  --admin-color-draft: oklch(65% 0 219deg);
+  --admin-color-published: oklch(69.59% 0.15 162.47deg);
+  --admin-color-scheduled: oklch(58.74% 0.2 256.12deg);
+  --admin-color-review: oklch(76.86% 0.16 70.07deg);
+}
+
+/* Dark mode surface elevation — card elevates above page background */
+html.dark,
+html.dark .admin-theme-container,
+html.dark [data-admin-theme] {
+  --admin-bg-page: var(--color-surface-950);
+  --admin-bg-card: var(--color-surface-800);
+  --admin-bg-sidebar: var(--color-surface-950);
+  --admin-border-default: var(--color-surface-600);
+  --admin-border-subtle: var(--color-surface-700);
+  --admin-text-body: var(--color-surface-100);
+  --admin-text-muted: var(--color-surface-400);
+
+  --admin-bg-input: color-mix(in oklch, var(--color-surface-950) 50%, transparent);
+  --admin-bg-input-hover: color-mix(in oklch, var(--color-surface-900) 80%, transparent);
+  --admin-bg-input-focus: var(--color-surface-900);
+  --admin-bg-input-disabled: var(--color-surface-800);
+  --admin-bg-chip: color-mix(in oklch, var(--color-surface-100) 12%, transparent);
+
+  --admin-bg-overlay: var(--color-surface-800);
+  --admin-bg-backdrop: rgb(0 0 0 / 0.65);
+  --admin-bg-tooltip: var(--color-surface-100);
+  --admin-text-tooltip: var(--color-surface-900);
+
+  /* Focus ring on dark surfaces — lighter accent keeps >=3:1 contrast */
+  --admin-focus-ring: var(--color-primary-400);
+}
+
+/* ------------------------------------------------------------------ */
+/* Density Overrides                                                    */
+/*                                                                      */
+/* Applied via data-density="compact|cozy|spacious" on the admin        */
+/* layout root element.  Compact is tuned for data-heavy views          */
+/* (translators, developers); Spacious for writers and managers.        */
+/* ------------------------------------------------------------------ */
+
+/* Compact — high-density data views */
+[data-density="compact"] {
+  --admin-density: 0.85;
+  --admin-radius-base: 0.25rem;
+  --admin-radius-card: 6px;
+  --admin-radius-input: 4px;
+  --admin-radius-button: 0.125rem;
+  --admin-sidebar-width: 200px;
+  --admin-header-height: 48px;
+  --admin-sticky-bar-height: 44px;
+}
+
+/* Spacious — distraction-free content editing */
+/* Theme-driven reduced motion (set via data-reduced-motion on layout root) */
+[data-reduced-motion="true"] *,
+[data-reduced-motion="true"] ::before,
+[data-reduced-motion="true"] ::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+
+[data-density="spacious"] {
+  --admin-density: 1.25;
+  --admin-radius-base: 1rem;
+  --admin-radius-card: 16px;
+  --admin-radius-input: 10px;
+  --admin-radius-button: 0.625rem;
+  --admin-sidebar-width: 300px;
+  --admin-header-height: 72px;
+  --admin-sticky-bar-height: 64px;
+}
+
+/* ========================================================================
+   📐 GLOBAL CORNER ANGLE & CUSTOM COLOR SYSTEM
+   ======================================================================== */
+.corner-angle {
+  position: relative;
+  clip-path: polygon(
+    0% var(--corner-offset),
+    var(--corner-offset) 0%,
+    calc(100% - var(--corner-offset)) 0%,
+    100% var(--corner-offset),
+    100% calc(100% - var(--corner-offset)),
+    calc(100% - var(--corner-offset)) 100%,
+    var(--corner-offset) 100%,
+    0% calc(100% - var(--corner-offset))
+  );
+}
+
+.preset-custom {
+  background-color: var(--preset-bg) !important;
+  color: var(--preset-text) !important;
+  border: 1px solid var(--preset-border) !important;
+}
+.preset-custom:hover {
+  filter: brightness(1.1);
+}
+
+/* Focus ring overrides for database/tenant custom theme support */
+.focus-custom:focus-visible {
+  --tw-ring-color: var(--focus-ring-color) !important;
+}
+
+/* ========================================================================
+   🎬 POPOVER / DROPDOWN ENTRY ANIMATION
+   ========================================================================
+   Opacity-only entry for floating panels. A floating panel is POSITIONED via
+   `transform: translate3d(...)` (useFloating), so the entry animation must
+   never touch transform — Tailwind's `animate-in` enter keyframes write
+   `transform: translate3d(0,0,0) scale(...)` and would slide the panel from
+   the viewport top-left corner to its floating position. Applied with the
+   `motion-safe:` variant so OS reduced-motion is respected (plus the global
+   `[data-reduced-motion]` kill-switch above).
+   ======================================================================== */
+@utility popover-enter {
+  animation: popover-enter 200ms ease-out;
+}
+
+@keyframes popover-enter {
+  from {
+    opacity: 0;
+  }
+}

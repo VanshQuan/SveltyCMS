@@ -1,0 +1,317 @@
+---
+path: "docs/reference/security/api-security.mdx"
+title: "API Security & Token Hardening"
+description: "Enterprise-grade API security architecture: 4-layer defense-in-depth, bearer tokens, tenant isolation, rate limiting, CSRF, and CSP."
+order: 5
+icon: "mdi:shield-lock"
+author: "SveltyCMS Team"
+created: "2026-05-14"
+updated: "2026-09-08"
+tags:
+  - "security"
+  - "auth"
+  - "api"
+  - "hardening"
+  - "tokens"
+  - "rate-limiting"
+---
+
+# API Security & Token Hardening
+
+SveltyCMS employs a **zero-trust architecture** for API access — authentication alone is insufficient. Every API request passes through **4 independent security layers** that re-validate permissions at each boundary.
+
+---
+
+## 1. Defense-in-Depth Architecture
+
+```
+Request → Layer 1 (Middleware) → Layer 2 (Dispatcher) → Layer 3 (Handler) → Layer 4 (Page Action) → Response
+```
+
+| Layer                     | What It Checks                                                                                                      | Failure Mode                           |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| **Layer 1 — Middleware**  | CSP, CORS, HSTS, X-Frame-Options, firewall patterns, body size (10MB), rate limiting, `__Host-` cookie prefix, CSRF | 403/429 before any business logic runs |
+| **Layer 2 — Dispatcher**  | `ENDPOINT_PERMISSIONS` mapping, SCIM blocking, admin fast-path                                                      | 403 for any unmapped namespace         |
+| **Layer 3 — Handler**     | Admin verification for mutations, `media:write`/`media:delete` checks                                               | 403 on unauthorized mutations          |
+| **Layer 4 — Page Action** | `requireCollectionBuilderPermission()`, inline RBAC checks                                                          | 403 before state change                |
+
+> **Fail-Closed Default**: If a permission mapping is missing or ambiguous, the dispatcher returns 403 — never 200 with leaked data.
+
+---
+
+## 2. Token Architecture
+
+### 2.1 Website Tokens (API Keys)
+
+Designed for machine-to-machine communication. Stateless secrets bound to a specific `tenantId` and role.
+
+| Property        | Detail                                                                                                         |
+| --------------- | -------------------------------------------------------------------------------------------------------------- |
+| **Generation**  | CSPRNG with rejection sampling (zero modulo bias)                                                              |
+| **Storage**     | SHA-256 hashed before persistence — plaintext never stored                                                     |
+| **Types**       | `content-api` (read/restricted), `admin-api` (full access)                                                     |
+| **Expiry**      | Configurable per-token with automatic invalidation                                                             |
+| **Consumption** | Atomic one-time token support via `dbAdapter.system.websiteTokens.consume()` — prevents TOCTOU race conditions |
+| **Lookup**      | Single-pass `getByToken` — no redundant round-trips                                                            |
+
+### 2.2 Session & CSRF Cookies
+
+Browser-based authentication and mutation security rely on hardened cookie structures:
+
+| Cookie             | Name (Prod / Dev)                        | Attributes                                                           | Purpose                                                                                   |
+| :----------------- | :--------------------------------------- | :------------------------------------------------------------------- | :---------------------------------------------------------------------------------------- |
+| **Session Cookie** | `__Host-auth_sessions` / `auth_sessions` | `httpOnly: true`, `secure: true`, `sameSite: "strict"`, `path: "/"`  | Holds the 32-character CSPRNG session token. Inaccessible to JavaScript (XSS mitigation). |
+| **CSRF Cookie**    | `__Host-csrf_token` / `csrf_token`       | `httpOnly: false`, `secure: true`, `sameSite: "strict"`, `path: "/"` | 256-bit CSPRNG token read by client fetch utilities to attach the `X-CSRF-Token` header.  |
+
+- **`__Host-` Prefix Contract** (RFC 6265bis): In HTTPS environments, cookies use the `__Host-` prefix, requiring `secure: true`, `path: "/"`, and forbidding `domain` delegation. This guarantees subdomains cannot plant, spoof, or overwrite cookies.
+- **Cookie Deletion Parity**: `clearSessionCookies` sets identical cookie attributes (`path: "/"`, `sameSite: "strict"`, `secure: true`, `httpOnly: true`) upon logout or invalidation across all prefix variants (`__Host-`, `__Secure-`, plain), ensuring complete cookie removal across all browsers.
+- **Session Lifecycle & Invalidation**:
+  - Auto-rotated upon login and session renewal.
+  - Password change or logout triggers cascading invalidation across all devices.
+  - 3-layer caching: Memory (L1) → Redis (L2) → Database (L3) with credential-free memory caching.
+
+---
+
+## 3. Authentication Flow
+
+### 3.1 Bearer Token Validation
+
+```
+1. Extract token from Authorization: Bearer <token> header
+2. Single DB query: dbAdapter.system.websiteTokens.getByToken
+3. Normalize legacy tokens → default to content-api
+4. Create Virtual User context (no full User document hydration)
+5. Verify tenantId match → reject mismatched tokens
+```
+
+```typescript
+locals.user = {
+  _id: `token:${token._id}`,
+  role: token.type === "admin-api" ? "admin" : "guest",
+  tenantId: token.tenantId ?? locals.tenantId,
+  isApiToken: true,
+};
+```
+
+### 3.2 GraphQL Authentication
+
+GraphQL requests pass through the same middleware pipeline as REST:
+
+- **HTTP entry**: `handleRequest()` rejects unauthenticated requests (401) before schema execution
+- **Validation plugin**: Query depth limit (8), alias limit (15)
+- **Introspection**: Explicitly blocked in production via `NoSchemaIntrospectionCustomRule`
+- **Subscriptions**: Context handler validates sessions before WebSocket upgrade
+
+### 3.3 SCIM 2.0 Authentication
+
+SCIM endpoints (`/api/scim/v2/Users`, `/Groups`, `/Bulk`) use Bearer token authentication with additional tenant-scoped RBAC checks:
+
+- SCIM tokens require `system:admin` or explicit SCIM provisioning permissions
+- Bulk operations are validated for cross-tenant leakage before execution
+- PATCH operations use RFC 7644-compliant filter evaluation
+
+---
+
+## 4. Multi-Tenant Hardening
+
+### 4.1 Orphaned Token Protection
+
+If a token's owner is deleted (`tenantId: null`), the system isolates the token to the current request's tenant context — preventing cross-tenant privilege escalation.
+
+### 4.2 Tenant Isolation Checks
+
+Every Bearer-token request is verified against the environment's `tenantId`. Mismatched tokens are rejected with 403 and an audit log event.
+
+### 4.3 Batch Operation Guard & Upper-Bound Limits
+
+To prevent memory exhaustion and DoS attacks through oversized payloads:
+
+- **Mixed-Tenant Rejection**: `batch-module.ts` rejects coalesced operations containing mixed tenant IDs — preventing cross-tenant data leakage in shared-DB deployments.
+- **Batch Size Ceiling**: All batch endpoints (`/api/tokens/batch`, `/api/users/batch`, `/api/media/download`, `/api/system/order`) enforce an upper-bound cap (`ids.length <= 100`). Exceeding this limit returns an immediate 400 validation error.
+- **Single-Query Batch Operations**: Batch token deletion uses single round-trip database queries (`DELETE ... WHERE id IN (...)` / `deleteMany`), eliminating N+1 sequential database round-trips.
+- **AST Scanner Guard (`batch-size-unbounded`)**: Static security analysis in `scripts/scan-security-risk.ts` scans all API handlers using the TypeScript compiler AST to ensure every batch block enforces a length cap assertion before processing.
+
+---
+
+## 5. Rate Limiting & DoS Prevention
+
+| Mechanism                | Location                   | Detail                                                                                                                  |
+| ------------------------ | -------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| **Login brute-force**    | `handle-authentication.ts` | `handle-rate-limit.ts` (`RateLimiter`) — 5 attempts → 15-min lockout (HTTP 423)                                         |
+| **API rate limit**       | `handle-rate-limit.ts`     | Hardware-aware Token-Bucket (Redis L2 primary + local memory fallback); **commerce lane** isolated (`X-RateLimit-Lane`) |
+| **WAF endpoint limits**  | `SecurityResponseService`  | `rate-limiter-flexible` per path; `/api/commerce` is 60/min (prefix-matched)                                            |
+| **Body size limit**      | `api-handler.ts`           | 10MB cap — returns 413 `PAYLOAD_TOO_LARGE` before parsing                                                               |
+| **Memory load shedding** | `hooks.server.ts`          | Rejects mutation traffic (503) when heap > 90%                                                                          |
+| **Retry-After header**   | RFC 6585 compliant         | All 429 responses include `Retry-After: 60` and `X-RateLimit-*` headers                                                 |
+
+---
+
+## 6. CSP & Security Headers
+
+All API responses include mandatory security headers:
+
+| Header                         | Value                                       | Purpose                        |
+| ------------------------------ | ------------------------------------------- | ------------------------------ |
+| `Content-Security-Policy`      | `script-src 'self'` (production API routes) | Blocks inline script execution |
+| `Strict-Transport-Security`    | `max-age=31536000; includeSubDomains`       | Enforces HTTPS                 |
+| `X-Frame-Options`              | `DENY`                                      | Prevents clickjacking          |
+| `X-Content-Type-Options`       | `nosniff`                                   | Prevents MIME sniffing         |
+| `Cross-Origin-Opener-Policy`   | `same-origin`                               | Spectre/Meltdown protection    |
+| `Cross-Origin-Embedder-Policy` | `require-corp`                              | Cross-origin isolation         |
+| `Cross-Origin-Resource-Policy` | `same-origin`                               | Resource isolation             |
+| `Referrer-Policy`              | `strict-origin-when-cross-origin`           | Referrer leakage control       |
+
+> **GraphQL Playground CSP**: The relaxed CSP (`unsafe-inline`, `unsafe-eval`) is **only** applied in non-production environments. In `NODE_ENV=production`, GraphQL endpoints use the same strict CSP as REST APIs.
+
+---
+
+## 7. CSRF Protection & Request Verification Architecture
+
+SveltyCMS enforces a hardened **Double-Submit Cookie Pattern** combined with multi-layer origin and referer verification on all mutating requests (`POST`, `PUT`, `PATCH`, `DELETE`).
+
+### 7.1 The Double-Submit Handshake
+
+```
+Client Request (Mutation)
+  ├─ Cookie: __Host-csrf_token=<token_A> (or csrf_token in dev)
+  ├─ Header: X-CSRF-Token: <token_A>
+  └─ Header: Origin / Referer: https://example.com
+       │
+       ▼
+[1] Safe-Method Bypass (GET / HEAD / OPTIONS) ───► 0µs cost, CSRF skipped
+       │
+[2] Token-Bound Bypass (Bearer / API Key / SCIM) ──► CSRF skipped (stateless)
+       │
+[3] Same-Origin Fast-Path (Origin/Referer === Host) ──► Validated in nanoseconds
+       │
+[4] Constant-Time Token Comparison ──────────────► XOR accumulator (no timing leak)
+       │
+[5] Single-Use Token Rotation ───────────────────► Invalidate old token, issue fresh cookie
+```
+
+1. **Token Generation**: 256-bit CSPRNG token (`crypto.getRandomValues()`) placed in the `csrf_token` / `__Host-csrf_token` cookie (`sameSite: "strict"`, `httpOnly: false`, `path: "/"`).
+2. **Double Submission**: Browser clients extract the cookie value and submit it in the `X-CSRF-Token` HTTP header on every mutating API request (`clientJsonHeaders()`).
+3. **Constant-Time Comparison**: `validateCsrfToken` validates the header token against the cookie using a bitwise XOR accumulator:
+   ```typescript
+   let result = 0;
+   for (let i = 0; i < cookieToken.length; i++) {
+     result |= cookieToken.charCodeAt(i) ^ tokenToValidate.charCodeAt(i);
+   }
+   return result === 0;
+   ```
+4. **Single-Use Rotation**: On every successful mutation, the server immediately invalidates the consumed CSRF token and issues a fresh token in the response cookie, preventing replay attacks.
+5. **Same-Origin Fast-Path**: Same-origin requests (`originUrl.host === host` or `refererUrl.host === host`) pass verification via nanosecond string comparison.
+6. **Stateless Exemption**: Machine-to-machine requests utilizing Bearer tokens, API Keys, or SCIM credentials are automatically exempt from cookie CSRF (they do not rely on ambient browser cookies).
+
+---
+
+### 7.2 Check Parity: Read Paths vs. Mutation Paths
+
+To ensure optimal throughput and prevent performance bottlenecks, SveltyCMS maintains strict check parity without duplicate or redundant operations:
+
+| Execution Stage           | Read Paths (`findById`, `find`, `list`)                                            | Mutation Paths (`create`, `update`, `bulk`)                                                            |
+| :------------------------ | :--------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------- |
+| **CSRF Verification**     | **0 checks (0µs overhead)** — Safe HTTP verbs (`GET`/`HEAD`) bypass CSRF.          | **1 check** at the API gateway layer (`validateCsrfForRequest`).                                       |
+| **Authentication & RBAC** | Single check in `handleAuthentication` + `handleAuthorization` (cached in locals). | Single check in middleware + endpoint permission mapping (`_checkEndpointPermission`).                 |
+| **Schema Resolution**     | Single lookup from hot in-memory LRU (`schemaOf`).                                 | Single lookup from hot in-memory LRU (`schemaOf`).                                                     |
+| **Payload Preparation**   | Skipped on read.                                                                   | Single unified pass (`prepareWritePayload`) combining sanitization, type validation, and write guards. |
+| **Database Execution**    | Single direct prepared query (`findById` / `findOne`).                             | Single atomic prepared statement (`insert` / `update` with `RETURNING`).                               |
+| **Post-Write Processing** | None.                                                                              | **Detached / non-blocking** background execution (`schedulePostWrite`) — does not delay response.      |
+
+---
+
+### 7.3 Role-Based Multi-Factor Authentication Enforcement (MFA-RBAC)
+
+SveltyCMS enforces mandatory multi-factor authentication on a per-role basis:
+
+- **Per-Role Mandate (`Role.mfaRequired`)**: When `mfaRequired: true`, users assigned to this role must complete interactive 2FA enrollment and verification before accessing protected system resources.
+- **Session AMR Tracking (RFC 8176)**: Sessions capture Authentication Methods References:
+  - `amr: ["pwd"]` — Password authentication only.
+  - `amr: ["pwd", "mfa"]` — Interactive 2FA verified (TOTP, hardware passkey/WebAuthn, backup code).
+  - `mfaVerifiedAt` — ISO timestamp recording when second-factor elevation occurred.
+- **Endpoint Gate Enforcement**: In `_checkEndpointPermission`, requests made under a mandatory-MFA role that carry non-MFA sessions (`amr: ["pwd"]` or `amr: ["pwd", "trusted_device"]`) are immediately rejected with HTTP 403 `MFA_REQUIRED`.
+- **Exempt Routes**: Self-service 2FA setup/verification (`/api/auth/2fa/*`) and session teardown (`/api/auth/logout`) remain accessible so users can authenticate their factor or safely log out.
+- **Trusted-Device Override**: Device-level trust (`__Host-2fa-trusted-device`) is unconditionally disabled for any user assigned to a role with `mfaRequired: true`. Interactive second factor is required on every login.
+
+---
+
+### 7.4 Hardware-Aware Token-Bucket Rate Limiter & Throttling
+
+To eliminate the 2× traffic spike artifacts inherent in fixed-window rate limiters, SveltyCMS implements a continuous Token-Bucket rate limiting engine in `src/hooks/handle-rate-limit.ts`:
+
+```mermaid
+flowchart TD
+  REQ[Incoming HTTP Request] --> SYNC_AUTH[Sync Session Peeker]
+  SYNC_AUTH --> TIER{User Privilege Tier}
+  TIER -->|Admin| CAP_ADMIN[Capacity Multiplier: 10x]
+  TIER -->|Authenticated| CAP_USER[Capacity Multiplier: 2x]
+  TIER -->|Anonymous| CAP_ANON[Capacity Multiplier: 1x]
+
+  CAP_ADMIN & CAP_USER & CAP_ANON --> HW{SystemMonitor CPU/Lag}
+  HW --> COST[Adjusted Token Cost]
+
+  COST --> REDIS_CHECK{Redis Active & Circuit Closed?}
+  REDIS_CHECK -->|Yes| REDIS_LUA[Atomic Lua Token-Bucket Script <15ms]
+  REDIS_CHECK -->|No / Timeout / Circuit Open| MEM_FALLBACK[Local In-Memory Token Bucket <2µs]
+
+  REDIS_LUA & MEM_FALLBACK --> EVAL{Tokens Available?}
+  EVAL -->|Yes| ALLOW[Allow Request + Append X-RateLimit Headers]
+  EVAL -->|No| REJECT[429 Too Many Requests + Retry-After]
+```
+
+1. **Continuous Token Replenishment**: Rather than resetting counters at minute boundaries, tokens are replenished continuously based on elapsed milliseconds (`refillRatePerMs = capacity / windowMs`). Requests consume tokens based on adjusted cost.
+2. **Distributed Redis L2 Primary**: Multi-node deployments execute an atomic Lua script directly on Redis:
+   - Computes dynamic replenishment and token decrement in a single network round-trip.
+   - Sets key TTL automatically matching the window duration.
+3. **Resilient Circuit-Breaker Fallback**:
+   - Redis commands are constrained by a strict **15 ms timeout**.
+   - On Redis connection failure, timeout, or error, an internal circuit breaker trips with a **5-second backoff**.
+   - Requests immediately fall back to a high-speed, local in-memory Token Bucket (`< 2 µs`), ensuring zero downtime and zero failed requests during Redis outages.
+4. **Adaptive User-Tier Quotas**:
+   - **Administrators**: $10\times$ capacity multiplier to guarantee unblocked CMS operations during batch management.
+   - **Authenticated Users**: $2\times$ capacity multiplier for verified editors and interactive staff.
+   - **Anonymous / Public**: $1\times$ baseline quota protecting against unauthenticated scrapers and brute-force attempts.
+   - Evaluated via a **zero-overhead synchronous session cache peeker** (`peekSessionFromCacheSync`) in `handle-authentication.ts` avoiding circular dependencies and Promise overhead.
+5. **Hardware-Aware Load Shedding**:
+   - Integrates with `SystemMonitor` to measure event loop lag and CPU load.
+   - Under heavy system pressure, token cost scales between $0.8\times$ (idle system) up to $2.0\times$ (saturated host), actively dampening traffic before server responsiveness degrades.
+
+---
+
+## 8. Performance Benchmarks
+
+All metrics self-measured via `bun test tests/benchmarks/` — reproducible on any machine.
+
+| Metric                                 | p95           | Adapter            |
+| -------------------------------------- | ------------- | ------------------ |
+| Bearer token validation                | **0.06 ms**   | SQLite (Local SDK) |
+| Bearer token validation                | **0.37 ms**   | MariaDB            |
+| Session validation (L1 cache hit)      | **<0.001 ms** | Memory             |
+| Session validation (L3 DB fallback)    | **1.78 ms**   | PostgreSQL         |
+| Full auth pipeline (middleware → RBAC) | **1.61 ms**   | All adapters       |
+| API request (auth + RBAC + response)   | **1.16 ms**   | SQLite             |
+| Concurrent throughput                  | **1,054 RPS** | MariaDB            |
+
+> Reproduce: `bun test tests/benchmarks/auth-performance.test.ts`
+
+---
+
+## 9. Audit & Compliance
+
+- **Crypto-chained logs**: Every API mutation is logged with SHA-256 chained audit entries — tamper-evident verification
+- **security.txt**: RFC 9116 standard at `/.well-known/security.txt`
+- **EU Directive 2006/114/EC**: All competitive comparisons use verifiable public data
+- **Incident response**: [Full runbook](./incident-response.mdx)
+- **0 published CVEs** — private reporting via [GitHub Security Advisories](https://github.com/SveltyCMS/SveltyCMS/security/advisories)
+
+---
+
+## Related
+
+- [Token API Reference](../api/tokens.mdx)
+- [Authentication System](./authentication-system.mdx)
+- [Security Overview](./index.mdx)
+- [Incident Response](./incident-response.mdx)
+- [Login Security](./login-security.mdx)
+- [Secrets & Tokens Inventory](./secrets-inventory.mdx)
+- [Database Architecture](../database/index.mdx)

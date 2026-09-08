@@ -1,324 +1,43 @@
 ---
-path: 'docs/tests/api-test-coverage.md'
-title: 'API Test Coverage Report'
-description: 'Comprehensive API endpoint test coverage report showing 86% coverage with 460+ tests across 85 endpoints'
-order: 5
-icon: 'mdi:api'
-author: 'admin'
-created: '2025-01-20'
-updated: '2025-01-20'
+path: "docs/tests/api-test-coverage.mdx"
+title: "API Test Coverage"
+description: "Documentation for API test coverage."
+order: 99
+icon: "mdi:file-document"
+author: "SveltyCMS Team"
+created: "2025-10-05"
+updated: "2026-07-15"
 tags:
-  - 'testing'
-  - 'api'
-  - 'coverage'
-  - 'documentation'
+  - "documentation"
 ---
 
-# SveltyCMS API Test Coverage Report
+# API Test Coverage
 
-**Generated:** January 20, 2025  
-**Total API Endpoints:** 99  
-**Endpoints Tested:** 85  
-**Coverage:** ~86%  
-**Total Tests:** 460+
+## Overview
 
-## API Test Summary
+API testing in SveltyCMS covers the REST and GraphQL endpoints, ensuring correct request handling, authentication, authorization, and data validation across all database adapters.
 
-### ✅ Fully Tested APIs (85 endpoints, 374+ tests)
+### Test Locations
 
-#### Authentication & Security (38 tests)
+| Category              | Test File(s)                                                                    |
+| --------------------- | ------------------------------------------------------------------------------- |
+| API Dispatcher        | `tests/unit/api-request-handler/`, `tests/unit/hooks/api-requests.test.ts`      |
+| API unit helpers      | `tests/unit/utils/mock-event.ts` (`invokeApi`) — [docs](./api-unit-helpers.mdx) |
+| Media Security        | `tests/unit/api/media-security.test.ts`                                         |
+| Unit API suites       | `tests/unit/api/*.test.ts` (prefer `invokeApi` over per-file mock events)       |
+| Hook Defense-in-Depth | `tests/unit/hooks/defense-in-depth.test.ts`                                     |
+| Setup API Routes      | `tests/unit/hooks/setup.test.ts`                                                |
+| Black-box HTTP API    | `tests/integration/api/*.test.ts`                                               |
+| E2E API Coverage      | `tests/e2e/routes/config/`, `tests/e2e/routes/system/`                          |
 
-- **2FA Authentication** - 5 endpoints, 28 tests ✅
-  - Setup, verify setup, verify login, backup codes, disable
-  - TOTP generation, QR codes, rate limiting
-  - File: `tests/bun/api/auth-2fa.test.ts`
+> **Note**: API test coverage documentation is actively being expanded. See the [Test Status dashboard](./test-status.mdx), [Hook Test Coverage](./hook-test-coverage.mdx), and [E2E Coverage Matrix](./e2e-coverage-matrix.mdx) for route-level detail.
 
-- **Security Management** - 5 endpoints, 33 tests ✅
-  - Stats, incidents, resolve, unblock IPs, CSP reports
-  - IPv4/IPv6 support, incident tracking, threat assessment
-  - File: `tests/bun/api/security.test.ts`
+### Related
 
-#### User Management (59 tests)
-
-- **User API** - 7 endpoints, 47 tests ✅
-  - Create, login, logout, list, update, delete, roles
-  - Session management, permissions, multi-tenant
-  - File: `tests/bun/api/user.test.ts`
-
-- **Token Management** - 4 endpoints, 12 tests ✅
-  - Create, list, revoke, refresh tokens
-  - File: `tests/bun/api/token.test.ts`
-
-#### Content Management (78 tests)
-
-- **Collections API** - 8 endpoints, 19 tests ✅
-  - CRUD operations, field management, relations
-  - File: `tests/bun/api/collections.test.ts`
-
-- **Import/Export** - 4 endpoints, 29 tests ✅
-  - Export data, import data, full import/export
-  - Data integrity, large datasets, relationships
-  - File: `tests/bun/api/import-export.test.ts`
-
-- **Widgets** - 9 endpoints, 30 tests ✅
-  - List, get, create, update, delete, activate, deactivate
-  - Dependencies, validation, lifecycle
-  - File: `tests/bun/api/widgets.test.ts`
-
-#### System Management (126 tests)
-
-- **Dashboard** - 9 endpoints, 48 tests ✅
-  - Health, metrics, system info, logs, content, media, users
-  - Real-time monitoring, performance metrics
-  - File: `tests/bun/api/dashboard.test.ts`
-
-- **Settings** - 8 endpoints, 31 tests ✅
-  - Get/update settings groups, public settings, preferences
-  - Import/export settings, SSE streaming
-  - File: `tests/bun/api/settings.test.ts`
-
-- **Setup** - 5 endpoints, 45 tests ✅
-  - Initialize, check status, configurations
-  - File: `tests/bun/api/setup.test.ts`
-
-- **Theme** - 6 endpoints, 24 tests ✅
-  - List, get, create, update, delete, activate themes
-  - File: `tests/bun/api/theme.test.ts`
-
-- **Miscellaneous** - 9 endpoints, 36 tests ✅
-  - Search, email, cache, metrics, permissions, version check
-  - Marketplace, config sync, debug
-  - File: `tests/bun/api/miscellaneous.test.ts`
-
-#### Data & Integration (21 tests)
-
-- **GraphQL API** - 1 endpoint, 21 tests ✅
-  - Schema introspection, queries, mutations
-  - File: `tests/bun/api/graphql.test.ts`
-
-### 📝 Untested APIs (14 endpoints)
-
-#### Low Priority Endpoints
-
-- **Admin Operations** (2 endpoints)
-  - `/api/admin/users` - Admin user management
-  - `/api/admin/tokens` - Admin token operations
-
-- **Content Structure** (1 endpoint)
-  - `/api/content-structure` - Content type definitions
-
-- **Remote Video** (1 endpoint)
-  - `/api/remoteVideo` - Remote video handling
-
-- **System Virtual Folder** (1 endpoint)
-  - `/api/systemVirtualFolder` - Virtual folder management
-
-- **Website Tokens** (1 endpoint)
-  - `/api/website-tokens` - Website token management
-
-- **Get Tokens Provided** (1 endpoint)
-  - `/api/getTokensProvided` - Token provider info
-
-- **Index** (1 endpoint)
-  - `/api/index` - API index/documentation
-
-- **Other Utilities** (6 endpoints)
-  - Various utility endpoints with low usage
-
-## Test File Summary
-
-### API Integration Tests (14 files, 374 tests)
-
-| Test File             | Endpoints | Tests | Status |
-| --------------------- | --------- | ----- | ------ |
-| auth-2fa.test.ts      | 5         | 28    | ✅     |
-| security.test.ts      | 5         | 33    | ✅     |
-| user.test.ts          | 7         | 47    | ✅     |
-| token.test.ts         | 4         | 12    | ✅     |
-| collections.test.ts   | 8         | 19    | ✅     |
-| import-export.test.ts | 4         | 29    | ✅     |
-| widgets.test.ts       | 9         | 30    | ✅     |
-| dashboard.test.ts     | 9         | 48    | ✅     |
-| settings.test.ts      | 8         | 31    | ✅     |
-| setup.test.ts         | 5         | 45    | ✅     |
-| theme.test.ts         | 6         | 24    | ✅     |
-| miscellaneous.test.ts | 9         | 36    | ✅     |
-| graphql.test.ts       | 1         | 21    | ✅     |
-| media.test.ts         | 10        | ~30   | Exists |
-
-### Additional Tests (86+ tests)
-
-- **Server Hooks** - 53 tests ✅
-  - System state management, firewall, security
-  - Files: `system-state.test.ts`, `firewall.test.ts`
-
-- **Security Utils** - 8 tests ✅
-  - XSS detection, input sanitization
-  - File: `SecurityResponseService.test.ts`
-
-- **Widget Validation** - 8 tests ✅
-  - RichText widget validation
-  - File: `RichText.test.ts`
-
-- **Cache System** - 17 tests ✅
-  - Cache operations, TTL, multi-tenant
-  - File: `cache.test.ts`
-
-## Running the Tests
-
-### All API Tests
-
-```bash
-bun test tests/bun/api/
-```
-
-### Specific Test Suites
-
-```bash
-# Authentication & Security
-bun test tests/bun/api/auth-2fa.test.ts
-bun test tests/bun/api/security.test.ts
-bun test tests/bun/api/user.test.ts
-bun test tests/bun/api/token.test.ts
-
-# Content Management
-bun test tests/bun/api/collections.test.ts
-bun test tests/bun/api/import-export.test.ts
-bun test tests/bun/api/widgets.test.ts
-
-# System Management
-bun test tests/bun/api/dashboard.test.ts
-bun test tests/bun/api/settings.test.ts
-bun test tests/bun/api/setup.test.ts
-bun test tests/bun/api/theme.test.ts
-bun test tests/bun/api/miscellaneous.test.ts
-
-# Data & Integration
-bun test tests/bun/api/graphql.test.ts
-bun test tests/bun/api/media.test.ts
-```
-
-## Prerequisites for Integration Tests
-
-Most API tests require:
-
-1. **Development Server Running**
-
-   ```bash
-   bun run dev  # Starts server on port 5173
-   ```
-
-2. **Database Setup**
-   - Run user tests first to create test database
-
-   ```bash
-   bun test tests/bun/api/user.test.ts
-   ```
-
-3. **Authentication**
-   - Tests use `admin@test.com` / `Test123!` credentials
-   - Session cookies managed automatically by test framework
-
-## Test Coverage Breakdown
-
-### By Category
-
-- **Authentication & Security:** 38 tests (10%)
-- **User Management:** 59 tests (16%)
-- **Content Management:** 78 tests (21%)
-- **System Management:** 126 tests (34%)
-- **Data & Integration:** 21 tests (6%)
-- **Utilities & Hooks:** 86+ tests (23%)
-
-### By Priority
-
-- **Critical (Auth, User, Security):** 97 tests
-- **High (Collections, Dashboard, Settings):** 98 tests
-- **Medium (Widgets, Import/Export, Theme):** 83 tests
-- **Low (Misc utilities, Hooks):** 122+ tests
-
-### Test Quality Metrics
-
-- ✅ Authentication checks: 100%
-- ✅ Input validation: 100%
-- ✅ Error handling: 100%
-- ✅ Edge cases: ~90%
-- ✅ Multi-tenant support: ~80%
-- ✅ Rate limiting: ~60%
-
-## Key Testing Patterns
-
-All tests follow these patterns:
-
-1. **Setup** - Create admin user, login, get session cookie
-2. **Test** - Call API endpoint with various scenarios
-3. **Assertions** - Validate response structure, status codes
-4. **Cleanup** - Clean up test data (handled by afterAll)
-
-### Common Test Scenarios
-
-- ✅ Success cases with valid data
-- ✅ Authentication requirements
-- ✅ Authorization (admin vs user)
-- ✅ Input validation
-- ✅ Error handling
-- ✅ Edge cases (empty, invalid, missing data)
-- ✅ Multi-tenant isolation
-- ✅ Rate limiting (where applicable)
-
-## Next Steps
-
-### Immediate
-
-1. Run all newly created tests to verify functionality
-2. Fix any failures or adjust to actual API behavior
-3. Update test counts in documentation
-
-### Short Term
-
-1. Add tests for remaining 14 untested endpoints
-2. Improve rate limiting test coverage
-3. Add performance/load tests
-
-### Long Term
-
-1. Add E2E tests with Playwright
-2. Implement CI/CD test automation
-3. Add code coverage reporting
-4. Create test data generators/fixtures
-
-## Related Documentation
-
-- **Test Status Report:** [Test Status](./test-status.mdx) - Detailed test results and statistics
-- **User API Tests:** [User API Tests](./user-api-tests.mdx) - User endpoint documentation
-- **Database Tests:** [Database & Auth Tests](./database-tests.mdx) - Database layer testing
-- **Git Workflow:** [Git Workflow](./git-workflow.mdx) - CI/CD and automated testing
-- **API Documentation:** [API Docs](/docs/api/) - Complete API reference
-- **Architecture:** [Architecture Docs](/docs/architecture/) - System architecture
-
-## Test Authorship & History
-
-### Recent Additions (January 20, 2025)
-
-Created 7 new comprehensive test files with 211 tests:
-
-- **2FA Authentication** - 28 tests covering TOTP, QR codes, backup codes
-- **Security Management** - 33 tests covering incidents, IP blocking, CSP
-- **Widgets** - 30 tests covering CRUD, activation, dependencies
-- **Settings** - 31 tests covering groups, preferences, import/export
-- **Import/Export** - 29 tests covering data migration and integrity
-- **Theme** - 24 tests covering theme management and activation
-- **Miscellaneous** - 36 tests covering search, email, cache, metrics
-
-### Coverage Progress
-
-| Metric              | Before    | After     | Change  |
-| ------------------- | --------- | --------- | ------- |
-| Total Tests         | ~249      | 460+      | +211    |
-| API Endpoints       | 30/99     | 85/99     | +55     |
-| Coverage %          | 30%       | 86%       | +56%    |
-| Test Files          | 7 files   | 14 files  | +7      |
+- [Test Documentation](./index.mdx)
+- [API Unit Helpers](./api-unit-helpers.mdx)
+- [API Testing (black-box)](./api-testing.mdx)
+- [Security Testing](./security-testing.mdx)
+- [Architecture Overview](../reference/architecture/index.mdx)
 
 ---
-
-**🎉 Coverage Achievement:** From 30% → 86% API endpoint coverage in one update!

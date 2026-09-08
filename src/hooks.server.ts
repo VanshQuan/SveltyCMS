@@ -6,115 +6,995 @@
  * all incoming server requests. The architecture emphasizes security, observability,
  * and performance with unified metrics collection and automated threat detection.
  *
- * Middleware Sequence:
- * 1. Static asset caching (performance optimization, skip all processing)
- * 2. System state validation (gatekeeper)
- * 3. Rate limiting (abuse prevention)
- * 4. Application firewall (threat detection)
- * 5. Setup completion enforcement (installation gate)
- * 6. Language preferences (i18n cookie synchronization)
- * 7. Theme management (SSR dark mode support)
- * 8. Authentication & session management (identity)
- * 9. Authorization & access control (security)
- * 10. API request handling (optional, commented out by default)
- * 11. Security headers with nonce-based CSP (defense in depth)
- *
- * Core Services:
- * - MetricsService: Unified performance & security monitoring
- * - SecurityResponseService: Automated threat detection & response
- *
- * Utility Exports:
- * - getHealthMetrics(): Returns comprehensive metrics report
- * - invalidateSessionCache(): Invalidates specific user session
- * - clearAllSessionCaches(): Clears all cached sessions
+ * Updated 2026-03-15:
+ * - Moved addSecurityHeaders to TOP of sequence → ensures headers on ALL responses,
+ *   including errors thrown by earlier middlewares (rate-limit 429, firewall blocks, etc.)
  */
 
-import { building } from '$app/environment';
-import { type Handle } from '@sveltejs/kit';
-import { sequence } from '@sveltejs/kit/hooks';
-import { logger } from '@utils/logger.server';
-import { metricsService } from '@src/services/MetricsService';
+import { metricsService } from "@src/services/observability/metrics-service";
+import { sequence, type Handle, type HandleServerError } from "@sveltejs/kit/hooks";
+import { isRedirect } from "@sveltejs/kit";
+import { logger } from "@utils/logger";
+// 🔐 ENTERPRISE: chained audit file sink (logs/app.log) — activates once per boot.
+import "@utils/logger.server";
+import { building } from "$app/env";
+import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
+import { runWithContext, runWithTrace, getTrace, traceSpan } from "@utils/context";
+import { createRequire } from "node:module";
 
-// --- Import enterprise middleware hooks ---
-import { handleSystemState } from './hooks/handleSystemState';
-import { handleSetup } from './hooks/handleSetup';
-import { handleAuthentication } from './hooks/handleAuthentication';
-import { handleAuthorization } from './hooks/handleAuthorization';
-import { handleLocale } from './hooks/handleLocale';
-import { handleTheme } from './hooks/handleTheme';
-import { addSecurityHeaders } from './hooks/addSecurityHeaders';
-import { handleStaticAssetCaching } from './hooks/handleStaticAssetCaching';
-import { handleRateLimit } from './hooks/handleRateLimit';
-import { handleFirewall } from './hooks/handleFirewall';
-// API middleware for role-based access control and caching
-import { handleApiRequests } from './hooks/handleApiRequests';
+// 🚀 SK3: background services are STATICALLY imported (they start on READY).
+// Dynamic import() of these modules left Rolldown's cyclic-chunk initializers
+// un-run in the production build (named exports stayed undefined forever —
+// automationService.init() crashed the boot). Static imports participate in
+// the kit runtime's chunk graph, which initializes them correctly.
+import { jobQueue } from "@src/services/background/jobs/job-queue-service";
+import { automationService } from "@src/services/background/automation";
+import { watchdog } from "@src/services/system/watchdog";
+import { telemetryService } from "@src/services/observability/telemetry-service";
+import { startScheduler } from "@src/services/scheduler";
+import { startBehavioralEngine } from "@src/services/intelligence/behavioral-learner";
+import { outboxService } from "@src/services/outbox";
+// ESM Shims for legacy CJS compatibility in production build
+if (typeof (globalThis as any).require === "undefined") {
+  (globalThis as any).require = createRequire(import.meta.url);
+}
+if (typeof (globalThis as any).__filename === "undefined") {
+  (globalThis as any).__filename = fileURLToPath(import.meta.url);
+}
+if (typeof (globalThis as any).__dirname === "undefined") {
+  (globalThis as any).__dirname = dirname((globalThis as any).__filename);
+}
+
+import { isSetupComplete } from "./utils/setup-check-fast";
+import { classifyRequest, RequestLane } from "./hooks/handle-request-classifier";
+import {
+  isSimpleCollectionWrite,
+  tryCollectionWriteLane,
+} from "./hooks/handle-collection-write-lane";
+import { resetIdCounters } from "@utils/id-generator";
+import { handleApiError } from "@utils/error-handling";
+import { handleTurboPipeline } from "./hooks/handle-turbo-pipeline.server";
+import { handleTurboGet, turboAuthCache } from "./hooks/handle-turbo-get";
+import { handleCompression } from "./hooks/handle-compression";
+import { applyAllSecurityHeaders } from "./hooks/handle-security-headers";
+import { registerWsAuthenticator } from "@src/services/collaboration/ws-auth-registry";
+import { routeResourceStateMachine } from "@src/services/core/route-resource-state-machine";
+import { initHardwareProfile, getHardwareProfile, describeHardware } from "@utils/hardware-profile";
+
+// 🧠 ONE HARDWARE DETECTION AT PROCESS START: detects the host once and publishes
+// the shared profile to the global registry — every module, chunk and worker
+// import (DB pools, sharp, module loader, compression, dashboard) reads the same
+// object and tunes itself for THIS machine.
+initHardwareProfile();
+logger.info(`[Boot] Hardware profile: ${describeHardware()}`);
+
+// 🔐 /ws COLLABORATION AUTH: the standalone yjs-sync-server bundle cannot import
+// app internals, so it consults this registry (globalThis bridge) at upgrade
+// time. Reuses hooks.ws `upgrade()` — the same session pipeline as HTTP
+// (LRU→store→Redis→DB, negative cache, test-mode bypass). Fail-closed: a
+// missing/failing authenticator rejects the upgrade.
+registerWsAuthenticator(async (request) => {
+  try {
+    const { upgrade } = await import("./hooks.ws");
+    const result = await upgrade({
+      url: request.url,
+      headers: request.headers,
+      req: { headers: request.headers },
+    });
+    if (!result) return null;
+    return { userId: String(result.profile._id), tenantId: result.tenantId };
+  } catch (err) {
+    logger.warn("[WsAuth] Authenticator failed — rejecting upgrade:", err);
+    return null;
+  }
+});
+
+// 🚀 ZERO-RESTART ARCHITECTURE:
+// We track the setup state dynamically to allow the system to switch from
+// 'SETUP' mode to 'READY' mode without a full process restart.
+let setupComplete =
+  (typeof (globalThis as any).__SVELTY_SETUP_COMPLETE__ !== "undefined" &&
+    (globalThis as any).__SVELTY_SETUP_COMPLETE__ === true) ||
+  isSetupComplete();
+
+// 🚀 SETUP-STATE MEMO: isSetupComplete() performs a sync fs probe
+// (existsSync + readFileSync) with only a ~2s internal TTL — bursty admin
+// traffic pays one disk hit per burst. Memoize for 60s; setup paths always
+// bypass the memo so wizard/API transitions are observed immediately.
+let setupCheckMemo: { value: boolean; at: number } | null = null;
+const SETUP_CHECK_MEMO_TTL_MS = 60_000;
+
+function currentSetupStateWithMemo(pathname: string): boolean {
+  // Setup paths AND the testing API bypass the memo: the wizard writes the
+  // config and the testing reset/seed flips the DB-backed setup state, so the
+  // memoized value would otherwise be stale for up to 60s after those flows
+  // (observed: E2E golden journeys ran the setup pipeline — no authorization,
+  // no locals.roles — right after a reset while the memo still cached false).
+  if (
+    pathname.startsWith("/setup") ||
+    pathname.startsWith("/api/setup") ||
+    pathname.startsWith("/api/testing")
+  ) {
+    const v = isSetupComplete();
+    setupCheckMemo = { value: v, at: Date.now() };
+    return v;
+  }
+  const now = Date.now();
+  if (setupCheckMemo && now - setupCheckMemo.at < SETUP_CHECK_MEMO_TTL_MS) {
+    return setupCheckMemo.value;
+  }
+  const v = isSetupComplete();
+  setupCheckMemo = { value: v, at: now };
+  return v;
+}
+
+// ✨ ENTERPRISE: Stable Node ID for Distributed Cache Sync (Phase 8)
+if (typeof (globalThis as any).__SVELTY_NODE_ID__ === "undefined") {
+  (globalThis as any).__SVELTY_NODE_ID__ = crypto.randomUUID();
+}
+
+// Only import full CMS hooks if setup is complete to avoid premature DB load
+const passThrough: Handle = ({ event, resolve }) => resolve(event);
+
+let handleSecurity: Handle = passThrough,
+  handleRateLimit: Handle = passThrough,
+  handleUserPreferences: Handle = passThrough,
+  handleAuthentication: Handle = passThrough,
+  handleAuthorization: Handle = passThrough,
+  handleLocalContext: Handle = passThrough,
+  handleApiRequests: Handle = passThrough,
+  handleAuditLogging: Handle = passThrough,
+  handleTokenResolution: Handle = passThrough,
+  handleRedirects: Handle = passThrough,
+  handleSystemState: Handle = passThrough,
+  handleTestIsolation: Handle = passThrough;
+
+// ✨ ENTERPRISE: Lazy-loaded handle variables for dynamic mode switching
+let fullMiddlewareInitialized = false;
+
+async function ensureFullMiddleware() {
+  if (fullMiddlewareInitialized) return;
+
+  // 🚀 PARALLEL LOADING: imports are independent — sequential awaits serialized
+  // hot-swap latency when setup completes (~80% faster than 15 chained awaits).
+  const [
+    security,
+    rateLimit,
+    preferences,
+    auth,
+    authz,
+    context,
+    api,
+    audit,
+    token,
+    redirects,
+    state,
+    isolation,
+  ] = await Promise.all([
+    import("./hooks/handle-security"),
+    import("./hooks/handle-rate-limit"),
+    import("./hooks/handle-user-preferences"),
+    import("./hooks/handle-authentication"),
+    import("./hooks/handle-authorization"),
+    import("./hooks/handle-local-context"),
+    import("./hooks/handle-api-requests"),
+    import("./hooks/handle-audit-logging"),
+    import("./hooks/handle-token-resolution"),
+    import("./hooks/handle-redirects"),
+    import("./hooks/handle-system-state"),
+    import("./hooks/handle-test-isolation"),
+  ]);
+
+  handleSecurity = security.handleSecurity;
+  handleRateLimit = rateLimit.handleRateLimit;
+  handleUserPreferences = preferences.handleUserPreferences;
+  handleAuthentication = auth.handleAuthentication;
+  handleAuthorization = authz.handleAuthorization;
+  handleLocalContext = context.handleLocalContext;
+  handleApiRequests = api.handleApiRequests;
+  handleAuditLogging = audit.handleAuditLogging;
+  handleTokenResolution = token.handleTokenResolution;
+  handleRedirects = redirects.handleRedirects;
+  handleSystemState = state.handleSystemState;
+  handleTestIsolation = isolation.handleTestIsolation;
+
+  if (typeof auth.prewarmAuthenticationHotPaths === "function") {
+    auth.prewarmAuthenticationHotPaths();
+  }
+
+  fullMiddlewareInitialized = true;
+  // 🛡️ Invalidate any pipeline cached before the real handlers were loaded:
+  // a first request racing the async module load would otherwise be served
+  // by passThrough handlers forever (security/authz permanently bypassed).
+  cachedPipelineReady = null;
+  cachedPipelineApi = null;
+  cachedPipelineApiWrite = null;
+  cachedPipelineSetup = null;
+}
+
+if (setupComplete) {
+  ensureFullMiddleware().catch((err) => logger.error("Failed to lazy-load full middleware:", err));
+}
+
+const IS_QUIET = typeof process !== "undefined" && process.env.QUIET === "true";
+const HEALTH_HEADERS = {
+  "Content-Type": "application/json",
+  "Cache-Control": "no-store, no-cache, must-revalidate",
+  Pragma: "no-cache",
+  Expires: "0",
+};
 
 // --- Server Startup Logic ---
 if (!building) {
-	/**
-	 * The main initialization logic (settings, DB connection) is handled
-	 * in `src/databases/db.ts` to ensure it runs once on server start.
-	 *
-	 * The system will transition through these states:
-	 * IDLE -> INITIALIZING -> READY (or DEGRADED/FAILED)
-	 *
-	 * The handleSystemState hook will block requests appropriately
-	 * based on the current state.
-	 */
-	import('@src/databases/db')
-		.then(() => {
-			logger.info('✅ DB module loaded. System will initialize on first request via handleSystemState.');
-		})
-		.catch((error) => {
-			logger.error('Fatal: Failed to load DB module during server startup:', error);
-		});
+  // ✨ NEW: Smart initialization logic that respects the system state machine
+  // This ensures setup-wizard stays lean and non-critical services only start when needed.
+  import("@src/stores/system/state.svelte.ts").then(({ overallState }) => {
+    let isServicesInitialized = false;
+
+    const unsubscribe = overallState.subscribe(async (state) => {
+      const readyStates = ["READY", "WARMING", "WARMED", "DEGRADED"];
+      if (readyStates.includes(state) && !isServicesInitialized) {
+        isServicesInitialized = true;
+        // ✨ Hardware-Adaptive Tuning — the profile was detected ONCE at process
+        // start (module scope above) and published to the shared global registry.
+        // Here we only APPLY the knobs that must be set on the ready state.
+        const hw = getHardwareProfile();
+        process.env.UV_THREADPOOL_SIZE = String(hw.threadPoolSize);
+        import("sharp")
+          .then((sharp) => {
+            // Measured: variant pipelines are generated in parallel, so the
+            // machine saturates at low libvips concurrency (4≈24 threads on a
+            // 24-core host). The profile caps concurrency per tier to leave CPU
+            // headroom for the event loop, DB pool and other requests.
+            sharp.default.concurrency(hw.sharpConcurrency);
+            logger.debug(
+              `[System] Hardware optimized: ThreadPool=${hw.threadPoolSize} | SharpConcurrency=${hw.sharpConcurrency}`,
+            );
+          })
+          .catch(() => {});
+
+        logger.info(`[System] ${describeHardware(hw)}`);
+
+        // ✨ Parallel Service Initialization (Optimized for Cold Start)
+        // 🧠 PRE-WARM heavy modules used lazily inside request hooks so the first
+        // request never pays a dynamic-import stall:
+        // - `graphql`            → handle-security's GraphQL complexity shield
+        // - settings-service     → turbo-pipeline CORS preflight (getCorsHeadersInline)
+        import("graphql")
+          .catch(() => {})
+          .then(() => import("@src/services/core/settings-service"))
+          .catch(() => {});
+
+        // 🚀 GRAPHQL PRE-WARM: build the Yoga schema once at boot
+        // (registerCollections + createSchema JIT ≈ 20ms) so the first
+        // GraphQL query never pays it. The schema cache is version-keyed
+        // and rebuilt on content-structure changes — this only moves the
+        // initial build off the request path.
+        import("@src/routes/api/graphql/+server")
+          .then(async ({ _getYogaApp }) => {
+            const { getDb } = await import("@src/databases/db");
+            const adapter = getDb();
+            if (adapter && typeof adapter.isConnected === "function" && adapter.isConnected()) {
+              await _getYogaApp(adapter, "global");
+              logger.debug("[GraphQL] Schema pre-warmed at boot");
+            }
+          })
+          .catch(() => {});
+
+        // Background services always start — production parity. Benchmark
+        // runs measure the same runtime a real deployment has (pollers,
+        // watchdog, scheduler, outbox all contend for the event loop).
+        // Background services always start — production parity. Benchmark
+        // runs measure the same runtime a real deployment has (pollers,
+        // watchdog, scheduler, outbox all contend for the event loop).
+        {
+          jobQueue.startPolling();
+          automationService.init();
+          watchdog.start();
+          startScheduler();
+          startBehavioralEngine();
+          // Transactional outbox — deliver pending events (webhooks fan-out)
+          outboxService.startPolling(5_000);
+
+          // Telemetry check
+          const globalWithTelemetry = globalThis as typeof globalThis & {
+            __SVELTY_TELEMETRY_INTERVAL__?: NodeJS.Timeout;
+          };
+
+          if (globalWithTelemetry.__SVELTY_TELEMETRY_INTERVAL__) {
+            clearInterval(globalWithTelemetry.__SVELTY_TELEMETRY_INTERVAL__);
+          }
+
+          setTimeout(() => {
+            telemetryService
+              .checkUpdateStatus()
+              .catch((err) => logger.error("Initial telemetry check failed", err));
+          }, 10_000);
+
+          globalWithTelemetry.__SVELTY_TELEMETRY_INTERVAL__ = setInterval(
+            () => {
+              telemetryService
+                .checkUpdateStatus()
+                .catch((err) => logger.error("Periodic telemetry check failed", err));
+            },
+            1000 * 60 * 60 * 12, // 12 hours
+          );
+        }
+
+        // 🚀 PRE-WARM LAZY WRITE-PATH MODULES (cold-start): the first collection
+        // create/update used to pay a dynamic-import stall for workflow,
+        // response-cache, pub-sub, outbox, token-engine, history, the session
+        // store, tenant-adapter, field-permissions, and modify-request. Import
+        // them once at READY so the first write hits warm module singletons.
+        {
+          const lazy = await import("@src/services/sdk/namespaces/collections/lazy-services");
+          await Promise.allSettled([
+            lazy.getWorkflowServiceLazy(),
+            lazy.getResponseCacheLazy(),
+            lazy.getPubSubLazy(),
+            lazy.getOutboxLazy(),
+            lazy.getTokenEngineLazy(),
+            lazy.getHistoryServiceLazy(),
+            lazy.getDbModuleLazy(),
+            import("@src/services/security/field-permission-service"),
+            import("@src/content/index.server"),
+            import("@utils/modify-request"),
+            import("@src/databases/tenant-adapter"),
+            import("@src/databases/auth/session-manager").then((m) => m.getDefaultSessionStore()),
+          ]);
+          logger.debug("[System] Lazy write-path modules pre-warmed");
+        }
+
+        // 🚀 Pre-build and JIT-warm all cached middleware pipelines so the first request
+        // skips the sequence() assembly, module loading and V8 JIT warm-up stalls.
+        // Safe: getPipeline guards fullMiddlewareInitialized internally.
+        try {
+          const [pRead, pWrite, pSSR] = await Promise.all([
+            getPipeline(RequestLane.API_READ),
+            getPipeline(RequestLane.API_WRITE),
+            getPipeline(RequestLane.APP_SSR),
+          ]);
+
+          // Synthetic warmup request to prime V8 / JSC compilation & closures
+          const dummyUrl = new URL("http://localhost/api/system/health");
+          const dummyEvent = {
+            url: dummyUrl,
+            request: new Request(dummyUrl, {
+              headers: { "x-internal-warmup": "1" },
+            }),
+            locals: { lane: RequestLane.API_READ, tenantId: "global" } as any,
+            cookies: { get: () => undefined, set: () => {}, delete: () => {} } as any,
+            params: {},
+            route: { id: "/api/system/health" },
+            isDataRequest: false,
+            isSubRequest: false,
+            platform: undefined,
+            fetch: globalThis.fetch,
+            getClientAddress: () => "127.0.0.1",
+            setHeaders: () => {},
+          } as unknown as import("@sveltejs/kit").RequestEvent;
+
+          void Promise.allSettled([
+            pRead({ event: dummyEvent, resolve: async () => new Response("ok") }),
+            pWrite({
+              event: {
+                ...dummyEvent,
+                request: new Request(dummyUrl, {
+                  method: "POST",
+                  headers: { "x-internal-warmup": "1" },
+                }),
+                locals: { lane: RequestLane.API_WRITE, tenantId: "global" } as any,
+              } as any,
+              resolve: async () => new Response("ok"),
+            }),
+            pSSR({
+              event: {
+                ...dummyEvent,
+                url: new URL("http://localhost/"),
+                locals: { lane: RequestLane.APP_SSR, tenantId: "global" } as any,
+              } as any,
+              resolve: async () => new Response("ok"),
+            }),
+          ]);
+
+          logger.debug("[System] Middleware pipelines pre-built and JIT-warmed");
+        } catch (err) {
+          logger.warn("[System] Pipeline pre-build failed (non-fatal):", err);
+        }
+
+        // Cleanup: Unsubscribe once services are initialized
+        // Defer unsubscribe to next tick to avoid ReferenceError if subscribe is synchronous
+        Promise.resolve().then(() => {
+          if (typeof unsubscribe === "function") {
+            unsubscribe();
+          }
+        });
+      }
+    });
+  });
+
+  if (!IS_QUIET) {
+    logger.info("✅ DB module loaded. System will initialize background services when READY.");
+  }
 }
 
-// --- Middleware Sequence ---
-const middleware: Handle[] = [
-	// 1. Static assets FIRST (skip all other processing for maximum performance)
-	handleStaticAssetCaching,
+// ✨ ENTERPRISE: Graceful Shutdown Registry
+let inFlightRequests = 0;
+/** Cheap per-request id sequence for the non-trace path (see handle()). */
+let requestSeq = 0;
 
-	// 2. System state validation (enterprise gatekeeper with metrics)
-	handleSystemState,
+type ShutdownGlobal = typeof globalThis & {
+  __SVELTY_SHUTTING_DOWN__?: boolean;
+  __SVELTY_SIGNAL_HANDLERS_INSTALLED__?: boolean;
+};
 
-	// 3. Rate limiting (early protection against abuse)
-	handleRateLimit,
+function isViteRunnerClosedError(reason: unknown): boolean {
+  const msg =
+    reason instanceof Error
+      ? reason.message
+      : typeof reason === "string"
+        ? reason
+        : reason && typeof reason === "object" && "message" in reason
+          ? String((reason as { message: unknown }).message)
+          : String(reason ?? "");
+  return /module runner has been closed|vite.*closed|server is closed/i.test(msg);
+}
 
-	// 4. Application firewall (detect threats Nginx/CDN can't catch)
-	handleFirewall,
+if (!building) {
+  const g = globalThis as ShutdownGlobal;
 
-	// 5. Setup completion enforcement (installation gate with tracking)
-	handleSetup,
+  // HMR re-evaluates hooks.server.ts — only install process listeners once per process
+  if (!g.__SVELTY_SIGNAL_HANDLERS_INSTALLED__) {
+    g.__SVELTY_SIGNAL_HANDLERS_INSTALLED__ = true;
 
-	// 6. Language preferences (i18n cookie synchronization)
-	handleLocale,
+    const handleSignal = async (signal: string) => {
+      // Re-entrancy: double Ctrl+C / stacked HMR listeners must not re-enter
+      if (g.__SVELTY_SHUTTING_DOWN__) return;
+      g.__SVELTY_SHUTTING_DOWN__ = true;
 
-	// 7. Theme management (SSR dark mode support)
-	handleTheme,
+      logger.info(`Received ${signal}. Starting graceful shutdown...`);
+      const shutdownTimeout = setTimeout(() => {
+        logger.error(`Graceful shutdown timed out after 10s. Force exiting.`);
+        process.exit(1);
+      }, 10000);
 
-	// 8. Authentication & session management (identity with security monitoring)
-	handleAuthentication,
+      try {
+        // Drain period (bounded — don't hang forever if counters desync)
+        const drainDeadline = Date.now() + 5_000;
+        let lastLoggedCount = -1;
+        while (inFlightRequests > 0 && Date.now() < drainDeadline) {
+          // Log only when the counter changes — not every 250ms tick (log flood
+          // under active traffic during shutdown).
+          if (inFlightRequests !== lastLoggedCount) {
+            logger.info(`Waiting for ${inFlightRequests} in-flight requests to drain...`);
+            lastLoggedCount = inFlightRequests;
+          }
+          await new Promise((r) => setTimeout(r, 250));
+        }
 
-	// 9. Authorization & access control (permissions with threat detection)
-	handleAuthorization,
+        // 🚀 GRACEFUL WS SHUTDOWN: send `1001 Going Away` to every tracked
+        // connection so realtime clients can reconnect cleanly instead of
+        // hanging until the adapter force-kicks them.
+        try {
+          const { closeAllConnections } = await import("./hooks.ws");
+          const closed = closeAllConnections(1001, "Server shutting down");
+          if (closed > 0) logger.info(`Gracefully closed ${closed} WebSocket connection(s)`);
+        } catch (err) {
+          logger.debug("WS close skipped (hooks.ws not loaded):", err);
+        }
 
-	// 10. API request handling (role-based access control & caching)
-	handleApiRequests,
+        // In Vite dev, process exit often closes the SSR module runner *before* this
+        // dynamic import runs → "Vite module runner has been closed". Swallow that;
+        // OS process exit still tears down sockets/DB handles.
+        try {
+          const { shutdownSystem } = await import("@src/databases/db");
+          await shutdownSystem();
+        } catch (err) {
+          if (isViteRunnerClosedError(err)) {
+            logger.debug(
+              "Graceful DB shutdown skipped — Vite SSR runner already closed (normal on Ctrl+C in dev).",
+            );
+          } else {
+            logger.error("Error during graceful DB shutdown:", err);
+          }
+        }
 
-	// 11. Essential security headers (defense in depth)
-	addSecurityHeaders
-];
+        clearTimeout(shutdownTimeout);
+        logger.info("✅ All systems finalized. Exit.");
+      } catch (err) {
+        clearTimeout(shutdownTimeout);
+        if (!isViteRunnerClosedError(err)) {
+          logger.error("Graceful shutdown failed:", err);
+        }
+      } finally {
+        process.exit(0);
+      }
+    };
 
-// --- Main Handle Export ---
-export const handle: Handle = sequence(...middleware);
+    // Fire-and-forget with .catch so rejections never surface as unhandled
+    process.on("SIGTERM", () => {
+      void handleSignal("SIGTERM").catch(() => process.exit(0));
+    });
+    process.on("SIGINT", () => {
+      void handleSignal("SIGINT").catch(() => process.exit(0));
+    });
+
+    // ✨ ENTERPRISE: Diagnostic Error Catching
+    process.on("uncaughtException", (err) => {
+      // Expected race while Vite tears down on Ctrl+C — don't FATAL-spam
+      if (g.__SVELTY_SHUTTING_DOWN__ && isViteRunnerClosedError(err)) return;
+      if (isViteRunnerClosedError(err)) {
+        logger.debug("Ignored Vite module-runner exception during process teardown.");
+        return;
+      }
+      logger.error("FATAL: Uncaught Exception:", err);
+      process.stderr.write(`FATAL: Uncaught Exception: ${err}\n`);
+      process.exit(255);
+    });
+
+    process.on("unhandledRejection", (reason) => {
+      if (g.__SVELTY_SHUTTING_DOWN__ && isViteRunnerClosedError(reason)) return;
+      // Signal order can reject before our flag is set
+      if (isViteRunnerClosedError(reason)) {
+        logger.debug("Ignored Vite module-runner rejection during process teardown.");
+        return;
+      }
+      logger.error("FATAL: Unhandled Rejection:", reason);
+      process.stderr.write(`FATAL: Unhandled Rejection: ${reason}\n`);
+    });
+  }
+}
+
+// Helper to dynamically wrap SvelteKit middleware inside a high-resolution tracing span
+// 🚀 Pre-resolves the handle reference once (saves one function call per hook per request)
+// 🚀 HOOK TIMING: Accumulates per-hook latency for diagnostics via getHookTimings().
+const hookTimings = new Map<string, { count: number; total: number; min: number; max: number }>();
+
+export function getHookTimings(): Record<
+  string,
+  { avg: number; min: number; max: number; count: number }
+> {
+  const result: Record<string, any> = {};
+  for (const [name, t] of hookTimings) {
+    result[name] = {
+      avg: t.total / t.count,
+      min: t.min,
+      max: t.max,
+      count: t.count,
+    };
+  }
+  return result;
+}
+
+// 🚀 Hook timing and tracing add measurable overhead (Map ops, performance.now, traceSpan)
+// on every request for every hook. This contributes to the "Middleware/Hooks over budget"
+// (target <2ms full pipeline in exec matrix). Gate to diagnostics/benchmark only.
+// Turbo path remains fast (1.6-2.1ms) because it short-circuits many later hooks.
+const HOOK_TIMING_ENABLED = process.env.ENABLE_HOOK_TIMING === "1";
+
+function wrapHandle(name: string, handleFnRef: () => Handle): Handle {
+  // Resolve once at wrap time (pipeline build). Saves per-request function call overhead.
+  const resolvedHandle = handleFnRef();
+  if (!HOOK_TIMING_ENABLED) {
+    // Zero-overhead path: pass the resolved handle straight into sequence().
+    // An `async (input) => await resolvedHandle(input)` wrapper here adds one
+    // extra promise hop per hook per request (15 hooks = 15 microtask layers).
+    return resolvedHandle;
+  }
+  return async (input) => {
+    const start = performance.now();
+    try {
+      return await traceSpan(`hook:${name}`, async () => await resolvedHandle(input));
+    } finally {
+      const elapsed = performance.now() - start;
+      let t = hookTimings.get(name);
+      if (!t) {
+        t = { count: 0, total: 0, min: Infinity, max: 0 };
+        hookTimings.set(name, t);
+      }
+      t.count++;
+      t.total += elapsed;
+      if (elapsed < t.min) t.min = elapsed;
+      if (elapsed > t.max) t.max = elapsed;
+    }
+  };
+}
+
+// 🚀 DYNAMIC PIPELINE DISPATCHER
+// We don't pre-compile the sequence into a single const, instead we build it
+// based on the current system state.
+let cachedPipelineReady: Handle | null = null;
+let cachedPipelineApi: Handle | null = null;
+let cachedPipelineApiWrite: Handle | null = null;
+let cachedPipelineSetup: Handle | null = null;
+
+// 🛡️ AWAIT full middleware before building the READY pipeline: at boot,
+// ensureFullMiddleware() loads the real hook modules asynchronously. Without
+// the await, the first request can snapshot passThrough handlers into the
+// cached pipeline — and wrapHandle() binds the resolved fn at wrap time, so
+// security/rate-limit/auth would stay bypassed until a setup-state change or
+// process restart.
+const getPipeline = async (lane?: RequestLane): Promise<Handle> => {
+  if (setupComplete) {
+    if (!fullMiddlewareInitialized) {
+      await ensureFullMiddleware();
+    }
+    const isTestMode = process.env.TEST_MODE === "true";
+
+    // API lanes skip page-only hooks (redirects / AEO / user-preferences).
+    // Auth, WAF, rate-limit, and RBAC stay in place.
+    // Writes skip turbo-get (GET-only) and token-resolution (writes do not rewrite response templates).
+    if (lane === RequestLane.API_WRITE) {
+      if (!cachedPipelineApiWrite) {
+        const handlers: Handle[] = [wrapHandle("turbo-pipeline", () => handleTurboPipeline)];
+        if (isTestMode) {
+          handlers.push(wrapHandle("test-isolation", () => handleTestIsolation));
+        }
+        handlers.push(
+          wrapHandle("security", () => handleSecurity),
+          wrapHandle("rate-limit", () => handleRateLimit),
+          wrapHandle("system-state", () => handleSystemState),
+          wrapHandle("compression", () => handleCompression),
+          wrapHandle("authentication", () => handleAuthentication),
+          wrapHandle("authorization", () => handleAuthorization),
+          wrapHandle("local-context", () => handleLocalContext),
+          wrapHandle("audit-logging", () => handleAuditLogging),
+          wrapHandle("api-requests", () => handleApiRequests),
+        );
+        cachedPipelineApiWrite = sequence(...handlers);
+      }
+      return cachedPipelineApiWrite;
+    }
+    // Reads skip rate-limit (mutations only) and audit-logging (mutations only)
+    if (lane === RequestLane.API_READ || lane === RequestLane.HYPER_TURBO) {
+      if (!cachedPipelineApi) {
+        const handlers: Handle[] = [wrapHandle("turbo-pipeline", () => handleTurboPipeline)];
+        if (isTestMode) {
+          handlers.push(wrapHandle("test-isolation", () => handleTestIsolation));
+        }
+        handlers.push(
+          wrapHandle("security", () => handleSecurity),
+          wrapHandle("system-state", () => handleSystemState),
+          wrapHandle("turbo-get", () => handleTurboGet),
+          wrapHandle("compression", () => handleCompression),
+          wrapHandle("authentication", () => handleAuthentication),
+          wrapHandle("authorization", () => handleAuthorization),
+          wrapHandle("local-context", () => handleLocalContext),
+          wrapHandle("api-requests", () => handleApiRequests),
+          wrapHandle("token-resolution", () => handleTokenResolution),
+        );
+        cachedPipelineApi = sequence(...handlers);
+      }
+      return cachedPipelineApi;
+    }
+    if (!cachedPipelineReady) {
+      const handlers: Handle[] = [wrapHandle("turbo-pipeline", () => handleTurboPipeline)];
+      if (isTestMode) {
+        handlers.push(wrapHandle("test-isolation", () => handleTestIsolation));
+      }
+      handlers.push(
+        wrapHandle("security", () => handleSecurity),
+        wrapHandle("rate-limit", () => handleRateLimit),
+        wrapHandle("system-state", () => handleSystemState),
+        wrapHandle("turbo-get", () => handleTurboGet),
+        wrapHandle("redirects", () => handleRedirects),
+        wrapHandle("compression", () => handleCompression),
+        wrapHandle("user-preferences", () => handleUserPreferences),
+        wrapHandle("authentication", () => handleAuthentication),
+        wrapHandle("authorization", () => handleAuthorization),
+        wrapHandle("local-context", () => handleLocalContext),
+        wrapHandle("audit-logging", () => handleAuditLogging),
+        wrapHandle("api-requests", () => handleApiRequests),
+        wrapHandle("token-resolution", () => handleTokenResolution),
+      );
+      cachedPipelineReady = sequence(...handlers);
+    }
+    return cachedPipelineReady;
+  } else {
+    if (!cachedPipelineSetup) {
+      cachedPipelineSetup = sequence(
+        wrapHandle("turbo-pipeline", () => handleTurboPipeline),
+        wrapHandle("compression", () => handleCompression),
+      );
+    }
+    return cachedPipelineSetup;
+  }
+};
+
+/**
+ * 🛡️ GLOBAL SECURITY GUARD
+ * Ensures that EVERY response (including 302 redirects, 404s, and 500 errors)
+ * carries the full suite of security headers.
+ *
+ * Request Lane Router: O(1) classification for health/static/turbo fast-paths
+ * before the full middleware sequence.
+ */
+function withLane(res: Response, lane: RequestLane): Response {
+  res.headers.set("x-svelty-lane", lane);
+  return res;
+}
+
+// ─── Operational Request Lane Router ───────────────────────────────────────
+export const handle: Handle = async ({ event, resolve }) => {
+  const lane = classifyRequest(event.url, event.request.method, event.request.headers);
+  (event.locals as any).lane = lane;
+  (event.locals as any).routeSpec = routeResourceStateMachine.classifyRouteSpec(event.url.pathname);
+
+  if (lane === RequestLane.FAST_STATIC) {
+    if (event.url.pathname === "/favicon.ico")
+      return withLane(new Response(null, { status: 204 }), lane);
+    const res = await resolve(event);
+    res.headers.set("Cache-Control", "public, max-age=31536000, immutable");
+    return withLane(res, lane);
+  }
+
+  const pathname = event.url.pathname;
+
+  // Warm collection create/update: WAF + CSRF + rate-limit + one persist.
+  // Cold sessions fall through to the full API_WRITE sequence.
+  if (lane === RequestLane.API_WRITE && isSimpleCollectionWrite(event)) {
+    return withLane(
+      await tryCollectionWriteLane({
+        event,
+        resolve: async (evt) => {
+          const pipeline = await getPipeline(lane);
+          return pipeline({ event: evt, resolve });
+        },
+      }),
+      lane,
+    );
+  }
+
+  // 🚀 HOT-SWAP CHECK: Dynamically synchronize setup state on every request
+  const currentSetupState = currentSetupStateWithMemo(pathname);
+  if (setupComplete !== currentSetupState) {
+    logger.info(`🔄 System setup state change detected: ${setupComplete} -> ${currentSetupState}`);
+    setupComplete = currentSetupState;
+    cachedPipelineReady = null;
+    cachedPipelineApi = null;
+    cachedPipelineApiWrite = null;
+    cachedPipelineSetup = null;
+    if (setupComplete) {
+      try {
+        await ensureFullMiddleware();
+      } catch (err) {
+        logger.error("Failed to lazy-load full middleware:", err);
+      }
+    }
+  }
+
+  // 🚀 Fast-return for known static/missing paths (avoids ALL middleware + trace overhead)
+  if (pathname === "/favicon.ico") {
+    return withLane(new Response(null, { status: 204 }), lane);
+  }
+
+  // 🚀 Health check fast-return: skip trace setup, context, and full pipeline
+  if (
+    lane === RequestLane.HEALTH ||
+    pathname === "/api/system/health" ||
+    pathname === "/health" ||
+    pathname === "/healthz" ||
+    pathname === "/livez" ||
+    pathname === "/readyz" ||
+    pathname === "/_healthz"
+  ) {
+    inFlightRequests++;
+    try {
+      const state =
+        (globalThis as any).__SYSTEM_OVERALL_STATE__ || (setupComplete ? "READY" : "SETUP");
+
+      if (
+        setupComplete &&
+        (state === "IDLE" || (globalThis as any).__SYSTEM_OVERALL_STATE__ === undefined)
+      ) {
+        import("./databases/db")
+          .then(({ getDbInitPromise }) => {
+            getDbInitPromise(false, "CORE").catch(() => {});
+          })
+          .catch(() => {});
+      }
+
+      const isReady =
+        state === "READY" || state === "WARMED" || state === "WARMING" || state === "DEGRADED";
+      const isDbConnected = state !== "SETUP" && state !== "IDLE" && state !== "FAILED";
+
+      const includeDiagnostics =
+        event.url.searchParams.has("verbose") ||
+        event.url.searchParams.has("hooks") ||
+        event.url.searchParams.has("gc");
+      const health: Record<string, unknown> = {
+        status: isReady ? "healthy" : "unhealthy",
+        overallStatus: state,
+        database: isDbConnected ? "connected" : "disconnected",
+        timestamp: Date.now(),
+        uptime: process.uptime(),
+        dbType: process.env.DB_TYPE || "unknown",
+      };
+
+      if (includeDiagnostics) {
+        if (event.url.searchParams.has("gc")) {
+          if (typeof global !== "undefined" && (global as any).gc) (global as any).gc();
+          if (typeof (globalThis as any).Bun !== "undefined" && (globalThis as any).Bun.gc) {
+            (globalThis as any).Bun.gc(true);
+          }
+        }
+
+        const mem = process.memoryUsage();
+        const hooks = getHookTimings();
+        health.memory = {
+          rss: mem.rss,
+          heapTotal: mem.heapTotal,
+          heapUsed: mem.heapUsed,
+          external: mem.external,
+        };
+        if (Object.keys(hooks).length > 0) health.hooks = hooks;
+
+        // 🎯 CONTENT-STORE READINESS + GRAPHQL CACHE CAUSES: "DB connected but
+        // content not READY" windows (slow compile/scan after boot) misattribute
+        // latency to cold start; schemaHits≈0 with schemaMisses climbing is the
+        // per-request schema-rebuild signature (identity-flip class).
+        try {
+          const { contentSystem } = await import("@src/content/index.server");
+          health.content = contentSystem.getHealthStatus();
+        } catch {}
+        try {
+          health.graphql = metricsService.getReport().graphql;
+        } catch {}
+      }
+
+      const healthRes = Response.json(health, { headers: HEALTH_HEADERS });
+      return withLane(healthRes, lane);
+    } finally {
+      inFlightRequests--;
+    }
+  }
+
+  inFlightRequests++;
+  // Reset per-request ID counters for deterministic SSR/hydration IDs
+  resetIdCounters();
+  const traceHeader = event.request.headers.get("x-svelty-trace");
+  const traceEnabled = traceHeader === "true";
+  // Lazy trace ID: the pipeline overwrites locals.requestId with its own
+  // generateRequestId() anyway, so a pre-pipeline UUID is only needed when
+  // tracing is enabled (99.9% of traffic gets a cheap sequential id).
+  const traceId =
+    (event.locals as any).requestId ||
+    (traceEnabled ? crypto.randomUUID() : `r${(requestSeq++).toString(36)}`);
+
+  // 🚀 Fast path: skip ALL trace/context overhead when tracing is disabled (99.9% of traffic)
+  if (!traceEnabled) {
+    (event.locals as any).requestId = traceId;
+    try {
+      const pipeline = await getPipeline(lane);
+      const res = await pipeline({ event, resolve });
+      return withLane(res, lane);
+    } catch (err: any) {
+      if (!isRedirect(err)) {
+        logger.error(`[Guard] Unhandled error in middleware chain:`, err);
+        const errorResponse = handleApiError(err, event);
+        applyAllSecurityHeaders(
+          errorResponse.headers,
+          event.url.protocol === "https:",
+          event.request.headers.get("Origin"),
+          event.url.pathname,
+        );
+        return withLane(errorResponse, lane);
+      }
+      throw err;
+    } finally {
+      inFlightRequests--;
+    }
+  }
+
+  return runWithContext(
+    {
+      requestId: traceId,
+      abortSignal: event.request.signal,
+    },
+    () => {
+      return runWithTrace(traceId, traceEnabled, async () => {
+        try {
+          const pipeline = await getPipeline(lane);
+          const response = await pipeline({ event, resolve });
+
+          if (traceEnabled) {
+            const trace = getTrace();
+            if (trace) {
+              response.headers.set("x-svelty-trace-id", trace.traceId);
+              response.headers.set("x-svelty-trace-spans", JSON.stringify(trace.spans));
+            }
+          }
+          return withLane(response, lane);
+        } catch (err: any) {
+          if (isRedirect(err)) {
+            throw err;
+          }
+
+          logger.error(`[Guard] Unhandled error in middleware chain:`, err);
+
+          const errorResponse = handleApiError(err, event);
+
+          applyAllSecurityHeaders(
+            errorResponse.headers,
+            event.url.protocol === "https:",
+            event.request.headers.get("Origin"),
+            event.url.pathname,
+          );
+
+          if (traceEnabled) {
+            const trace = getTrace();
+            if (trace) {
+              errorResponse.headers.set("x-svelty-trace-id", trace.traceId);
+              errorResponse.headers.set("x-svelty-trace-spans", JSON.stringify(trace.spans));
+            }
+          }
+
+          return withLane(errorResponse, lane);
+        } finally {
+          inFlightRequests--;
+        }
+      });
+    },
+  );
+};
+
+// --- Global Error Handler (SvelteKit v3 compatible) ---
+/**
+ * Catches ALL unhandled errors from page loads, API routes, and server functions.
+ * Extracts structured codes from raise() calls via `__sveltyCode` in the error body.
+ * Single source of truth for production error logging.
+ *
+ * 🚀 SK3: handleError receives a `CaughtError & { event }` input — the HTTP
+ * status lives on the caught error object (app errors always carry status).
+ */
+export const handleError: HandleServerError = async (input) => {
+  const { error, event } = input;
+  const status = (error as { status?: number } | null)?.status ?? 500;
+  const body = (error as { body?: { __sveltyCode?: string; message?: string } } | null)?.body;
+  const code = body?.__sveltyCode || `HTTP_${status}`;
+  const message = body?.message || (error instanceof Error ? error.message : String(error ?? ""));
+
+  logger.error(`[GlobalError] ${code} — ${message}`, {
+    path: event?.url?.pathname,
+    method: event?.request?.method,
+    userId: event?.locals?.user?._id,
+    tenantId: event?.locals?.tenantId,
+    status,
+    stack: error instanceof Error ? error.stack : undefined,
+  });
+
+  const isDevOrTest =
+    process.env.TEST_MODE === "true" ||
+    process.env.PLAYWRIGHT_TEST === "true" ||
+    process.env.NODE_ENV !== "production";
+
+  return {
+    message: isDevOrTest ? message || "Internal Error" : "Internal Error",
+    code,
+  };
+};
 
 // --- Utility Functions for External Use ---
 export const getHealthMetrics = () => metricsService.getReport();
-export {
-	invalidateSessionCache,
-	clearAllSessionCaches,
-	clearSessionRefreshAttempt,
-	forceSessionRotation,
-	getSessionCacheStats
-} from './hooks/handleAuthentication';
+
+/**
+ * Invalidate all turbo-auth cache entries for a specific user.
+ * Called when roles change or the user is blocked/deleted/unblocked
+ * so privilege changes take effect immediately without waiting for TTL expiry.
+ */
+export function invalidateTurboAuthForUser(userId: string) {
+  for (const [key, ctx] of turboAuthCache.entries()) {
+    if (ctx.user?._id === userId || ctx.user?.id === userId) {
+      turboAuthCache.delete(key);
+    }
+  }
+}
+
+import { TokenRegistry } from "@src/services/token/engine";
+
+// 🚀 Register server-side token resolver for site settings without polluting client bundle
+TokenRegistry.setSiteResolver(async () => {
+  const { getAllSettings } = await import("@src/services/core/settings-service");
+  return await getAllSettings();
+});

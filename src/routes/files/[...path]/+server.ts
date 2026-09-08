@@ -1,129 +1,245 @@
 /**
  * @file src/routes/files/[...path]/+server.ts
- * @description Serves media files from local storage or redirects to cloud storage
- *
- * This endpoint handles requests to /files/... with the following logic:
- * - **Local Storage**: Serves files directly from MEDIA_FOLDER
- * - **Cloud Storage** (S3/R2/Cloudinary): Redirects to MEDIA_CLOUD_PUBLIC_URL or MEDIASERVER_URL
- *
- * The storage type is determined by the MEDIA_STORAGE_TYPE setting:
- * - 'local': Serve from local filesystem
- * - 's3', 'r2', 'cloudinary': Redirect to cloud URL
- *
- * Examples:
- * - GET /files/avatars/hash-image.avif (local) -> serves mediaFolder/avatars/hash-image.avif
- * - GET /files/avatars/hash-image.avif (cloud) -> redirects to https://cdn.example.com/avatars/hash-image.avif
+ * @description Serves uploaded media files with streaming, cloud redirect support, and Range request handling.
+ * Highly memory-efficient, secure, and cache-friendly.
  */
 
-import { error, redirect } from '@sveltejs/kit';
-import type { RequestHandler } from './$types';
-import { getPublicSettingSync } from '@src/services/settingsService';
-import { logger } from '@utils/logger.server';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import { lookup } from 'mime-types';
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { Readable } from "node:stream";
+import path from "node:path";
+import { lookup } from "mime-types";
 
-export const GET: RequestHandler = async ({ params }) => {
-	try {
-		const filePath = params.path;
+import { getPublicSettingSync } from "@src/services/core/settings-service";
+import { resolveConfiguredMediaFolder } from "@src/utils/media/storage-adapters";
+import { apiHandler } from "@utils/api-handler";
+import { MEDIA_RESOURCE_HEADERS } from "@utils/security/constants";
+import { AppError } from "@utils/error-handling";
+import { logger } from "@utils/logger";
+import { isMultiTenantEnabled } from "@utils/tenant";
 
-		if (!filePath) {
-			logger.warn('File request missing path');
-			throw error(400, 'File path is required');
-		}
-
-		// Check storage type
-		const storageType = getPublicSettingSync('MEDIA_STORAGE_TYPE');
-
-		// If using cloud storage, redirect to the cloud URL
-		if (storageType !== 'local') {
-			// Try MEDIA_CLOUD_PUBLIC_URL first, then MEDIASERVER_URL as fallback
-			const cloudUrl = getPublicSettingSync('MEDIA_CLOUD_PUBLIC_URL') || getPublicSettingSync('MEDIASERVER_URL');
-
-			if (cloudUrl) {
-				// Get MEDIA_FOLDER to use as path prefix in cloud storage
-				const mediaFolder = getPublicSettingSync('MEDIA_FOLDER') || '';
-				const normalizedFolder = mediaFolder.replace(/^\.\//, '').replace(/^\/+/, '').replace(/\/+$/, '');
-
-				// Construct the full cloud URL with MEDIA_FOLDER prefix
-				const baseUrl = cloudUrl.replace(/\/+$/, ''); // Remove trailing slash
-				const fullUrl = normalizedFolder ? `${baseUrl}/${normalizedFolder}/${filePath}` : `${baseUrl}/${filePath}`;
-
-				logger.debug('Redirecting to cloud storage', {
-					filePath,
-					cloudUrl: fullUrl,
-					storageType,
-					mediaFolder: normalizedFolder
-				});
-				throw redirect(307, fullUrl);
-			} else {
-				logger.error('Cloud storage configured but no public URL available', { storageType });
-				throw error(500, 'Cloud storage URL not configured');
-			}
-		}
-
-		// LOCAL STORAGE: Serve from filesystem
-		const mediaFolder = getPublicSettingSync('MEDIA_FOLDER');
-		if (!mediaFolder) {
-			logger.error('MEDIA_FOLDER not configured in system settings');
-			throw error(500, 'Media storage not configured');
-		}
-
-		// Normalize media folder path (remove ./ prefix)
-		const normalizedMediaFolder = mediaFolder.replace(/^\.\//, '').replace(/^\/+/, '');
-
-		// Construct full file path
-		const fullPath = path.join(process.cwd(), normalizedMediaFolder, filePath);
-
-		// Security: Prevent directory traversal attacks
-		const resolvedPath = path.resolve(fullPath);
-		const allowedBasePath = path.resolve(process.cwd(), normalizedMediaFolder);
-
-		if (!resolvedPath.startsWith(allowedBasePath)) {
-			logger.warn('Directory traversal attempt detected', {
-				requestedPath: filePath,
-				resolvedPath
-			});
-			throw error(403, 'Access denied');
-		}
-
-		// Check if file exists
-		if (!fs.existsSync(resolvedPath)) {
-			logger.debug('File not found', { path: resolvedPath });
-			throw error(404, 'File not found');
-		}
-
-		// Check if it's a file (not a directory)
-		const stats = fs.statSync(resolvedPath);
-		if (!stats.isFile()) {
-			logger.warn('Attempted to access non-file resource', { path: resolvedPath });
-			throw error(400, 'Invalid file request');
-		}
-
-		// Read file
-		const fileBuffer = fs.readFileSync(resolvedPath);
-
-		// Determine MIME type
-		const mimeType = lookup(resolvedPath) || 'application/octet-stream';
-
-		// Return file with appropriate headers
-		return new Response(fileBuffer, {
-			status: 200,
-			headers: {
-				'Content-Type': mimeType,
-				'Content-Length': stats.size.toString(),
-				'Cache-Control': 'public, max-age=31536000, immutable',
-				'Last-Modified': stats.mtime.toUTCString()
-			}
-		});
-	} catch (err) {
-		// Re-throw SvelteKit errors
-		if (err && typeof err === 'object' && 'status' in err) {
-			throw err;
-		}
-
-		// Log unexpected errors
-		logger.error('Error serving file', { error: err, path: params.path });
-		throw error(500, 'Failed to serve file');
-	}
+// Pre-compute headers once (shared across all responses)
+const _baseHeaders = {
+  ...MEDIA_RESOURCE_HEADERS,
+  "Cache-Control": "public, max-age=31536000, immutable",
+  "Accept-Ranges": "bytes",
 };
+
+/**
+ * Defense-in-depth for SVG responses: even if storage sanitization is bypassed,
+ * block script execution when the browser treats the SVG as a document.
+ */
+function headersForMime(mimeType: string): Record<string, string> {
+  if (mimeType === "image/svg+xml" || mimeType.startsWith("image/svg")) {
+    return {
+      ..._baseHeaders,
+      "Content-Security-Policy":
+        "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'none'; sandbox",
+      "X-Content-Type-Options": "nosniff",
+      // Prefer download over navigable document when opened directly
+      "Content-Disposition": "inline",
+    };
+  }
+  return _baseHeaders;
+}
+
+// Lazy-load storage adapter once
+let _storageAdapter: {
+  getMetadata: (p: string) => Promise<{ etag?: string; size?: number; lastModified?: Date } | null>;
+} | null = null;
+async function getStorage() {
+  if (!_storageAdapter) {
+    const { getStorageAdapter } = await import("@src/utils/media/storage-adapters");
+    _storageAdapter = getStorageAdapter();
+  }
+  return _storageAdapter!;
+}
+
+// Compute resolved media base path once at first request
+let _mediaBase: string | null = null;
+let _mediaFolder: string | null = null;
+function getMediaPaths() {
+  if (!_mediaBase) {
+    // Same resolution as the write path (storage-adapters): under any
+    // benchmark/test harness, process.env.MEDIA_FOLDER (the sandbox) wins
+    // over a stale DB setting — otherwise uploads land in the sandbox but
+    // /files serves from ./mediaFolder → 404. Sync + memoized: zero cost on
+    // the file-serving hot path.
+    const mf = (resolveConfiguredMediaFolder() || "mediaFolder")
+      .replace(/^\.\//, "")
+      .replace(/^\/+|\/+$/g, "");
+    _mediaFolder = mf;
+    _mediaBase = path.resolve(process.cwd(), mf);
+  }
+  return { folder: _mediaFolder!, base: _mediaBase! };
+}
+
+export const GET = apiHandler(async ({ params, request, locals }) => {
+  let filePath = params.path?.trim();
+  if (!filePath) {
+    throw new AppError("File path is required", 400, "MISSING_PATH");
+  }
+
+  filePath = filePath.replace(/^\/?files\//, "").replace(/^\/+/, "");
+
+  const storageType = getPublicSettingSync("MEDIA_STORAGE_TYPE") || "local";
+  const ifNoneMatch = request.headers.get("if-none-match");
+  const ifModifiedSince = request.headers.get("if-modified-since");
+
+  // ====================== CLOUD STORAGE REDIRECT ======================
+  if (storageType !== "local") {
+    const cloudPublicUrl =
+      getPublicSettingSync("MEDIA_CLOUD_PUBLIC_URL") || getPublicSettingSync("MEDIASERVER_URL");
+
+    if (cloudPublicUrl) {
+      const storage = await getStorage();
+      let etag: string | undefined;
+      try {
+        const metadata = await storage.getMetadata(filePath);
+        etag = metadata?.etag;
+      } catch {
+        /* metadata optional */
+      }
+
+      if (etag && ifNoneMatch === etag) {
+        return new Response(null, { status: 304 });
+      }
+
+      const { folder: normalizedFolder } = getMediaPaths();
+      const baseUrl = cloudPublicUrl.replace(/\/+$/, "");
+      const fullUrl = normalizedFolder
+        ? `${baseUrl}/${normalizedFolder}/${filePath}`
+        : `${baseUrl}/${filePath}`;
+
+      return new Response(null, {
+        status: 302,
+        headers: {
+          ...MEDIA_RESOURCE_HEADERS,
+          Location: fullUrl,
+          ...(etag && { ETag: etag }),
+          "Cache-Control": "public, max-age=31536000, immutable",
+        },
+      });
+    }
+
+    throw new AppError("Cloud storage misconfigured", 500, "CLOUD_CONFIG_ERROR");
+  }
+
+  // ====================== LOCAL STORAGE SERVING ======================
+  const { base: basePath } = getMediaPaths();
+  const fullPath = path.join(basePath, filePath);
+  const resolvedPath = path.resolve(fullPath);
+
+  // Directory traversal guard
+  const relative = path.relative(basePath, resolvedPath);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    logger.warn("Directory traversal attempt blocked", { requested: filePath });
+    throw new AppError("Access denied", 403, "ACCESS_DENIED");
+  }
+
+  // 🛡️ Tenant access control — extract tenant from file path
+  // Path format: {tenantId}/{hash}/original/file.jpg or global/{hash}/original/file.jpg
+  const pathTenant = filePath.split("/")[0];
+  if (isMultiTenantEnabled() && pathTenant && pathTenant !== "global") {
+    const userTenantId = (locals as any)?.tenantId;
+    // Reject when: no tenantId (undefined/null), OR tenantId doesn't match path tenant and isn't "global" bypass
+    if (!userTenantId || (userTenantId !== pathTenant && userTenantId !== "global")) {
+      logger.warn("Cross-tenant file access blocked", {
+        requested: filePath,
+        userTenant: userTenantId,
+        fileTenant: pathTenant,
+      });
+      throw new AppError("Access denied: tenant mismatch", 403, "TENANT_MISMATCH");
+    }
+  }
+
+  // 🛡️ Signed URL enforcement (opt-in via MEDIA_SIGNED_URL_ENABLED)
+  // Global files remain public; tenant-scoped files require a valid signature
+  const signedUrlEnabled = getPublicSettingSync("MEDIA_SIGNED_URL_ENABLED");
+  if (signedUrlEnabled && pathTenant !== "global") {
+    const { validateSignedMediaUrl } = await import("@src/utils/media/signed-urls");
+    const requestUrl = new URL(request.url);
+    const userTenantId = (locals as any)?.tenantId;
+    const validation = validateSignedMediaUrl(requestUrl, filePath, userTenantId);
+    if (!validation.valid) {
+      logger.warn("Signed URL validation failed", {
+        requested: filePath,
+        reason: validation.reason,
+      });
+      throw new AppError("Signed URL required or invalid", 403, "SIGNATURE_REQUIRED");
+    }
+  }
+
+  let stats;
+  try {
+    stats = await stat(resolvedPath);
+  } catch (err: any) {
+    if (err.code === "ENOENT") throw new AppError("File not found", 404, "NOT_FOUND");
+    throw new AppError("Internal server error", 500, "FILE_ACCESS_ERROR");
+  }
+
+  if (!stats.isFile()) throw new AppError("Not a file", 400, "INVALID_FILE");
+
+  const etag = `W/"${stats.size}-${stats.mtimeMs}"`;
+  const lastModified = stats.mtime.toUTCString();
+
+  if (ifNoneMatch === etag || ifModifiedSince === lastModified) {
+    return new Response(null, { status: 304 });
+  }
+
+  const mimeType = lookup(resolvedPath) || "application/octet-stream";
+  const mimeHeaders = headersForMime(mimeType);
+  const range = request.headers.get("range");
+
+  // Range Requests (video/audio seeking)
+  if (range?.startsWith("bytes=")) {
+    const parts = range.replace(/bytes=/, "").split("-");
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : stats.size - 1;
+
+    if (start >= stats.size || end >= stats.size || start > end) {
+      return new Response(null, {
+        status: 416,
+        headers: { "Content-Range": `bytes */${stats.size}` },
+      });
+    }
+
+    const chunksize = end - start + 1;
+    const fileStream = createReadStream(resolvedPath, { start, end });
+    // Destroy the fs stream when the client disconnects — otherwise every aborted
+    // thumbnail/video range request leaks an open handle + async frames (FSReqPromise
+    // pile-up under parallel workers).
+    request.signal.addEventListener("abort", () => fileStream.destroy(), { once: true });
+    const webStream = Readable.toWeb(fileStream);
+
+    return new Response(webStream as any, {
+      status: 206,
+      headers: {
+        ...mimeHeaders,
+        "Content-Type": mimeType,
+        "Content-Range": `bytes ${start}-${end}/${stats.size}`,
+        "Content-Length": chunksize.toString(),
+        "Last-Modified": lastModified,
+        ETag: etag,
+      },
+    });
+  }
+
+  // Full file stream
+  const fileStream = createReadStream(resolvedPath);
+  // Destroy the fs stream when the client disconnects (aborted thumbnails/assets
+  // would otherwise keep the file descriptor + async frames alive).
+  request.signal.addEventListener("abort", () => fileStream.destroy(), { once: true });
+  const webStream = Readable.toWeb(fileStream);
+
+  return new Response(webStream as any, {
+    status: 200,
+    headers: {
+      ...mimeHeaders,
+      "Content-Type": mimeType,
+      "Content-Length": stats.size.toString(),
+      "Last-Modified": lastModified,
+      ETag: etag,
+    },
+  });
+});

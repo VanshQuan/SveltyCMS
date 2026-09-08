@@ -1,293 +1,468 @@
 <!--
 @file src/routes/(app)/+layout.svelte
-@component Main application layout with comprehensive state management
+@component
+**Authenticated Admin Layout**: Wraps all core CMS views (Collections, Media, User Settings).
 
-## Features
-- Type-safe props and state management
-- Centralized theme initialization and management
-- Performance-optimized loading states with granular control
-- Accessibility-compliant keyboard shortcuts
-- SEO optimization with dynamic meta tags
-- Modular component architecture
-- Memory leak prevention with proper cleanup
-- Content structure synchronization
-- Restart polling for dev/production hot-reload notifications
-- CSP-compliant nonce handling for inline scripts
+This layout provides the administrative shell, including sidebars and header controls.
 
-## Architecture
-- Separation of concerns: UI state, loading state, theme state
-- Reactive data synchronization with microtask deferral
-- Event listener lifecycle management
-- Progressive enhancement strategy
+### Responsibilities:
+- Managing admin-specific UI state (Sidebar expansion, Mode switching).
+- Initializing Widgets and Theme in the authenticated context.
+- Providing navigation guards and auto-save draft functionality.
+- Responsive sidebar: inline on desktop, overlay drawer on mobile.
 
-## Props
-@prop {Snippet} children - Page content slot
-@prop {LayoutData} data - Server-provided data (user, contentStructure, nonce)
+### Next Steps & Options:
+- Expand/Collapse sidebars for more horizontal space.
+- Use Global Search (Alt+G or Mod+K) for quick navigation.
+- Switch between Content (Collections) and Media Gallery modes.
 -->
 
 <script lang="ts">
-	// Selected theme:
-	import '../../app.postcss';
+import FloatingNav from "@src/components/system/floating-nav.svelte";
+import HeaderEdit from "@src/components/header-edit.svelte";
+import LeftSidebar from "@src/components/left-sidebar.svelte";
+import PageFooter from "@src/components/page-footer.svelte";
+import RightSidebar from "@src/components/right-sidebar.svelte";
+import CommandPalette from "@src/components/command-palette.svelte";
+// Type Imports
+import type { User } from "@src/databases/auth/types";
+import { isAdmin } from "@src/databases/auth/constants";
+import type { ContentNode } from "@src/content/types";
+// Stores
+import {
+	applyRemoteContentStructure,
+	setMode,
+} from "@src/stores/collection-store.svelte.ts";
+import {
+	globalLoadingStore,
+	loadingOperations,
+} from "@src/stores/loading-store.svelte.ts";
+import { screen } from "@src/stores/screen-size-store.svelte";
+import { initializeDarkMode } from "@src/stores/theme-store.svelte.ts";
+import { locale } from "@src/stores/locale-store.svelte";
+import { ui } from "@src/stores/ui-store.svelte";
+import { widgets } from "@src/stores/widget-store.svelte.ts";
+import Portal from "@components/ui/portal.svelte";
+import BackToTop from "@components/ui/back-to-top.svelte";
+import Slot from "@components/system/slot.svelte";
+import AdminZone from "@components/system/admin-zone.svelte";
+import { setAdminZoneCapabilityChecker } from "@src/plugins/admin-zone-registry.svelte.ts";
+import PluginWorkspaceOverlay from "@components/system/plugin-workspace-overlay.svelte";
+import { setThemeContext } from "@src/components/ui/theme-context.svelte";
+// Utils
+import { adminPage, adminSlide } from "@utils/admin-transitions";
+import { getTextDirection } from "@utils/string";
+import { mergeAdminThemeWithUserPrefs } from "@utils/theme-merge";
+import {
+	applyLayoutPrefsToUiState,
+	diffLayoutPrefsFromTenant,
+	uiStateToLayoutPrefs,
+} from "@utils/layout-state-prefs";
+import { clientJsonHeaders } from "@utils/security/client-csrf";
+import { userThemePrefs } from "@src/stores/theme-store.svelte";
+import { floatingNavStore } from "@src/stores/floating-nav-store.svelte";
+	import { onMount, untrack } from "svelte";
+	import { fade } from "svelte/transition";
+	import { browser } from "$app/env";
+	import { initBounceDetector } from "@utils/bounce-detector";
+	import { initPredictivePreload } from "@utils/predictive-preload";
+	import { registerHotkey } from "@src/utils/hotkeys";
+// SvelteKit Navigation
+import { afterNavigate, beforeNavigate, invalidate, onNavigate } from "$app/navigation";
+import { page } from "$app/state";
 
-	// Icons from https://icon-sets.iconify.design/
-	import 'iconify-icon';
+import { setContentContext } from "@src/content";
 
-	// SvelteKit Navigation
-	import { afterNavigate, beforeNavigate } from '$app/navigation';
-	import { page } from '$app/state';
-	import { onDestroy, onMount } from 'svelte';
+// =============================================
+// TYPE DEFINITIONS
+// =============================================
 
-	// Type Imports
-	import type { User } from '@src/databases/auth/types';
-	import type { ContentNode } from '../../content/types';
+interface LayoutData {
+	contentStructure: ContentNode[];
+	settings: Record<string, any>;
+	user: User | null;
+	tenantId?: string | null;
+	darkMode: boolean;
+	nonce: string;
+	theme: import("@src/databases/db-interface").Theme;
+	predictedNextPath?: string | null;
+}
 
-	// Utils
-	import { isSearchVisible } from '@utils/globalSearchIndex';
-	import { getTextDirection } from '@utils/utils';
-	import { setGlobalModalStore } from '@utils/modalUtils';
-	import { setGlobalToastStore } from '@utils/toast';
+interface Props {
+	children?: import("svelte").Snippet;
+	data: LayoutData;
+}
 
-	// Stores
-	import { setContentStructure } from '@stores/collectionStore.svelte';
-	import { publicEnv } from '@stores/globalSettings.svelte';
-	import { globalLoadingStore, loadingOperations } from '@stores/loadingStore.svelte';
-	import { isDesktop, screenSize } from '@stores/screenSizeStore.svelte';
-	import { avatarSrc, systemLanguage } from '@stores/store.svelte';
-	import { uiStateManager } from '@stores/UIStore.svelte';
-	import { initializeDarkMode } from '@stores/themeStore.svelte';
+// =============================================
+// STATE & DERIVED
+// =============================================
 
-	// Components
-	import HeaderEdit from '@components/HeaderEdit.svelte';
-	import LeftSidebar from '@components/LeftSidebar.svelte';
-	import PageFooter from '@components/PageFooter.svelte';
-	import RightSidebar from '@components/RightSidebar.svelte';
-	import SearchComponent from '@components/SearchComponent.svelte';
-	import FloatingNav from '@components/system/FloatingNav.svelte';
-	import ImageEditorHeader from './imageEditor/components/layout/ImageEditorHeader.svelte';
-	import ImageEditorFooter from './imageEditor/components/layout/ImageEditorFooter.svelte';
+const { children, data }: Props = $props();
 
-	// Skeleton
-	import {
-		getModalStore,
-		getToastStore,
-		Modal,
-		setInitialClassState,
-		setModeCurrent,
-		setModeUserPrefers,
-		Toast,
-		storePopup
-	} from '@skeletonlabs/skeleton';
+// Initialize Content Context
+setContentContext(untrack(() => data.tenantId) || null);
 
-	// Floating UI for Popups
-	import { arrow, autoUpdate, computePosition, flip, offset, shift } from '@floating-ui/dom';
+// Initialize Adaptive Workspace Theme Context based on User Role
+const userRole = $derived(data.user?.role || 'editor');
 
-	// Modal Components Registry
-	import ScheduleModal from '@components/collectionDisplay/ScheduleModal.svelte';
+// Try to load admin theme config from the active DB theme, fall back to role-based defaults
+// The config shape is dynamic (JSON from DB), so we use Record<string, any>
+const dbAdminConfig = $derived(
+	(data.theme as any)?.config?.adminTheme as Record<string, any> | undefined
+);
 
-	// Configure popup positioning
-	storePopup.set({ computePosition, autoUpdate, offset, shift, flip, arrow });
+const tenantThemeDefaults = $derived(
+	mergeAdminThemeWithUserPrefs(dbAdminConfig, undefined, userRole)
+);
+const initialDensity = $derived(tenantThemeDefaults.density);
+const initialVariant = $derived(tenantThemeDefaults.variant);
 
-	// Modal component registry for Skeleton UI
-	const modalComponentRegistry: Record<string, any> = {
-		scheduleModal: ScheduleModal
+const theme = setThemeContext(untrack(() => ({
+	id: 'default',
+	name: 'Default',
+	role: userRole as any,
+	density: initialDensity,
+	variant: initialVariant as any,
+	accentMode: 'default',
+	themeName: (data.theme as any)?.name || 'default',
+	customCss: dbAdminConfig?.customCss,
+	features: {
+		stickyActionBar: dbAdminConfig?.features?.stickyActionBar ?? false,
+		collapsibleSidebar: dbAdminConfig?.features?.collapsibleSidebar ?? ui.state.leftSidebar !== 'hidden',
+		brandedLogin: dbAdminConfig?.features?.brandedLogin ?? false,
+		highContrastMode: dbAdminConfig?.features?.highContrastMode ?? false,
+		reducedMotion: dbAdminConfig?.features?.reducedMotion ?? false,
+		layoutRegions: dbAdminConfig?.features?.layoutRegions ?? { collections: 'left', mediaGalleries: 'left' },
+	},
+})));
+
+$effect(() => {
+	void data.user?.preferences?.theme;
+	userThemePrefs.release();
+});
+
+// Per-user floating nav (system defaults + PageTitle favorites) — bind early so mobile FAB + stars stay in sync
+$effect(() => {
+	floatingNavStore.bindUser(data.user ?? null);
+});
+
+// Client-side capability gate for plugin admin zones (server enforces 403 too).
+$effect(() => {
+	const u = data.user as any;
+	setAdminZoneCapabilityChecker((required: string[]) => {
+		if (!u) return false;
+		return isAdmin(u) || required.length === 0;
+	});
+});
+
+$effect(() => {
+	const serverPrefs = data.user?.preferences?.theme;
+	const merged = mergeAdminThemeWithUserPrefs(
+		dbAdminConfig,
+		userThemePrefs.getEffective(serverPrefs),
+		userRole,
+	);
+	theme.role = userRole as any;
+	theme.density = merged.density;
+	theme.variant = merged.variant as any;
+	theme.features = merged.features;
+	theme.customCss = dbAdminConfig?.customCss;
+});
+
+/* ────────────────────────────────────────────────────────────────────────
+   Theme token propagation — mirror onto <html>
+   ────────────────────────────────────────────────────────────────────────
+   The --admin-* custom properties are also written inline on the layout
+   element below (so SSR paints the correct theme with no flash). But CSS
+   custom properties only cascade to DESCENDANTS, and three things live
+   outside that element:
+
+     • Modal / Drawer / Popover / Tooltip — portalled into <body>, so they
+       are siblings of the app shell, not children of it. Before this, an
+       overlay opened from a spacious dark theme rendered with :root's cozy
+       light defaults.
+     • The page background itself, painted on <html> / <body>.
+     • Anything a plugin renders through its own portal.
+
+   Mirroring the same values onto document.documentElement makes the token
+   layer document-wide, so every route and every overlay resolves one theme.
+   The values are identical to the inline ones, so nothing conflicts.
+   ──────────────────────────────────────────────────────────────────────── */
+$effect(() => {
+	if (!browser) return;
+	const root = document.documentElement;
+	const tokens: Record<string, string> = {
+		"--admin-spacing-scale": String(theme.spacingScale),
+		"--admin-density": String(theme.densityScale),
+		"--admin-radius-base": theme.radiusBase,
+		"--admin-radius-card": theme.radiusCard,
+		"--admin-radius-input": theme.radiusInput,
+		"--admin-radius-button": theme.radiusButton,
+		"--admin-sidebar-width": theme.sidebarWidth,
+		"--admin-sidebar-compact-width": "120px",
+		"--admin-header-height": theme.headerHeight,
+		"--admin-sticky-bar-height": theme.stickyBarHeight,
 	};
+	for (const [key, value] of Object.entries(tokens)) {
+		if (value != null && value !== "undefined") root.style.setProperty(key, value);
+	}
+	root.setAttribute("data-admin-theme", theme.themeName);
+	root.setAttribute("data-density", theme.density);
+	root.setAttribute("data-reduced-motion", theme.features.reducedMotion ? "true" : "false");
 
-	// ============================================================================
-	// TYPE DEFINITIONS
-	// ============================================================================
+	return () => {
+		// Leaving the (app) group (e.g. logout → /login) must hand the document
+		// back to the :root defaults, otherwise the login screen keeps the last
+		// admin's density and radii.
+		for (const key of Object.keys(tokens)) root.style.removeProperty(key);
+		root.removeAttribute("data-admin-theme");
+		root.removeAttribute("data-density");
+		root.removeAttribute("data-reduced-motion");
+	};
+});
 
-	interface LayoutData {
-		user: User | null;
-		contentStructure: ContentNode[];
-		nonce: string;
-		publicSettings?: Record<string, any>;
-		theme?: string;
+// ── Layout state: tenant defaults, then per-user overrides ──
+let layoutStateRestored = false;
+let lastAppliedUserLayout = "";
+$effect(() => {
+	const layoutLocked = dbAdminConfig?.lockedSettings?.layoutState === true;
+	const effectivePrefs = userThemePrefs.getEffective(data.user?.preferences?.theme);
+	const userLayout = effectivePrefs?.layoutState;
+	const serialized = JSON.stringify(userLayout ?? {});
+
+	if (!layoutStateRestored && dbAdminConfig?.layoutState) {
+		applyLayoutPrefsToUiState(dbAdminConfig.layoutState, ui.state);
+		layoutStateRestored = true;
 	}
 
-	interface Props {
-		children?: import('svelte').Snippet;
-		data: LayoutData;
-	}
-
-	// ============================================================================
-	// PROPS & STATE
-	// ============================================================================
-
-	const { children, data }: Props = $props();
-
-	// Initialize global stores
-	setGlobalModalStore(getModalStore());
-	setGlobalToastStore(getToastStore());
-
-	// Component State
-	const loadError = $state<Error | null>(null);
-	let mediaQuery: MediaQueryList | undefined;
-
-	// ============================================================================
-	// DERIVED STATE
-	// ============================================================================
-
-	// SEO meta content
-	const siteName = publicEnv?.SITE_NAME || 'SveltyCMS';
-	const seoDescription = `${siteName} - a modern, powerful, and easy-to-use CMS powered by SvelteKit. Manage your content with ease & take advantage of the latest web technologies.`;
-	// Hide CMS layout footer when using Image Editor route (it has its own footer toolbar)
-	const isImageEditorRoute = $derived(page.url?.pathname?.includes('/imageEditor'));
-
-	// ============================================================================
-	// REACTIVE EFFECTS
-	// ============================================================================
-
-	// Effect: Stop initialization loader once content structure is received
-	$effect(() => {
-		if (Array.isArray(data.contentStructure)) {
-			globalLoadingStore.stopLoading(loadingOperations.initialization);
-		}
-	});
-
-	// Effect: Synchronize content structure with store
-	$effect(() => {
-		// Defer store updates to next microtask to prevent UpdatedAtError
-		const defer = (fn: () => void): void => {
-			if (typeof queueMicrotask === 'function') {
-				queueMicrotask(fn);
-			} else {
-				Promise.resolve().then(fn);
-			}
-		};
-
-		if (Array.isArray(data.contentStructure)) {
-			defer(() => setContentStructure(data.contentStructure));
-		}
-	});
-
-	// Effect: Handle system language changes
-	$effect(() => {
-		const lang = systemLanguage.value;
-		if (!lang) return;
-
-		const dir = getTextDirection(lang);
-		if (!dir) return;
-
-		document.documentElement.dir = dir;
-		document.documentElement.lang = lang;
-	});
-
-	// ============================================================================
-	// EVENT HANDLERS
-	// ============================================================================
-
-	/**
-	 * Updates theme based on OS preference changes
-	 * Only applies if user hasn't set an explicit preference
-	 */
-	function handleSystemThemeChange(event: MediaQueryListEvent): void {
-		// Only update if user hasn't set an explicit preference
-		const userHasPreference = document.cookie.includes('theme=');
-
-		if (!userHasPreference) {
-			const prefersDarkMode = event.matches;
-			setModeUserPrefers(prefersDarkMode);
-			setModeCurrent(prefersDarkMode);
-
-			// Immediately apply theme to DOM
-			if (prefersDarkMode) {
-				document.documentElement.classList.add('dark');
-			} else {
-				document.documentElement.classList.remove('dark');
+	if (userLayout && !layoutLocked && serialized !== lastAppliedUserLayout) {
+		for (const [key, val] of Object.entries(userLayout)) {
+			if ((key === "leftSidebar" || key === "rightSidebar") && !screen.isDesktop) continue;
+			if (val === "full" || val === "hidden") {
+				ui.state[key as keyof typeof ui.state] = val;
 			}
 		}
+		lastAppliedUserLayout = serialized;
 	}
+});
 
-	/**
-	 * Global keyboard shortcuts handler
-	 */
-	function handleKeyDown(event: KeyboardEvent): void {
-		// Alt+S: Toggle search
-		if (event.altKey && event.key === 's') {
-			event.preventDefault();
-			isSearchVisible.update((visible) => !visible);
-		}
-	}
+// Debounced save: admins → tenant theme; others → per-user layout prefs (diff from tenant)
+let layoutSaveTimer: ReturnType<typeof setTimeout>;
+$effect(() => {
+	void ui.state.leftSidebar;
+	void ui.state.rightSidebar;
+	void ui.state.pageheader;
+	void ui.state.pagefooter;
+	void ui.state.header;
+	void ui.state.footer;
 
-	/**
-	 * Initialize avatar from user data
-	 */
-	function initializeUserAvatar(user: User | null): void {
-		if (!user) {
-			avatarSrc.value = '/Default_User.svg';
+	clearTimeout(layoutSaveTimer);
+	layoutSaveTimer = setTimeout(async () => {
+		if (!data.user) return;
+
+		const prefs = uiStateToLayoutPrefs(ui.state);
+		const isAdminUser = isAdmin(data.user);
+
+		if (isAdminUser) {
+			try {
+				await fetch("/api/theme/admin-theme", {
+					method: "POST",
+					headers: { "Content-Type": "application/json", "X-CSRF-Token": page.data.csrfToken || "" },
+					body: JSON.stringify({ layoutState: prefs }),
+				});
+			} catch {
+				/* silent — layout state save is best-effort */
+			}
 			return;
 		}
 
-		if (user.avatar && user.avatar !== '/Default_User.svg') {
-			avatarSrc.value = user.avatar;
-		} else {
-			avatarSrc.value = '/Default_User.svg';
+		const layoutLocked = dbAdminConfig?.lockedSettings?.layoutState === true;
+		if (layoutLocked) return;
+
+		const diff = diffLayoutPrefsFromTenant(prefs, dbAdminConfig?.layoutState);
+		try {
+			await fetch("/api/user/update-user-attributes", {
+				method: "PUT",
+				headers: clientJsonHeaders(),
+				body: JSON.stringify({
+					user_id: "self",
+					newUserData: { preferences: { theme: { layoutState: diff } } },
+				}),
+			});
+			userThemePrefs.apply({ layoutState: diff as unknown as Record<string, "full" | "hidden"> });
+		} catch {
+			/* silent — layout state save is best-effort */
 		}
+	}, 2000);
+});
+
+// Component State
+let loadError = $state<Error | null>(null);
+
+// ── View Transitions (2026 browser-native page cross-fade) ──────────────
+// SvelteKit's onNavigate lets us wrap navigations in document.startViewTransition
+// so route changes cross-fade natively (compositor-driven, zero JS per frame).
+// Falls back to the CSS/Svelte adminPage transition when unsupported or when
+// prefers-reduced-motion is set. The keyed adminPage wrapper below disables its
+// own fade while a View Transition will run, so the two never double-animate.
+let viewTransitionsEnabled = $state(false);
+
+onMount(() => {
+  const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+  const update = () => {
+    viewTransitionsEnabled = "startViewTransition" in document && !media.matches;
+  };
+  update();
+  media.addEventListener("change", update);
+  return () => media.removeEventListener("change", update);
+});
+
+onNavigate((navigation) => {
+  if (!viewTransitionsEnabled) return;
+  return new Promise((resolve) => {
+    try {
+      document.startViewTransition(async () => {
+        resolve();
+        await navigation.complete;
+      });
+    } catch {
+      // Interrupted/aborted navigation — continue without the transition.
+      resolve();
+    }
+  });
+});
+
+// =============================================
+// DERIVED STATE
+// =============================================
+
+// seoDescription logic
+const siteName = $derived(data.settings?.siteName || "SveltyCMS");
+const seoDescription = $derived(`${siteName} - a modern, powerful, and easy-to-use CMS powered by SvelteKit. Manage your content with ease & take advantage of the latest web technologies.`);
+
+// =============================================
+// REACTIVE EFFECTS
+// =============================================
+
+// Sync mode from URL (helps UI store show/hide sidebars even on error pages)
+$effect(() => {
+	const isCreate = page.url.searchParams.get("create") === "true";
+	const isEdit = page.url.searchParams.get("edit") === "true";
+
+	if (isCreate) {
+		setMode("create");
+	} else if (isEdit) {
+		setMode("edit");
+	} else if (page.url.pathname.includes("/mediagallery")) {
+		setMode("media");
+	}
+});
+
+
+// Effect: Handle system language changes
+$effect(() => {
+	const lang = locale.systemLanguage;
+	if (!lang) {
+		return;
 	}
 
-	// ============================================================================
-	// LIFECYCLE HOOKS
-	// ============================================================================
+	const dir = getTextDirection(lang);
+	if (!dir) {
+		return;
+	}
 
-	onMount(() => {
-		// Start initialization loading
-		globalLoadingStore.startLoading(loadingOperations.initialization);
+	document.documentElement.dir = dir;
+	document.documentElement.lang = lang;
+});
 
-		// Initialize theme from cookie/system preference
-		initializeDarkMode();
+// 🔥 SYNC: Connect content structure to global stores for sidebar/navigation reactivity
+// (contentStructure is now plain data — the layout server resolves it before returning)
+$effect(() => {
+	// Apply layout data synchronously. A delayed dynamic import could resolve after
+	// the Collection Builder published a newer DnD draft and overwrite only the
+	// sidebar with the older layout snapshot.
+	applyRemoteContentStructure(data.contentStructure);
+});
 
-		// Set up system theme preference listener
-		mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-		mediaQuery.addEventListener('change', handleSystemThemeChange);
+// =============================================
+// LIFECYCLE HOOKS
+// =============================================
 
-		// Initialize user avatar
-		initializeUserAvatar(data.user);
+onMount(() => {
+	// Initialize predictive preloading (physics cone + behavioral smart)
+	initPredictivePreload();
+	initBounceDetector();
+	widgets.initialize();
+	initializeDarkMode(data.theme as any);
 
-		// Register global keyboard shortcuts
-		window.addEventListener('keydown', handleKeyDown);
-	});
+	// Primary Mod+K + Gin/Coffee-style Alt+G (same on Windows, Linux, macOS)
+	registerHotkey("mod+k", () => ui.toggleGlobalSearch(), "Open global search / command palette");
+	registerHotkey("alt+g", () => ui.toggleGlobalSearch(), "Open global search");
 
-	// Navigation loading handlers
-	beforeNavigate(({ from, to }) => {
-		// Only show loading for actual page changes, not hash changes
-		if (from && to && from.route.id !== to.route.id) {
-			globalLoadingStore.startLoading(loadingOperations.navigation);
-		}
-	});
+	registerHotkey(
+		"mod+s",
+		() => {
+			window.dispatchEvent(new CustomEvent("global-save-request"));
+		},
+		"Save (global)",
+	);
 
-	afterNavigate(() => {
-		// Stop navigation loading
-		globalLoadingStore.stopLoading(loadingOperations.navigation);
+	registerHotkey(
+		"escape",
+		() => ui.closeGlobalSearch(),
+		"Close Overlays/Command Palette",
+		false,
+	);
+});
 
-		// Clear stale loading operations after navigation
-		setTimeout(() => {
-			// Only clear if no other operations are running
-			if (globalLoadingStore.loadingStack.size === 1 && globalLoadingStore.isLoadingReason(loadingOperations.navigation)) {
-				globalLoadingStore.stopLoading(loadingOperations.navigation);
+// 🔥 HMR: Prefer surgical contentStore patch; fall back to soft invalidate.
+// Keeps session, consent, and form context. Avoids full layout data refetch when possible.
+if (import.meta.hot) {
+	import.meta.hot.on("svelty:content-update", async (data?: import("@src/content/content-hmr").ContentHmrPayload) => {
+		if (data?.noOp) return;
+		try {
+			const { applyContentHmrPatch } = await import("@src/content/content-hmr");
+			if (applyContentHmrPatch(data)) {
+				// Surgical upsert applied — no layout load round-trip
+				return;
 			}
-		}, 100);
+		} catch {
+			// Surgical patch optional — fall back to full content invalidate
+		}
+		invalidate("app:content");
 	});
+	// Theme file sync: refresh theme list when /themes/*.json changes
+	import.meta.hot.on("svelty:theme-update", () => {
+		invalidate("app:content");
+	});
+}
 
-	onDestroy(() => {
-		// Cleanup: remove event listeners
-		mediaQuery?.removeEventListener('change', handleSystemThemeChange);
-		window.removeEventListener('keydown', handleKeyDown);
-	});
+beforeNavigate(({ from, to }) => {
+	if (from && to && from.route.id !== to.route.id) {
+		globalLoadingStore.startLoading(loadingOperations.navigation);
+	}
+});
+
+afterNavigate(() => {
+	// Mobile sidebar should start hidden by default (user opens via hamburger)
+	if (screen.isMobile) ui.state.leftSidebar = 'hidden';
+	globalLoadingStore.stopLoading(loadingOperations.navigation);
+	setTimeout(() => {
+		if (
+			globalLoadingStore.loadingStack.size === 1 &&
+			globalLoadingStore.isLoadingReason(loadingOperations.navigation)
+		) {
+			globalLoadingStore.stopLoading(loadingOperations.navigation);
+		}
+	}, 100);
+});
 </script>
 
-<!-- ============================================================================ -->
-<!-- HEAD: SEO & THEME INITIALIZATION -->
-<!-- ============================================================================ -->
-
-<svelte:head>
-	<!-- Dark Mode Initialization (CSP-compliant with nonce) -->
-	<!-- eslint-disable-next-line svelte/no-at-html-tags -->
-	{@html '<script nonce="' + (data?.nonce || '') + '">(' + setInitialClassState.toString() + ')();</script>'}
-
-	<!-- Basic SEO -->
-	<meta name="description" content={seoDescription} />
-
-	<!-- Open Graph -->
+	<svelte:head>
+		{#if data.predictedNextPath}
+			<link rel="prefetch" href={data.predictedNextPath} />
+		{/if}
+		<meta name="description" content={seoDescription} />
 	<meta property="og:title" content={siteName} />
 	<meta property="og:description" content={seoDescription} />
 	<meta property="og:type" content="website" />
@@ -295,105 +470,114 @@
 	<meta property="og:image:width" content="1200" />
 	<meta property="og:image:height" content="630" />
 	<meta property="og:site_name" content={page.url.origin} />
-
-	<!-- Twitter Card -->
 	<meta name="twitter:card" content="summary_large_image" />
 	<meta name="twitter:title" content={siteName} />
 	<meta name="twitter:description" content={seoDescription} />
 	<meta name="twitter:image" content="/SveltyCMS.png" />
 	<meta property="twitter:domain" content={page.url.origin} />
 	<meta property="twitter:url" content={page.url.href} />
+	{#if theme.customCss}
+		<style>
+			{theme.customCss}
+		</style>
+	{/if}
 </svelte:head>
 
-<!-- ============================================================================ -->
-<!-- MAIN LAYOUT -->
-<!-- ============================================================================ -->
-
 {#if loadError}
-	<!-- Error State -->
-	<div class="flex h-screen w-screen items-center justify-center bg-error-50 dark:bg-error-900">
+	<div class="flex h-screen w-screen items-center justify-center bg-error-500/10 dark:bg-error-900">
 		<div class="text-center">
-			<h1 class="text-2xl font-bold text-error-600 dark:text-error-300">Application Error</h1>
-			<p class="mt-2 text-error-500 dark:text-error-400">{loadError.message}</p>
+			<h1 class="text-2xl font-bold text-error-600 dark:text-error-400">Application Error</h1>
+			<p class="mt-2 text-error-500 dark:text-error-500">{loadError.message}</p>
 		</div>
 	</div>
 {:else}
-	<!-- Application Container -->
-	<div class="relative h-lvh w-full">
-		<!-- Overlays: Mobile Nav, Toasts, Modals, Search -->
-		{#if screenSize.value === 'XS' || screenSize.value === 'SM'}
-			<FloatingNav />
+	<div
+		class="relative h-lvh w-full"
+		data-admin-theme={theme.themeName}
+		data-density={theme.density}
+		data-reduced-motion={theme.features.reducedMotion ? 'true' : 'false'}
+		style="
+			--admin-spacing-scale: {theme.spacingScale};
+			--admin-density: {theme.densityScale};
+			--admin-radius-base: {theme.radiusBase};
+			--admin-radius-card: {theme.radiusCard};
+			--admin-radius-input: {theme.radiusInput};
+			--admin-radius-button: {theme.radiusButton};
+			--admin-sidebar-width: {theme.sidebarWidth};
+			--admin-sidebar-compact-width: 120px;
+			--admin-header-height: {theme.headerHeight};
+			--admin-sticky-bar-height: {theme.stickyBarHeight};
+		"
+	>
+		{#if ui.isCommandBarVisible || ui.isSearchVisible}
+			<CommandPalette />
 		{/if}
 
-		<Toast />
-		<Modal components={modalComponentRegistry} />
-
-		{#if $isSearchVisible}
-			<SearchComponent />
-		{/if}
-
-		<!-- Main Layout Structure -->
-		<div class="flex h-lvh flex-col overflow-hidden">
-			<!-- Header (Optional) -->
-			{#if uiStateManager.uiState.value.header !== 'hidden'}
-				<header class="sticky top-0 z-10 bg-tertiary-500">
-					<!-- Header content goes here -->
+		<div class="relative z-0">
+			<div class="flex h-lvh flex-col overflow-hidden">
+			{#if ui.state.header !== 'hidden'}
+				<header class="sticky top-0 z-10" style="height: var(--admin-header-height, 32px); min-height: 4px;">
+					<Slot name="global-toolbar" />
+					<AdminZone zone="header" inline={true} />
+					<AdminZone zone="toolbar" inline={true} />
 				</header>
 			{/if}
 
-			<!-- Body: Sidebars + Main Content -->
 			<div class="flex flex-1 overflow-hidden">
-				<!-- Left Sidebar -->
-				{#if uiStateManager.uiState.value.leftSidebar !== 'hidden'}
+				<!-- Desktop / tablet: inline sidebar (inside flex flow) -->
+				{#if !screen.isMobile && ui.state.leftSidebar !== 'hidden'}
 					<aside
-						class="max-h-dvh {uiStateManager.uiState.value.leftSidebar === 'full'
-							? 'w-[220px]'
-							: 'w-fit'} relative border-r bg-white !px-2 text-center dark:border-surface-500 dark:bg-gradient-to-r dark:from-surface-700 dark:to-surface-900"
+						class="max-h-dvh border-e bg-surface-500/10 px-2! text-center transition-[width] duration-300 ease-in-out dark:border-surface-500/40 dark:bg-surface-900 overflow-visible"
+						style="width: {ui.state.leftSidebar === 'full' ? 'var(--admin-sidebar-width, 240px)' : 'var(--admin-sidebar-compact-width, 120px)'}"
 						aria-label="Left sidebar navigation"
 					>
 						<LeftSidebar />
 					</aside>
 				{/if}
 
-				<!-- Main Content Area -->
 				<main class="relative z-0 flex w-full min-w-0 flex-1 flex-col">
-					<!-- Page Header -->
-					{#if uiStateManager.uiState.value.pageheader !== 'hidden'}
-						<header class="sticky top-0 z-20 w-full">
-							{#if isImageEditorRoute}
-								<ImageEditorHeader />
-							{:else}
-								<HeaderEdit />
-							{/if}
-						</header>
+					{#if ui.state.pageheader !== 'hidden'}
+						<header class="sticky top-0 z-20 w-full"><HeaderEdit /></header>
 					{/if}
 
-					<!-- Router Slot -->
+				<!-- Standardized page-entry motion for every admin route. Keyed on
+				     pathname so only real navigations replay the transition (query
+				     params like ?edit / ?create stay put). adminPage respects
+				     prefers-reduced-motion and the theme's reducedMotion flag. -->
+				{#key page.url.pathname}
 					<div
-						class="relative flex-1 overflow-visible {uiStateManager.uiState.value.leftSidebar === 'full' ? 'mx-2' : 'mx-1'} {isDesktop.value
-							? 'mb-2'
-							: 'mb-16'}"
+						in:adminPage={{ duration: viewTransitionsEnabled ? 0 : 240, rise: 8 }}
+						class="relative flex w-full min-w-0 flex-1 flex-col"
 					>
-						<!-- Page Content Slot -->
 						{@render children?.()}
 					</div>
+				{/key}
 
-					<!-- Page Footer / Mobile Nav -->
-					{#if uiStateManager.uiState.value.pagefooter !== 'hidden'}
-						<footer class="mt-auto w-full bg-surface-50 bg-gradient-to-b px-1 text-center dark:from-surface-700 dark:to-surface-900">
-							{#if isImageEditorRoute}
-								<ImageEditorFooter />
-							{:else}
-								<PageFooter />
-							{/if}
+					<!-- Sticky action bar (only rendered when content exists) -->
+					{#if theme.features.stickyActionBar && ui.stickyActionContent}
+						<div class="sticky bottom-0 z-20 w-full border-t border-surface-500/30 dark:border-surface-500/40 bg-white/95 dark:bg-surface-900/95 backdrop-blur-md"
+							style="min-height: var(--admin-sticky-bar-height, 56px);"
+							role="toolbar"
+							aria-label="Page actions"
+							aria-live="polite"
+						>
+							<div class="flex items-center justify-end gap-2 px-4 py-2">
+								{@render ui.stickyActionContent()}
+							</div>
+						</div>
+					{/if}
+
+					{#if ui.state.pagefooter !== 'hidden'}
+						<footer class="mt-auto w-full bg-surface-500/10 bg-linear-to-b px-1 text-center dark:from-surface-700 dark:to-surface-900">
+							<PageFooter />
 						</footer>
 					{/if}
 				</main>
 
-				<!-- Right Sidebar -->
-				{#if uiStateManager.uiState.value.rightSidebar !== 'hidden'}
+				<!-- Desktop: inline right sidebar -->
+				{#if !screen.isMobile && ui.state.rightSidebar !== 'hidden'}
 					<aside
-						class="max-h-dvh w-[220px] border-l bg-white bg-gradient-to-r dark:border-surface-500 dark:from-surface-700 dark:to-surface-900"
+						class="max-h-dvh w-60 border-s bg-white bg-linear-to-r dark:border-surface-500 dark:from-surface-700 dark:to-surface-900"
 						aria-label="Right sidebar"
 					>
 						<RightSidebar />
@@ -401,12 +585,70 @@
 				{/if}
 			</div>
 
-			<!-- Footer (Optional) -->
-			{#if uiStateManager.uiState.value.footer !== 'hidden'}
-				<footer class="bg-blue-500">
-					<!-- Footer content goes here -->
+			<!-- Mobile: overlay sidebar drawer (outside flex flow via Portal) -->
+			{#if screen.isMobile && ui.state.leftSidebar !== 'hidden'}
+				<Portal>
+					<!-- Backdrop -->
+					<button
+						type="button"
+						class="fixed inset-0 z-40 bg-surface-900/20 backdrop-blur-xs dark:bg-black/50"
+						aria-label="Close left sidebar"
+						transition:fade={{ duration: 150 }}
+						onclick={() => ui.toggle('leftSidebar', 'hidden')}
+					></button>
+					<!-- Drawer -->
+					<div
+						class="fixed inset-s-0 top-0 z-50 flex h-dvh max-h-dvh flex-col overflow-visible border-e border-surface-500/30 bg-surface-500/10 px-2! text-center shadow-lg transition-[width] duration-300 ease-in-out dark:border-surface-500/40 dark:bg-surface-900"
+						style="width: {ui.state.leftSidebar === 'full' ? 'min(100vw, var(--admin-sidebar-width, 240px))' : 'var(--admin-sidebar-compact-width, 120px)'}"
+						role="dialog"
+						aria-modal="true"
+						aria-label="Left sidebar navigation"
+						transition:adminSlide={{ distance: ui.state.leftSidebar === 'full' ? -240 : -120 }}
+					>
+						<LeftSidebar />
+					</div>
+				</Portal>
+			{/if}
+
+			<!-- Mobile: overlay right sidebar drawer (slides in from right) -->
+			{#if screen.isMobile && ui.state.rightSidebar !== 'hidden'}
+				<Portal>
+					<!-- Backdrop -->
+					<button
+						type="button"
+						class="fixed inset-0 z-40 bg-surface-900/20 backdrop-blur-xs dark:bg-black/50"
+						aria-label="Close right sidebar"
+						transition:fade={{ duration: 150 }}
+						onclick={() => ui.toggle('rightSidebar', 'hidden')}
+					></button>
+					<!-- Drawer -->
+					<div
+						class="fixed inset-e-0 top-0 z-50 flex h-dvh max-h-dvh w-[min(100vw,var(--admin-sidebar-width,240px))] flex-col overflow-visible border-s border-surface-500/30 bg-surface-500/10 px-2! shadow-lg dark:border-surface-500/40 dark:bg-surface-900"
+						role="dialog"
+						aria-modal="true"
+						aria-label="Right sidebar"
+						transition:adminSlide={{ distance: 240 }}
+					>
+						<RightSidebar />
+					</div>
+				</Portal>
+			{/if}
+
+			{#if ui.state.footer !== 'hidden'}
+				<footer style="min-height: var(--admin-header-height, 24px);">
+					<Slot name="global-footer" />
+					<AdminZone zone="footer" inline={true} />
 				</footer>
 			{/if}
 		</div>
+		</div>
+
+		{#if screen.isMobile}
+			<Portal>
+				<FloatingNav />
+			</Portal>
+		{/if}
+		<BackToTop />
+		<PluginWorkspaceOverlay />
 	</div>
 {/if}

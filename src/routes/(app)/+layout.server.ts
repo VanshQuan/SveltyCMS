@@ -3,159 +3,282 @@
  * @description Enterprise-grade server-side logic for the main application layout.
  *
  * ### Features
- * - Type-safe data fetching with proper error boundaries
- * - Performance-optimized with concurrent data loading
- * - Cache invalidation support via SvelteKit's depends()
- * - Structured error handling with environment-aware details
- * - Modular user refresh logic for reusability
- * - Full TypeScript coverage with no 'any' types
- * - Serialization-safe return types
- * - Conditional data streaming for non-critical resources
+ * - Content Loading
+ * - User Management
+ * - Theme Management
+ * - Content Versioning
  *
- * ### Architecture Notes
- * - Uses Promise.all() for parallel data fetching
- * - Implements graceful degradation on user refresh failures
- * - Leverages SvelteKit's streaming for progressive enhancement
- * - Follows SOLID principles with separated concerns
+ * ### Security
+ * - Content Loading is cached
+ * - User Management is cached
+ * - Theme Management is cached
+ * - Content Versioning is cached
  */
 
-import { error } from '@sveltejs/kit';
-import { contentManager } from '@src/content/ContentManager';
-import { DEFAULT_THEME } from '@src/databases/themeManager';
-import { loadSettingsCache } from '@src/services/settingsService';
-import { auth } from '@src/databases/db';
+import { contentSystem, contentStore } from "@src/content/index.server";
+import { auth } from "@src/databases/db";
+import type { DatabaseId } from "@src/databases/db-interface";
+import { DEFAULT_THEME } from "@src/databases/theme-manager";
+import { publicEnv } from "@src/stores/global-settings.svelte";
+import { logger } from "@utils/logger";
+import { getPrivateSetting } from "@src/services/core/settings-service";
+import { getCollectionOrder } from "@utils/collection-order.server";
+import {
+  predictNextPath,
+  predictNextPathAdaptive,
+  recordCollectionAccess,
+  recordNavigation,
+  reinforceTransition,
+  applyExtinction,
+} from "@src/services/intelligence/behavioral-learner";
+import { cacheService } from "@src/databases/cache/cache-service";
+import { CacheCategory } from "@src/databases/cache/types";
+import {
+  LAYOUT_CACHE_TTL_S,
+  getFreshLayoutUser,
+  getLayoutPluginStates,
+  layoutUserCountKey,
+} from "@utils/server/layout-caches.server";
+import type { LayoutServerLoad } from "./$types";
 
-import type { LayoutServerLoad } from './$types';
-import type { User } from '@src/databases/auth/types';
-
-// System Logger (ensure server-safe implementation)
-import { logger } from '@utils/logger.server';
-
-// Error type for structured error handling
 interface LayoutError {
-	message: string;
-	details?: string;
-	code?: string;
+  code?: string;
+  details?: string;
+  message: string;
 }
 
-/**
- * Refreshes user data from database to ensure avatar and profile data are current
- *
- * @param sessionUser - User object from session/locals
- * @returns Fresh user data from database or fallback to session user
- *
- * ### Error Handling
- * - Logs warnings on fetch failures but doesn't throw
- * - Gracefully falls back to session data
- * - Returns null if no user provided
- */
-async function refreshUser(sessionUser: User | null): Promise<User | null> {
-	if (!sessionUser) return null;
-
-	try {
-		const dbUser = await auth!.getUserById(sessionUser._id.toString());
-
-		if (dbUser) {
-			logger.debug('Fresh user data loaded in layout', {
-				userId: dbUser._id,
-				hasAvatar: !!dbUser.avatar,
-				avatar: dbUser.avatar
-			});
-			return dbUser;
-		}
-
-		// User not found in DB, fall back to session
-		logger.warn('User not found in database, using session data', {
-			userId: sessionUser._id
-		});
-		return sessionUser;
-	} catch (err) {
-		logger.warn('Failed to fetch fresh user data in layout, using session data', {
-			error: err instanceof Error ? err.message : String(err),
-			userId: sessionUser._id
-		});
-		return sessionUser;
-	}
-}
-
-/**
- * Creates a structured error response
- *
- * @param err - Error object
- * @param fallbackMessage - User-friendly fallback message
- * @returns Structured error object
- */
 function createLayoutError(err: unknown, fallbackMessage: string): LayoutError {
-	const isDevelopment = process.env.NODE_ENV === 'development';
+  const isDevelopment = process.env.NODE_ENV === "development";
 
-	return {
-		message: fallbackMessage,
-		details: isDevelopment && err instanceof Error ? err.message : undefined,
-		code: 'LAYOUT_LOAD_ERROR'
-	};
+  return {
+    message: fallbackMessage,
+    details: isDevelopment && err instanceof Error ? err.message : undefined,
+    code: "LAYOUT_LOAD_ERROR",
+  };
 }
 
 /**
- * Main server load function for application layout
- *
- * ### Performance Optimizations
- * - Concurrent loading of content structure and user data
- * - Settings loaded from server-side cache
- * - Cache invalidation via depends('app:content')
- *
- * ### Data Flow
- * 1. Extract theme, user, nonce from locals
- * 2. Register cache dependency
- * 3. Load settings from cache (synchronous)
- * 4. Initialize content manager
- * 5. Fetch content structure and user data in parallel
- * 6. Return serializable data to client
- *
- * ### Error Strategy
- * - Throws HTTP 500 with structured error on critical failures
- * - Includes dev-only error details
- * - Logs all errors for monitoring
+ * Recursively strip values SvelteKit cannot serialize from load data.
+ * Widget factories leak `validationSchema` (and other function-valued
+ * properties) into the content structure; functions can never reach the
+ * client over JSON anyway, so dropping them here is behavior-neutral.
  */
-export const load: LayoutServerLoad = async ({ locals, depends }) => {
-	const { theme, user: sessionUser, cspNonce } = locals;
+function stripNonSerializable(value: unknown): unknown {
+  if (typeof value === "function") return undefined;
+  if (Array.isArray(value)) {
+    const cleaned = value.map(stripNonSerializable);
+    return cleaned.filter((item) => item !== undefined);
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      const cleaned = stripNonSerializable(item);
+      if (cleaned !== undefined) out[key] = cleaned;
+    }
+    return out;
+  }
+  return value;
+}
 
-	// Register cache dependency for manual invalidation
-	// Call invalidate('app:content') to refresh this data
-	depends('app:content');
+export const load: LayoutServerLoad = async ({ locals, depends, url, request }) => {
+  const { theme, user: sessionUser, cspNonce, tenantId } = locals;
 
-	// Load settings from server-side cache (fast, synchronous)
-	const { public: publicSettings } = await loadSettingsCache();
+  depends("app:content");
+  depends("app:user-prefs");
 
-	try {
-		// Initialize content manager (idempotent operation)
-		await contentManager.initialize();
+  // Store is already initialized by root layout - just use it
 
-		// Fetch critical data concurrently for optimal performance
-		const [contentStructure, freshUser] = await Promise.all([contentManager.getNavigationStructure(), refreshUser(sessionUser)]);
+  try {
+    // 🧠 Behavioral Learning: record what's being accessed (< 0.001ms, non-blocking)
+    const tid = tenantId || "global";
+    const currentPath = url.pathname;
 
-		// Return type-safe, serializable data
-		return {
-			theme: theme || DEFAULT_THEME,
-			contentStructure, // Navigation tree structure
-			user: freshUser, // Fresh user data with avatar
-			publicSettings, // Public configuration from cache
-			cspNonce, // CSP nonce for inline scripts
-			// Streaming slot for non-critical data
-			streamed: {
-				// Add progressive enhancement data here
-				// Example: virtualFolders: fetchVirtualFolders()
-			}
-		};
-	} catch (err) {
-		// Log full error for monitoring/debugging
-		logger.error('Failed to load layout data', {
-			error: err instanceof Error ? err.message : String(err),
-			stack: err instanceof Error ? err.stack : undefined,
-			user: sessionUser?._id
-		});
+    // Extract collection ID from path: /en/posts/entry-id → posts
+    const pathParts = currentPath.split("/").filter(Boolean);
+    // pathParts: ["en", "posts", "entry-id"] or ["dashboard"] or ["config"]
+    const collectionId = pathParts.length >= 2 ? pathParts[1] : pathParts[0] || "root";
+    if (collectionId && !collectionId.startsWith("config") && collectionId !== "dashboard") {
+      recordCollectionAccess(tid, collectionId);
+    }
 
-		// Throw structured error to client
-		const layoutError = createLayoutError(err, 'Failed to load application data');
-		throw error(500, layoutError);
-	}
+    // Record navigation transition for prefetch prediction
+    const referer = request.headers.get("referer");
+    if (referer) {
+      try {
+        const fromPath = new URL(referer).pathname;
+        if (fromPath !== currentPath) {
+          recordNavigation(tid, fromPath, currentPath);
+          // 🧠 Skinnerian Reinforcement: reward correct predictions
+          const wasPredicted = predictNextPath(tid, fromPath);
+          if (wasPredicted === currentPath) {
+            reinforceTransition(tid, fromPath, currentPath);
+          }
+
+          // 🧠 Extinction: weaken alternatives not chosen
+          applyExtinction(tid, fromPath, currentPath);
+        }
+      } catch {
+        /* invalid referer URL — skip */
+      }
+    }
+
+    // Predictive prefetch: guess the most likely next page (< 0.05ms, non-blocking, confidence-gated)
+    const predictedNextPath = predictNextPathAdaptive(tenantId || "global", url.pathname);
+
+    await contentSystem.initialize(tenantId);
+    let safeContentStructure: unknown[] = [];
+    // 🚀 Version-keyed cache for the serialized sidebar payload: contentStore is
+    // epoch-consistent (every content mutation bumps contentVersion), so the
+    // structure only changes when the version does. This replaces the previous
+    // per-request full tree rebuild + deep walk (stripNonSerializable) with one
+    // build per (tenant, version) — same invariants as `navigation:tree:*`.
+    const contentTid = tenantId || "global";
+    const structureCacheKey = `layout:contentStructure:${contentTid}:${contentStore.contentVersion}`;
+    const cachedStructure =
+      cacheService.getSync<unknown[]>(structureCacheKey, tenantId) ??
+      (await cacheService.get<unknown[]>(structureCacheKey, tenantId).catch(() => null));
+    if (cachedStructure) {
+      safeContentStructure = cachedStructure;
+    } else {
+      try {
+        // Persisted structure remains the source of truth for order/hierarchy.
+        // The in-memory snapshot can lag a just-completed collection-builder save.
+        const persisted = await contentSystem.getContentStructureFromDatabase("flat", tenantId);
+        const nodes =
+          Array.isArray(persisted) && persisted.length > 0
+            ? persisted
+            : await contentSystem.getContentStructure(tenantId);
+        const stringIdNodes = ((nodes ?? []) as Array<Record<string, unknown>>).map((node) => ({
+          ...node,
+          _id:
+            (node._id as { toString?: () => string } | null | undefined)?.toString?.() ??
+            String(node._id),
+          ...(node.parentId ? { parentId: String(node.parentId) } : {}),
+        }));
+        // Deep-clean before returning: widget factories leak function values
+        // (validationSchema) into the structure, and SvelteKit 3 rejects any
+        // function in a load return (HTTP 500 "Cannot stringify a function").
+        safeContentStructure = stripNonSerializable(stringIdNodes) as unknown[];
+        void cacheService
+          .set(structureCacheKey, safeContentStructure, 300, tenantId, CacheCategory.CONTENT, [
+            "navigation",
+            "layout:contentStructure",
+            `layout:contentStructure:${contentTid}`,
+          ])
+          .catch(() => {});
+      } catch {
+        /* non-fatal — sidebar renders empty */
+      }
+    }
+
+    // Parallelize critical layout queries with short-lived L1 cache
+    const userCountKey = layoutUserCountKey(tenantId || "global");
+    const aiSettingKey = `layout:aiEnabled`;
+
+    const [freshUser, totalUsers, aiEnabled, pluginStates] = await Promise.all([
+      getFreshLayoutUser(sessionUser, tenantId),
+      (async () => {
+        const cached = cacheService.getSync<number>(userCountKey, tenantId);
+        if (cached !== null) return cached;
+        const key = tenantId ? String(tenantId) : "global";
+        const authzCached = cacheService.getSync<{ count: number; timestamp: number }>(
+          `userCount:${key}`,
+          tenantId,
+        );
+        if (authzCached && typeof authzCached.count === "number") {
+          void cacheService.set(userCountKey, authzCached.count, LAYOUT_CACHE_TTL_S, tenantId);
+          return authzCached.count;
+        }
+        try {
+          const count = (await auth?.getUserCount?.({}, { tenantId: tenantId as DatabaseId })) ?? 1;
+          void cacheService.set(userCountKey, count, LAYOUT_CACHE_TTL_S, tenantId);
+          return count;
+        } catch {
+          return 1;
+        }
+      })(),
+      (async () => {
+        const cached = cacheService.getSync<boolean>(aiSettingKey);
+        if (cached !== null) return cached;
+        try {
+          const aiModelChat = await getPrivateSetting("AI_MODEL_CHAT");
+          const enabled = !!(publicEnv.USE_AI_TAGGING || (aiModelChat && aiModelChat !== ""));
+          void cacheService.set(aiSettingKey, enabled, LAYOUT_CACHE_TTL_S);
+          return enabled;
+        } catch {
+          return !!publicEnv.USE_AI_TAGGING;
+        }
+      })(),
+      getLayoutPluginStates(tid),
+    ]);
+
+    const safeTheme = theme ?? DEFAULT_THEME;
+
+    // Ensure user payload has string _id
+    const safeUser = freshUser
+      ? {
+          ...freshUser,
+          _id: freshUser._id ? String(freshUser._id) : "",
+        }
+      : null;
+
+    return {
+      theme: safeTheme,
+      tenantId,
+      isAdmin: !!locals.isAdmin,
+      contentStructure: safeContentStructure,
+
+      user: safeUser,
+      totalUsers,
+      aiEnabled,
+      publicSettings: publicEnv, // Use the reactive store
+      collectionOrder: await getCollectionOrder(tenantId).catch((orderErr: unknown) => {
+        logger.warn(
+          `collectionOrder load failed (non-fatal): ${orderErr instanceof Error ? orderErr.message : String(orderErr)}`,
+        );
+        return [] as string[];
+      }),
+      cspNonce,
+      predictedNextPath,
+      streamed: {}, // SvelteKit streaming marker
+      pluginStates,
+    };
+  } catch (err: any) {
+    // NEVER hard-500 the entire admin shell — media/dashboard/config pages all depend on this layout.
+    logger.error("Failed to load layout data — returning minimal shell", {
+      error: err?.message,
+      stack: err?.stack,
+      user: sessionUser?._id,
+    });
+
+    let fallbackUser: any = null;
+    try {
+      fallbackUser = sessionUser ? structuredClone(sessionUser) : null;
+    } catch {
+      if (sessionUser) {
+        fallbackUser = {
+          _id: String((sessionUser as any)._id ?? ""),
+          email: (sessionUser as any).email,
+          role: (sessionUser as any).role,
+        };
+      }
+    }
+
+    return {
+      theme: DEFAULT_THEME,
+      tenantId,
+      isAdmin: !!locals.isAdmin,
+      contentStructure: [],
+      user: fallbackUser,
+      totalUsers: 1,
+      aiEnabled: false,
+      publicSettings: publicEnv,
+      collectionOrder: [] as string[],
+      cspNonce,
+      predictedNextPath: null,
+      streamed: {},
+      pluginStates: {} as Record<string, boolean>,
+      layoutError: createLayoutError(err, "Failed to load application data"),
+    };
+  }
 };

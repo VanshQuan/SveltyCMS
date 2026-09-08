@@ -1,260 +1,186 @@
 ---
-path: 'docs/contributing/style-guide-gui.mdx'
-title: 'GUI Styling & UX Guide'
-description: 'The official style guide for SveltyCMS components, ensuring a consistent and high-quality user experience.'
+path: "docs/contributing/style-guide-gui.mdx"
+title: "GUI Styling & UX Guide"
+description: "The official style guide for SveltyCMS native components, ensuring a consistent, accessible, and high-quality user experience."
 order: 3
-icon: 'mdi:palette'
-author: 'admin'
-created: '2025-11-04'
-updated: '2025-11-04'
+icon: "mdi:palette"
+author: "SveltyCMS Team"
+created: "2025-11-04"
+updated: "2026-08-23"
 tags:
-  - 'style-guide'
-  - 'gui'
-  - 'ux'
-  - 'tailwind'
-  - 'contributing'
+  - "gui"
+  - "styling"
+  - "ux"
+  - "accessibility"
 ---
 
 # GUI Styling & UX Guide
 
-This document is the single source of truth for all GUI, styling, and UX patterns within SveltyCMS. Adhering to this guide is mandatory for all contributions to ensure a cohesive, accessible, and performant user interface.
+SveltyCMS admin UI is built on **native Svelte 5 components**, Tailwind CSS v4, and the **admin theme token system**. Prefer composition of shell + primitives over one-off page chrome.
 
-🏗️ Foundation: Skeleton + Tailwind
-----------------------------------
+## Mandatory shells
 
-Our UI is built on a robust and flexible foundation:
-
-*   **Skeleton.dev**: We use Skeleton for core UI components (Buttons, Inputs, Modals, Toasts, Tabs, etc.) and its theming system.
-*   **Tailwind CSS**: We use Tailwind for all utility-first styling and layout.
-*   **Custom Theme**: We use a custom `sveltycms` theme (defined in `sveltycms.css`) that provides all our semantic color palettes, including `primary`, `secondary`, `tertiary`, `surface`, `error`, `warning`, `success`, and pre-defined `gradient-` classes.
-
-All development must use these provided semantic definitions. This allows for global theme changes and user-customization without refactoring component code.
-
-🎨 Core Principles
------------------
-
-Our GUI is built on a few unbreakable principles.
-
-### Use Semantic Theme Colors: This is the most important rule.
-
-*   **ALWAYS** use the semantic theme classes provided by Skeleton and our custom theme (e.g., `bg-primary-500`, `text-error-500`, `border-surface-300`).
-*   **NEVER** use hardcoded colors (e.g., `text-red-500`, `bg-blue-500`, `text-[#eee]`). If you find yourself needing a color that isn't in the theme, it's a sign we need to update the theme, not bypass it.
-
-### 100% Utility-Driven: All styling must be achieved using Tailwind utility classes or pre-defined Skeleton components/variants. No custom `<style>` blocks are permitted in Svelte components. Component-level styles (like gradients) are defined in the central theme file.
-
-### Svelte 5 Runes: All state management must use Svelte 5 Runes (`$state`, `$derived`, `$effect`). This ensures optimal performance and readability.
-
-### Dark Mode First: All components must include `dark:` variants for all styles. The UI must be perfectly usable in both light and dark modes.
-
-### Accessibility (A11y): Proper semantic HTML (`<fieldset>`, `<legend>`), ARIA attributes (`aria-invalid`, `aria-describedby`), and keyboard navigation support are required.
-
-### Performance: Avoid expensive calculations. Use `$derived` for computed values and memoization.
-
-### Consistency: Re-use the patterns defined in this guide. Do not invent new styling patterns for components that already have a defined style.
-
-Layout & Spacing
-----------------
-
-### Widget Containers
-
-All form input widgets (Text, Relation, RichText, etc.) follow a standard layout.
-
-*   **Wrapper**: `relative mb-4 w-full`
-*   **Error Spacing**: Add `pb-6` to the wrapper if (and only if) you are using the Pattern 1 (Absolute) Error Message. This padding provides the necessary space for the error text to appear without shifting layout.
+| Component            | Use for                                                                      |
+| :------------------- | :--------------------------------------------------------------------------- |
+| **`AdminPageShell`** | Every `(app)` page root — title, back link, spacing, `admin-theme-container` |
+| **`AdminCard`**      | Content blocks — semantic card surface, density radii, theme shadows         |
+| **`PageTitle`**      | Only via `AdminPageShell` (do not invent inline `<h1>` headers)              |
 
 ```svelte
-<div class="relative mb-4 w-full pb-6">
-  {#if error}
-    <p class="absolute bottom-[-1rem] ...">
-      {error}
-    </p>
-  {/if}
-</div>
+<AdminPageShell title="Example" icon="mdi:cog" description="…">
+  <AdminCard class="p-4">…</AdminCard>
+</AdminPageShell>
 ```
 
-⌨️ Form Inputs
--------------
+## Native primitives
 
-We use two main styles for form inputs.
+Always prefer:
 
-### 1. Standard Inputs (Text, Relation)
+- `<Button>`, `<Badge>`, `<Input>`, `<Select>`, `<Textarea>`, `<Toggle>`, `<Checkbox>`, `<Modal>`
 
-For simple inputs, we use a `btn-group` structure, often from Skeleton UI. This wraps the input and any related buttons (prefix, suffix, select) into a single, cohesive block.
+Never mix component CSS classes (`class="badge"` on a `<Button>`, `class="btn"` on a `<Badge>`).
 
-*   **Container**: `variant-filled-surface btn-group flex w-full items-center rounded`
-*   **Input Element**: `class="input w-full flex-1 rounded-none ..."`
+## Semantic admin surfaces
 
-The `rounded-none` is critical to make it blend seamlessly with the group's rounded container.
+Use **role tokens** from `src/utilities.css` instead of paired light/dark surface classes for admin chrome:
+
+| Token                                              | Role                                      |
+| :------------------------------------------------- | :---------------------------------------- |
+| `--admin-bg-page`                                  | Page canvas                               |
+| `--admin-bg-card`                                  | Elevated card (dark mode sits above page) |
+| `--admin-bg-sidebar`                               | Sidebar                                   |
+| `--admin-border-default` / `--admin-border-subtle` | Borders                                   |
+| `--admin-text-body` / `--admin-text-muted`         | Text                                      |
+
+Shadows and border **width** follow **card variant** (`flat` | `bordered` | `elevated`) via `AdminTheme.cardShadow` / `cardBorder`. Do **not** hardcode `hover:shadow-lg` on every card — that breaks **flat** themes.
+
+Theme/shorthand palette import maps `surface` into full shade scales and rebinds `--admin-bg-*` in generated `customCss` (`theme-preset-mapper.ts`). The generated CSS is scoped to `:root, .admin-theme-container, [data-admin-theme]` so a theme change repaints **every** element — utilities, `--admin-*` roles, scrollbars, and portalled overlays — with no per-component JS.
+
+## Motion & Transitions
+
+All shared motion lives in `src/utils/admin-transitions.ts` and is **reduced-motion safe** (drops to 0ms when `prefers-reduced-motion: reduce` or the theme's `reducedMotion` feature is enabled).
+
+| Transition     | When to use                                                                                                      |
+| :------------- | :--------------------------------------------------------------------------------------------------------------- |
+| `adminPage`    | Page entry (240ms fade + subtle rise) — applied **once** by `(app)/+layout.svelte`, keyed on `page.url.pathname` |
+| `adminFade`    | Modal / section reveals (200ms fade)                                                                             |
+| `adminStagger` | Card grids / list rows — pass `index` for a cascade                                                              |
+| `adminSlide`   | Drawers / sidebars — signed `distance` for direction                                                             |
+
+**View Transitions:** on browsers that support `document.startViewTransition`, `(app)/+layout.svelte` wraps SPA navigations in a native cross-fade via SvelteKit's `onNavigate`. `adminPage` remains the fallback (and the only path under reduced motion) — the two never double-animate.
+
+Try the **Motion & transitions** section on Design System → Live Preview (`/config/design-system?tab=preview`) for interactive demos of every transition and the `--admin-motion-*` timing tokens.
 
 ```svelte
-<div class="variant-filled-surface btn-group flex w-full items-center rounded">
-  <span class="min-w-0 flex-1 truncate p-2 text-left">
-    {displayText}
-  </span>
-  
-  <div class="flex items-center">
-    <button type="button" class="btn variant-ghost-primary !rounded-none !px-3">
-      Select
-    </button>
-  </div>
-</div>
+<AdminCard in:adminStagger={{ index: i }}>…</AdminCard>
 ```
 
-### 2. Large Inputs (RichText, MediaUpload)
+Rules:
 
-For complex inputs that are their own self-contained "app" (like an editor or a dropzone), we use a single bordered container built with theme-aware surface colors.
+- **Do not** add per-page `in:fly` / `in:scale` one-offs — the layout owns the single page transition so every route (dashboard → user → system settings) moves identically.
+- Hover / active micro-interactions: 150–200ms `transition-all` with `ease-out`.
+- Animate only `transform` + `opacity` (never `width`, `height`, `top`, `gap`) for jank-free motion.
+- Query-parameter navigation (`?edit`, `?create`, filters) must **not** replay the page transition — that is why the layout keys on `pathname` only.
 
-*   **Container**: `relative w-full rounded-lg border border-surface-300 bg-surface-100 shadow-sm dark:border-surface-700 dark:bg-surface-800`
-*   **Internal Structure**: Use `border-b dark:border-surface-700` to separate internal parts like toolbars and title inputs.
+## Color conventions
 
-```svelte
-<div class="relative w-full rounded-lg border border-surface-300 dark:border-surface-700 ... pb-6 ...">
-  <input type="text" class="w-full border-b border-surface-300 dark:border-surface-700 ..."/>
-  
-  <div class="toolbar flex flex-wrap ... border-b border-surface-300 dark:border-surface-700 ...">
-    </div>
+- **Neutral aliases:** `gray`, `slate`, `neutral`, `zinc`, `stone` are aliased to the **surface ramp** in `@theme` (`--color-gray-500: var(--color-surface-500)`), so every neutral utility follows the active theme. Do not reintroduce independent neutral ramps.
+- **Alpha on tokens:** use `color-mix(in srgb, var(--color-primary-500) 30%, transparent)`. **Never** write `rgb(var(--color-primary-500) / 0.3)` — tokens resolve to `oklch()`/hex at runtime, which is invalid inside `rgb()` and the declaration is silently dropped (this left scrollbars and drag outlines unstyled in 8 files before the fix).
+- **Hardcoded `bg-white` / `text-black`** on themeable surfaces breaks dark mode — use `surface` tokens or paired `dark:` variants. Legitimate exceptions: image overlays, QR cards (scanning needs a white canvas), always-dark error pages.
 
-  <div bind:this={element} class="editor-content prose ..."></div>
-</div>
-```
+## Status-shade contract
 
-Validation & Error Handling
----------------------------
+**One hue, one job.** Every semantic ramp (`error`, `success`, `warning`, `tertiary`, `primary`, `secondary`, `surface`) uses the _same shade step for the same role_. Reaching for adjacent shades is what produced "too many different reds" across the admin. The drift guard `scripts/consolidate-shades.mjs --check` runs inside `bun run check` and exits 1 on any violation; run the same script without `--check` to auto-repair (idempotent, re-run after any big UI sweep).
 
-This is one of the most important aspects of our GUI. We use three distinct patterns for error messaging. Choose the correct one for your component's context.
+| Role                                            | Light                | Dark           |
+| :---------------------------------------------- | :------------------- | :------------- |
+| Solid fill / icon chip                          | `{hue}-500`          | `{hue}-500`    |
+| Accent text                                     | `{hue}-500`          | `{hue}-400`    |
+| Emphasis text (headings, bold counts on washes) | `{hue}-600`          | `{hue}-400`    |
+| Subtle wash (panel / chip / alert background)   | `{hue}-500/10`       | `{hue}-900/20` |
+| Active / toggle wash                            | `{hue}-500/20`       | `{hue}-500/20` |
+| Soft border (status alert outline)              | `{hue}-500/30`       | `{hue}-500/40` |
+| Accent border                                   | `{hue}-500`          | `{hue}-400`    |
+| Focus ring                                      | `{hue}-500/20`–`/40` | same           |
 
-### Pattern 1: Absolute Error Text (Default)
+### Forbidden drift (the consolidation removes these)
 
-This is the preferred method for most inputs. The error text appears below the input without affecting document flow.
+- ❌ `bg-{hue}-50` / `bg-{hue}-100` — use `bg-{hue}-500/10`
+- ❌ `bg-{hue}-500/5` / `/15` — use `/10`
+- ❌ `text-{hue}-700` / `-800` in light mode — use `-600`
+- ❌ `dark:text-{hue}-200` / `-300` — use `-400`
+- ❌ `border-{hue}-200` / `-300` — use `-500/30`; `border-{hue}-700` / `-800` — use `-500/40`
+- ❌ Legacy Tailwind hues in admin chrome: `red`→`error`, `rose`→`error`, `blue`→`tertiary`, `green`/`emerald`→`success`, `amber`/`orange`/`yellow`→`warning`
 
-*   **When to Use**: Text, Relation, RichText, and any input that is a single, contained block.
-*   **Container Class**: The input wrapper must have `pb-6`.
-*   **Error Classes**: `absolute bottom-[-1rem] left-0 w-full text-center text-xs text-error-500`
-*   **Input Error State**: `class:!border-error-500={!!error}` and/or `class:!ring-1={!!error} class:!ring-error-500={!!error}`. The `!` prefix is required to override Skeleton's specificity.
+### Deliberate exceptions
 
-```svelte
-<div class="relative ... pb-6">
-  <input class="input" class:!border-error-500={!!error} ... />
-  
-  {#if error}
-    <p 
-      class="absolute bottom-[-1rem] left-0 w-full text-center text-xs text-error-500" 
-      role="alert"
-    >
-      {error}
-    </p>
-  {/if}
-</div>
-```
+- **Filled `warning` surfaces use dark text** (`{hue}-900`/`-950`), not white — white-on-amber fails WCAG AA (restart-required banner, highlighted search terms).
+- **Light text on dark status surfaces** (`text-{hue}-50`/`-100` on `bg-{hue}-900/*`) stays paired — error toasts, dark modal tinting.
+- **Decorative brand hues** (`indigo`, `purple`, `pink`, `violet`, `teal`, `cyan`) are allowed for seasonal effects, preset swatches, FloatingNav spokes and non-theme data viz — never for status semantics.
+- `{hue}-900` / `-950` solid fills and `{hue}-900/10` remain valid dark-surface accents; `{hue}-400` solid is allowed for small status dots on dark surfaces.
+- **`src/app.css` preset recipes are owner-tuned**: the `preset-tonal-*` / `preset-outlined-*` / `preset-ghost-*` / `preset-soft-surface` utilities intentionally use `text-{hue}-700` and `dark:text-{hue}-200`/`-300` emphasis steps for contrast on washes. `src/app.css` is exempted in `consolidate-shades.mjs` (EXCLUDED) so the guard never rewrites it — component code must still follow the contract.
 
-### Pattern 2: Static Error Text
+Canonical recipes live in `src/app.css` (`preset-tonal-*`, `preset-outlined-*`, `preset-ghost-*`) and `src/components/ui/status-badge.svelte`. The `--admin-*` token layer in `src/utilities.css` stays the single source for chrome surfaces.
 
-This method is for components where an absolute position is awkward, such as radio groups or empty dropzones. The error text pushes content down.
+## Responsive behavior
 
-*   **When to Use**: Radio groups, Checkbox groups, empty mediaUpload inputs.
-*   **Container Class**: No `pb-6` needed.
-*   **Error Classes**: `mt-2 text-center text-xs text-error-500` (or `text-left`).
-*   **Input Error State**: Apply the error state to the most logical element (e.g., the `<legend>` or the container border).
+Every `(app)` route must work at **mobile (<768px)**, **tablet (768–1023px)**, and **desktop (≥1024px)**:
 
-```svelte
-<fieldset>
-  <legend class="... " class:!text-error-500={!!error}>
-    Select an Option
-  </legend>
-  </fieldset>
+- CSS layout: Tailwind `sm:` / `md:` / `lg:` variants.
+- JS logic: the `screen` store (`screen.isMobile` / `isTablet` / `isDesktop`).
+- Wide tables / panels go in an `overflow-x-auto` wrapper.
+- Never rely on `hover:` alone for primary actions (touch devices), and keep touch targets ≥ 40px.
 
-{#if error}
-  <p class="mt-2 text-center text-xs text-error-500" role="alert">
-    {error}
-  </p>
-{/if}
-```
+## RTL / LTR
 
-### Pattern 3: Error Banner
+SveltyCMS is fully localized (Paraglide) and must render correctly in both directions. Use **logical properties** so one class set works for LTR and RTL:
 
-This method is for complex, multi-part components where a single line of text is insufficient or would look out of place.
+- Margins/padding: `ms-` / `me-` / `ps-` / `pe-` (never `ml-` / `mr-` / `pl-` / `pr-`).
+- Positioning: `start-` / `end-` / `inset-s-` / `inset-e-` (never `left-` / `right-`).
+- Alignment: `text-start` / `text-end` (never `text-left` / `text-right`).
+- Corners/borders: `rounded-s-` / `rounded-e-` / `border-s-` / `border-e-` (never `rounded-l-` / `rounded-r-` / `border-l-` / `border-r-`).
+- Transforms (`-translate-x-*`) are physical — for directional icons (chevrons), mirror them with `rtl:-scale-x-[-1]`.
 
-*   **When to Use**: megaMenu builder, GuiFields builder, complex list inputs.
-*   **Error Classes**: `flex items-center gap-2 rounded-lg border border-error-200 bg-error-50 p-3 text-error-700 dark:border-error-800 dark:bg-error-900/20 dark:text-error-300`
+Exception: image editors / canvas overlays use physical coordinates (`left-1/2`, `-translate-x-1/2`) because the canvas itself is never mirrored.
 
-```svelte
-{#if error}
-  <div 
-    class="flex items-center gap-2 rounded-lg border border-error-200 bg-error-50 p-3 text-error-700 dark:border-error-800 dark:bg-error-900/20 dark:text-error-300" 
-    role="alert"
-  >
-    <iconify-icon icon="mdi:alert-circle" width="16"></iconify-icon>
-    {error}
-  </div>
-{/if}
-```
+## Light & dark mode
 
-🔘 Buttons & Actions
---------------------
+- Semantic `--admin-*` roles flip automatically via `html.dark` — prefer them over paired `dark:` surface classes on chrome.
+- `dark:` variants are allowed for one-off overrides (gradients, accent chips), not for page chrome.
+- Status colors come from theme ramps (`error`, `warning`, `success`) — do not hardcode Tailwind's `red-*` / `amber-*` / `emerald-*` for state.
 
-*   **Primary Action**: `class="... btn variant-filled-primary"` (e.g., "Save").
-*   **Secondary Action**: `class="... btn variant-filled-secondary"` (e.g., "YouTube").
-*   **Tertiary/Brand Action**: `class="... btn variant-filled-tertiary"` (e.g., "Add New").
-*   **Ghost Action**: `class="... btn variant-ghost-surface"` (e.g., toolbar buttons).
-*   **Destructive Action**: `class="... btn variant-ghost-error"` or a hover effect `class="... hover:text-error-500 dark:hover:text-error-400"`.
-*   **Gradient Buttons**: For special CTAs, use the pre-defined gradient classes (e.g., `gradient-primary`, `gradient-tertiary`). These are defined in the main theme file and include hover/focus states.
+## Design System workspace
 
-🌫️ Overlays (Modals & Dropdowns)
---------------------------------
+**Canonical route:** `/config/design-system`
 
-Overlays use a consistent "frosted glass" effect.
+| Tab              | Purpose                                                            |
+| :--------------- | :----------------------------------------------------------------- |
+| `?tab=overrides` | Per-user density, card style, a11y, layout — linked from `/user`   |
+| `?tab=preview`   | Live component catalog + token readout                             |
+| `?tab=presets`   | **Palette studio** (seed colors → runtime CSS) + Theme JSON import |
+| `?tab=themes` …  | Admin workspace themes, layout density, features, advanced         |
 
-### Modals
+Palette studio writes a marked `customCss` block via `buildPaletteCssFromSeeds` / `mergePaletteCssIntoCustomCss` — do not invent a second token system.
 
-*   **Overlay**: A fixed backdrop with `bg-black/30 backdrop-blur-sm`.
-*   **Panel**: A fixed `z-50 ... rounded-lg bg-white dark:bg-surface-800 p-6 shadow-xl`.
+See [Design System & Admin Theme Settings](../guides/configuration/admin-theme-settings.mdx).
 
-```svelte
-{#if show}
-  <div 
-    class="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm" 
-    onclick={close}
-  ></div>
+## Accessibility
 
-  <div class="fixed left-1/2 top-1/2 z-50 ... rounded-lg bg-white p-6 shadow-xl dark:bg-surface-800">
-    </div>
-{/if}
-```
+- Interactive controls need accessible names
+- Deterministic unique IDs for ARIA/controls pairing: use Svelte 5's `$props.id()` rune (`const uid = $props.id()`), never `crypto.randomUUID()` at render time which creates SSR/hydration ID mismatches
+- Localized date/time display: use `formatDate()`, `formatDateTime()`, `formatTime()` from `@utils/format-date` or `@utils/date` passing `systemLanguage` to avoid hydration text flash
+- Prefer logical Tailwind properties (`ps-`, `pe-`) for RTL
+- Respect theme **Reduced Motion** and **High Contrast**
+- Keyboard focus is visible in both modes (`focus-visible` rings use theme tokens, never `outline: none`)
 
-### Dropdowns & Pop-ups
+## What not to do
 
-Dropdowns use a semi-transparent, blurred background to hint at the content underneath.
-
-*   **Container**: `relative`.
-*   **Panel**: `absolute z-20 mt-1 ... rounded-md border border-surface-400/30 bg-surface-50/95 shadow-lg backdrop-blur-sm focus:outline-none dark:border-surface-300/20 dark:bg-surface-800/90`
-
-The key classes are `bg-surface-50/95 dark:bg-surface-800/90` and `backdrop-blur-sm`.
-
-🌙 Dark Mode
-------------
-
-Dark mode is not optional. Every class that sets a color, background, or border must have a corresponding `dark:` variant, and these must use the theme's semantic colors.
-
-*   **Borders**: `border-surface-300 dark:border-surface-700`
-*   **Backgrounds**: `bg-surface-100 dark:bg-surface-800`
-*   **Text**: `text-surface-700 dark:text-surface-200`
-*   **Prose**: `prose dark:prose-invert`
-
-✅ Style Checklist
------------------
-
-Before submitting a PR, check for:
-
-[ ] **Semantic Colors**: Component uses theme colors (e.g., `bg-primary-500`, `text-error-500`) and not hardcoded Tailwind colors (e.g., `bg-blue-500`, `text-red-500`).
-
-[ ] **No `<style>` blocks**: All styles are 100% Tailwind utility classes.
-
-[ ] **Dark Mode**: All components are tested and look correct in dark mode.
-
-[ ] **Error Handling**: The correct error pattern (Absolute, Static, or Banner) is used.
-
-[ ] **Responsiveness**: The component is mobile-first and responsive.
-
-[ ] **Accessibility**: All buttons and inputs have labels, and ARIA roles are used where needed.
-
-[ ] **Svelte 5 Runes**: No Svelte 4 syntax is used (`export let`, `onMount`, etc., unless truly necessary).
+- ❌ Parallel global token systems that collide with `surface-*` palettes
+- ❌ Hand-rolled page shells instead of `AdminPageShell`
+- ❌ `crypto.randomUUID()` inside component scripts or prop defaults for DOM/ARIA IDs — use `$props.id()` rune
+- ❌ Unpinned `date.toLocaleDateString()` / `date.toLocaleString()` without explicit locale — use `@utils/format-date` helpers
+- ❌ Soft-skipping E2E because lists are empty — seed fixtures instead
+- ❌ `rgb(var(--color-*) / a)` on palette tokens — silently invalid; use `color-mix()`
+- ❌ Per-page transition one-offs — use `adminPage` / `adminStagger` from `@utils/admin-transitions`
+- ❌ Hardcoded `bg-white` / `text-black` / Tailwind `gray-*`-as-semantics on themeable surfaces
+- ❌ Shade drift (see [Status-shade contract](#status-shade-contract)): `bg-{hue}-50` washes, `text-{hue}-700` emphasis, `border-{hue}-200` soft borders, legacy `red`/`blue`/`green` classes

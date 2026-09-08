@@ -1,586 +1,353 @@
 ---
-path: 'docs/tests/git-workflow.mdx'
-title: 'Git Workflow & Automated Testing'
-description: 'Complete guide to branching strategy, commit conventions, automated testing, and semantic releases with GitHub Actions.'
+path: "docs/tests/git-workflow.mdx"
+title: "Git Workflow & Automated Testing"
+description: "Complete guide to branching strategy, commit conventions, automated testing with Vitest and Playwright, and tag-driven releases."
 order: 3
-icon: 'mdi:git'
-author: 'admin'
-created: '2025-09-28'
-updated: '2025-11-08'
+icon: "mdi:git"
+author: "SveltyCMS Team"
+created: "2025-09-28"
+updated: "2026-08-06"
 tags:
-  - 'git'
-  - 'workflow'
-  - 'testing'
-  - 'ci-cd'
-  - 'release'
-  - 'development'
+  - "git"
+  - "workflow"
+  - "testing"
+  - "ci-cd"
+  - "release"
+  - "development"
 ---
 
-# Git Workflow & Automated Testing
+# Git Workflow & Local Quality Gate
 
 ## Introduction
 
-SveltyCMS uses a comprehensive Git workflow with **automated testing** and **semantic versioning** to ensure code quality and streamline the release process. Understanding this workflow is essential for all contributors.
+SveltyCMS uses a comprehensive Git workflow with automated testing and semantic versioning to ensure code quality and streamline the release process. A mandatory **Local Quality Gate** is enforced via native Git hooks to ensure that only verified code reaches the repository.
 
-Our CI/CD pipeline uses:
+Our CI/CD and Local pipeline uses:
 
-- **Bun Tests** for fast unit & integration testing
-- **Playwright** for comprehensive E2E testing
-- **Semantic Release** for automated versioning
-- **GitHub Actions** for CI/CD automation
-- **Test Gating** to ensure releases only happen when tests pass
+- **Native Git Hooks**: Zero-dependency quality gate (`.githooks/pre-commit`).
+- **Vitest (jsdom)**: Unified unit testing for components, stores, services, and API handlers.
+- **Unified Formatting**: oxfmt-powered `bun run format` for lightning-fast cleanup.
+- **Vitest Unit Suite**: Fast unit testing (1,100+ tests in under 10 seconds for the full suite).
+- **Playwright**: Comprehensive E2E testing across multiple database backends.
+- **Tag-Driven Releases**: Push a `v*` tag to `main` to trigger npm publish + GitHub Release.
+- **Standardized Network**: Always use `127.0.0.1` for local consistency.
 
 ---
 
-## Table of Contents
+## 🛡️ Mandatory Local Quality Gate
 
-1. [Branching Strategy](#branching-strategy)
-2. [Commit Message Convention](#commit-message-convention)
-3. [GitHub Actions Workflows](#github-actions-workflows)
-4. [Automated Testing](#automated-testing)
-5. [Release Process](#release-process)
-6. [Development Workflow](#development-workflow)
-7. [Best Practices](#best-practices)
+Before any commit or push, SveltyCMS runs automated checks via native Git hooks. Activate them once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+### Git Hook Overview
+
+SveltyCMS uses native Git hooks for local quality gates — no external precheck orchestrator script required.
+
+#### Pre-commit (`DB safety` → format+lint → lint-staged → **risk:audit** → unit → SBOM)
+
+`.githooks/pre-commit` runs:
+
+1. **Database safety** — `scripts/check-test-db-safety.ts` blocks unsafe `private.test.ts`, live `private.ts` pointing at test DBs, and **matching live/test DB names** (user data protection).
+2. **Format + lint** — `bun run check` (oxfmt + oxlint).
+3. **Lint-staged** — `bun run gate:fast`.
+4. **`risk:audit`** — security-risk scan (all adapters) + secret misuse + slop + `bun audit` + OSV (skipped if only docs changed).
+5. **Unit tests** — `vitest run` (skipped if only docs changed).
+6. **SBOM sync** — when `bun.lock` / `package.json` changed.
+
+> [!IMPORTANT]
+> **No double-run rule:** the full unit suite (including hooks security tests) runs on **pre-commit only**. Pre-push runs build + post-build verifiers + tenant + SQLite integration — do not re-run the entire unit suite on push. Focused re-run: `bun run test:security`.
+>
+> **Live data rule:** automated local runs never use `config/private.ts` or the user database — only `private.test.ts` + isolated DB names.
+
+#### Pre-push (~5–8 min) — production build + verifiers + tenant + SQLite integration
+
+`.githooks/pre-push` runs:
+
+| Check                         | Command                                              | Est.     |
+| :---------------------------- | :--------------------------------------------------- | :------- |
+| Production build (4 adapters) | `COMPILE_ALL_ADAPTERS=true bun run build`            | ~45–120s |
+| Prod backdoor verify          | `scripts/verify-prod-build-backdoor.ts --mode=bench` | ~5–15s   |
+| Bundle size gate              | `scripts/check-bundle-size.ts`                       | ~5–15s   |
+| Quality gate                  | `bun run check`                                      | ~15–40s  |
+| Secret misuse scan            | `scripts/scan-secret-misuse.ts --strict`             | ~5–15s   |
+| Tenant isolation              | `bun run test:tenant`                                | ~5–20s   |
+| SQLite integration tests      | `bun test tests/integration/`                        | ~60–180s |
+
+**Full unit suite is not re-run on push.** Multi-adapter DB matrix, E2E, and benchmarks are CI-only. Docs-only pushes skip build + integration.
+
+```bash
+bun run gate                               # pre-push gate (build + verifiers + tenant + SQLite)
+bun run prepush                            # same as gate
+bun test --timeout 300000 tests/integration/   # Integration only (needs build/)
+bun run test:doctor                        # unit + SQLite integration + gate map
+bun run risk:audit                         # same scanners as pre-commit step 4
+```
 
 ---
 
 ## Branching Strategy
 
-We have two primary, long-lived branches: **main** and **next**.
+We have two primary, long-lived branches: `main` and `next`.
 
 ### `main` Branch (Production)
 
-**Purpose:** Production-ready, stable code. This branch represents the latest official release.
-
-**Protection:**
-
-- Protected branch requiring pull request reviews
-- All code must first be merged into `next`
-- Promoted to `main` only after thorough testing
-- **Tests must pass** before any release is created
-
-**Automated Actions:**
-
-- ✅ Runs full Playwright + Bun test suite
-- ✅ Only releases if tests pass
-- ✅ Creates stable semantic version (e.g., `v1.3.0`)
-- ✅ Automatically cleans `/config/collections` directory
-- ✅ Generates changelog and release notes
-
-**Key Rule:** This branch must never contain test configurations. The `/config/collections` directory is automatically removed during the release process.
+- **Purpose**: Production-ready, stable code. This branch represents the latest official release.
+- **Protection**: Protected branch requiring pull request reviews.
+- **Automated Actions**:
+  - Runs full Playwright + Vitest test suite.
+  - **Tag-driven releases**: pushing a `v*` tag triggers npm publish + GitHub Release with auto-generated notes from commits.
+- **Version source**: Git tags, not `package.json`.
 
 ### `next` Branch (Development)
 
-**Purpose:** Development and staging. This is the primary branch for all new features, bug fixes, and ongoing work.
-
-**Pull Requests:** All contributions should be made to feature branches and then submitted as pull requests targeting `next`.
-
-**Automated Actions:**
-
-- ✅ Runs full test suite on every push
-- ✅ Tests both dev and preview modes
-- ✅ Matrix testing across multiple browsers
-- ✅ No automatic releases (tests only)
-
-**Testing Strategy:**
-
-- Every push triggers comprehensive E2E and unit tests
-- Tests run in both development and production build modes
-- MongoDB service container for database testing
-- Automated database seeding before tests
+- **Purpose**: Development and staging. This is the primary branch for all new features.
+- **Automated Actions**:
+  - ✅ Runs full test suite on every push.
+  - ✅ Tests across multiple databases (MongoDB, PostgreSQL, MariaDB).
+  - ✅ No automatic releases (tests only).
 
 ---
 
 ## Commit Message Convention
 
-Our automated release process depends on a strict commit message format. We use the **Conventional Commits** specification. The release automation analyzes these messages to determine if a new version should be released and what the version number should be.
+Our automated release process depends on a strict commit message format. We use the **Conventional Commits** specification.
 
-### Format
+### Commit Message Model (Conventional Commits + TQA)
 
-Each commit message consists of a **type**, a **scope** (optional), and a **subject**:
+We follow an enhanced **Conventional Commits** specification to maintain a clear Technical Ledger.
 
-```
-<type>(<scope>): <subject>
-
-[optional body]
-
-[optional footer]
-```
-
-### Common Commit Types
-
-| Type              | Description              | Version Impact        | Example                           |
-| ----------------- | ------------------------ | --------------------- | --------------------------------- |
-| `feat`            | A new feature            | MINOR (1.2.0 → 1.3.0) | `feat(auth): add OAuth2 login`    |
-| `fix`             | A bug fix                | PATCH (1.2.0 → 1.2.1) | `fix(api): resolve memory leak`   |
-| `docs`            | Documentation only       | None                  | `docs: update installation guide` |
-| `style`           | Code style changes       | None                  | `style: fix indentation`          |
-| `refactor`        | Code refactoring         | None                  | `refactor: simplify auth logic`   |
-| `perf`            | Performance improvements | PATCH                 | `perf(db): optimize query speed`  |
-| `test`            | Adding or updating tests | None                  | `test: add collection tests`      |
-| `chore`           | Build/tooling changes    | None                  | `chore: update dependencies`      |
-| `ci`              | CI/CD configuration      | None                  | `ci: update GitHub Actions`       |
-| `BREAKING CHANGE` | Breaking API change      | MAJOR (1.2.0 → 2.0.0) | See below                         |
-
-### Breaking Changes
-
-To trigger a **MAJOR** version release, use one of these methods:
-
-**Method 1: Add `!` after type**
+**Format:**
 
 ```
-feat!: redesign collection API
+<type>(<scope>): <subject> [TQA-Verified]
 ```
 
-**Method 2: Add `BREAKING CHANGE:` footer**
+**Types:**
 
-```
-feat(api): redesign collection endpoints
+- `tqa` - **Resilience & Integrity**: Adding chaos tests, state-machine audits, or GDPR verification.
+- `perf` - **Throughput & Latency**: Memory leak fixes, JIT optimizations, and benchmark improvements.
+- `feat` - **Feature**: New functionality.
+- `fix` - **Stability**: Bug fixes.
+- `refactor` - **Clean Code**: Internal restructuring without behavior changes.
 
-BREAKING CHANGE: The collection API now uses different parameter names
-```
+**Mandatory Scopes:**
 
-**⚠️ IMPORTANT:** If your commit doesn't use `feat`, `fix`, or `BREAKING CHANGE`, the automated system will **not** create a new version.
+- `resilience`: For any changes to circuit breakers or failover logic.
+- `temporal`: For timezone/date normalization changes.
+- `concurrency`: For locking and atomic transaction changes.
+- `ledger`: For documentation and benchmark result updates.
 
 ---
 
-## GitHub Actions Workflows
+## Automated Testing Architecture
 
-SveltyCMS uses two main workflows for CI/CD automation.
+### 🧪 Vitest Unit Tests
 
-### Workflow 1: Playwright Tests
+- **Speed**: ⚡ Fast feedback on every commit (full suite via pre-commit).
+- **Location**: `tests/unit/`
+- **Runner**: Vitest with jsdom for components, stores, services, and API logic.
+- **Command**: `bun run test:unit` · focused security: `bun run test:security`
 
-**File:** `.github/workflows/playwright.yml`
+### 🔗 Contract Tests (Adapter Parity)
 
-**Triggers:**
+- **Purpose**: Identical assertions run against all 4 databases (SQLite, MongoDB, PostgreSQL, MariaDB).
+- **Location**: `tests/integration/databases/contract.test.ts`
+- **Contracts**: Adapter, Auth, Permission, Setup Gating, Resilience.
+- **Command**: `bun run test:integration`
 
-- Push to `main` or `next`
-- Pull requests to `main`
-- Called by auto-release workflow
+### 🎭 Playwright Tests (E2E)
 
-**What it does:**
+- **Purpose**: Browser automation for critical user journeys.
+- **Standard**: Always point to `127.0.0.1:4173` via `TEST_MODE=true`.
+- **Location**: `tests/e2e/`
 
-1. Sets up environment (Bun, Node, Playwright)
-2. Starts MongoDB service container
-3. **Seeds database** (`scripts/seed-cms.js`)
-4. **Creates admin user** (`scripts/create-admin.js`)
-5. Runs tests in dev and preview modes
-6. Uploads test results and artifacts
+### 🧠 Smart Test Orchestrator
 
-**Test Matrix:**
+- **Purpose**: Reads `git diff` and selects required test suites. Unknown changes fail closed.
+- **Command**: `bun run test:smart`
 
-```yaml
-strategy:
-  matrix:
-    browser: [chromium, firefox, webkit]
-    mode: [dev, preview]
-```
+### 🔍 AI Slop Scanner
 
-### Workflow 2: Auto-Release
-
-**File:** `.github/workflows/auto-release.yaml`
-
-**Triggers:**
-
-- Push to `main` branch only
-
-**What it does:**
-
-1. **Runs tests first** (calls playwright.yml)
-2. **Only releases if tests pass**
-3. Cleans `/config/collections` directory
-4. Runs semantic-release (version bump, changelog, GitHub release)
-
-**Test Gating:**
-
-```yaml
-jobs:
-  test:
-    # Run all tests
-  release:
-    needs: test # Only runs if tests pass
-    if: success()
-```
+- **Purpose**: Detects unsafe `{@html}`, legacy Svelte 4 patterns, missing ARIA, RTL violations, dead exports.
+- **Command**: `bun run slop`
 
 ---
 
-## Automated Testing
+## Tiered Local Testing Strategy
 
-SveltyCMS uses a **dual-testing strategy** combining fast unit tests with comprehensive E2E testing.
+SveltyCMS uses a **three-tier testing strategy** that balances developer velocity with full CI parity. Each tier corresponds to a different Git lifecycle event:
 
-### Testing Architecture
-
-**🧪 Bun Tests** (Unit & Integration)
-
-- **Speed:** ⚡ Lightning fast (<5s for full suite)
-- **Purpose:** Business logic, services, widgets, security, API endpoints
-- **Location:** `tests/bun/`
-- **Run:** `bun test tests/bun`
-- **Framework:** Bun Test v1.3.1
-
-**🎭 Playwright Tests** (E2E)
-
-- **Speed:** Thorough (30-60s per suite)
-- **Purpose:** User flows, UI interactions, cross-browser
-- **Location:** `tests/playwright/`
-- **Run:** `bun x playwright test`
-- **Browsers:** Chromium, Firefox, WebKit
-
-### Current Test Status
-
-```
-✅ 97+ passing tests (77%+)
-⚡ ~25s execution time
-🎯 150+ assertions
-📊 8 categories fully tested
+```mermaid
+flowchart LR
+    A["git commit"] -->|"~40–60s"| B["Pre-Commit<br/>DB safety → format+lint<br/>→ lint-staged → risk:audit → unit"]
+    C["git push"] -->|"~5–8 min"| D["Pre-Push<br/>Build 4 adapters → backdoor/bundle<br/>→ check → secrets → tenant → SQLite integ"]
 ```
 
-**Fully Passing Test Suites:**
+### Tier 1: Pre-Commit (`.githooks/pre-commit`) — Fast Feedback
 
-- ✅ **Security** (8/8 tests) - XSS detection, HTML sanitization
-- ✅ **Widget Validation** (8/8 tests) - RichText, form validation
-- ✅ **Cache System** (17/17 tests) - Redis, metrics, multi-tenant
-- ✅ **UI Components** (5/5 tests) - Store management
-- ✅ **Content Utilities** (6/6 tests) - normalization, helpers
-- ✅ **User API** (47/47 tests) - Complete endpoint coverage
-- ⚠️ **Collection Builder** (4/7 tests) - Partial coverage
-- ❌ **Other APIs** (0/4 tests) - Needs database setup
+Runs automatically on every `git commit`. Target: **~40–60 seconds** (full unit suite + risk audit; skipped if only docs changed).
 
-**See full test report:** [Test Status](./test-status.mdx)
+| Check              | Tool                             |
+| :----------------- | :------------------------------- |
+| Test config safety | `check-test-db-safety.ts`        |
+| Format + lint      | `bun run check` (oxfmt + oxlint) |
+| Lint-staged        | `bun run gate:fast`              |
+| Risk audit         | `bun run risk:audit`             |
+| Unit tests         | `bun run test:unit` (Vitest)     |
+| SBOM sync          | `audit:sbom` (if lock changed)   |
 
-### Running Tests Locally
+### Tier 2: Pre-Push (`.githooks/pre-push`) — Production Build + Integration
 
-**Quick feedback (recommended):**
+Runs automatically on every `git push`. Catches build and integration failures before they reach CI.
 
-```bash
-# Fast unit tests
-bun test tests/bun
+| Check                         | Command                                            |
+| :---------------------------- | :------------------------------------------------- |
+| Production build (4 adapters) | `COMPILE_ALL_ADAPTERS=true bun run build`          |
+| Prod backdoor + bundle gates  | `verify-prod-build-backdoor` + `check-bundle-size` |
+| Quality + secrets + tenant    | `check` + secret scan + `test:tenant`              |
+| SQLite integration tests      | `bun test tests/integration/`                      |
 
-# Specific test file
-bun test tests/bun/services/SecurityResponseService.test.ts
-bun test tests/bun/api/user.test.ts
+**Multi-adapter DB integration + E2E + benchmarks are CI-only.**
 
-# Specific test suite
-bun test tests/bun/api/user.test.ts -t "createUser"
-```
+Manual equivalent: `bun run prepush` / `bun run gate` (via hardened git wrapper).
 
-**E2E testing:**
+> [!CAUTION]
+> `--no-verify` is blocked by `scripts/git-safe.ts`. Use `bun run git push` — bypassing requires the system `git` binary path deliberately.
 
-```bash
-# All E2E tests
-bun x playwright test
+### Tier 3: Full CI Parity — CI Pipeline
 
-# Interactive mode
-bun x playwright test --ui
+CI runs the complete matrix automatically on every PR/push to `next`. Covers what local hooks skip:
 
-# Specific browser
-bun x playwright test --project=chromium
-```
+- **Whitebox**: format + lint + type check + secret scan + deploy backdoor probe
+- **Build**: `COMPILE_ALL_ADAPTERS=true` production build
+- **DB tests**: Full multi-adapter matrix (MongoDB, PostgreSQL, MariaDB, SQLite)
+- **E2E**: Playwright prep + 6 shards (chromium)
+- **Benchmarks**: Performance regression detection
 
-**Complete test suite:**
+All local test commands must use **`config/private.test.ts` only** — they must **not** rename, overwrite, or connect through the developer's `config/private.ts` (live user data). Isolation is env + policy (`private-config-policy.ts`), not backup/restore of live config.
 
-```bash
-# Bun + Playwright
-bun run test:all
-```
-
-### Test Infrastructure
-
-**Test Configuration:**
-
-- `bunfig.toml` - Bun test configuration with Svelte preload
-- `tests/bun/svelte-loader.js` - Svelte component loader
-- `tests/bun/mocks/setup.ts` - Environment mocks (500+ lines)
-- `playwright.config.ts` - E2E test configuration
-
-**Test Helpers:**
-
-- `tests/bun/helpers/testSetup.ts` - Fixtures, database cleanup, role resolution
-- `tests/bun/helpers/server.ts` - Server wait utility (prevents timeouts)
-- `tests/bun/mocks/setup.ts` - Comprehensive environment mocking
-
-**Mocked Services:**
-
-- SvelteKit environment (`$app/environment`)
-- Global settings (publicEnv, privateEnv)
-- Svelte 5 runes (`$state`, `$derived`, `$effect`)
-- Widget factory with 30+ widgets
-- Paraglide i18n messages (100+ translations)
-- Setup wizard store
-- Skeleton UI components
-
-**CI Integration:**
-
-- Tests run on every push to `main` and `next`
-- Release blocked if tests fail
-- Matrix testing across 3 browsers × 2 modes = 6 configurations
-- MongoDB service container for E2E tests
-- Automatic database seeding
+**Prerequisites for local integration tests:** Docker Desktop with MongoDB (27017), MariaDB (3306), and PostgreSQL (5432) on `127.0.0.1`.
 
 ---
 
-## Release Process
+## Scripts Audit
 
-### Complete Flow
+All scripts in `scripts/` and their role in the testing pipeline:
 
-**Development (→ `next`):**
+### Core Scripts (Testing Pipeline)
 
-```
-1. Create feature branch from 'next'
-   git checkout -b feat/my-feature next
+| Script                          | Role                                     | Called By                      |
+| :------------------------------ | :--------------------------------------- | :----------------------------- |
+| `test-doctor.ts`                | Gate map + unit + SQLite integration     | `bun run test:doctor` (manual) |
+| `test-smart.ts`                 | Git-diff-aware test selector             | `bun run test:smart` (manual)  |
+| `security-audit.ts`             | Security vulnerability scanner           | `bun run security`             |
+| `run-e2e.ts`                    | Unified E2E runner (CI/dev modes)        | `bun run test:e2e`             |
+| `check-test-db-safety.ts`       | Blocks unsafe test config                | pre-commit                     |
+| `scan-secret-misuse.ts`         | Secret exposure static analysis          | CI whitebox / manual           |
+| `verify-prod-build-backdoor.ts` | Checks /api/testing stripped in deploy   | CI build / whitebox            |
+| `verify-benchmark-local.ts`     | Blocks local benchmarks on test DB names | Manual                         |
+| `bundle-stats.ts`               | Bundle size analysis                     | `bun run build:stats`          |
+| `check-bundle-size.ts`          | CI bundle size gate                      | CI build job                   |
+| `generate-sbom.ts`              | Software bill of materials generation    | `bun run audit:sbom`           |
 
-2. Make changes with conventional commits
-   git commit -m "feat(auth): add OAuth2 support"
+### Utility Scripts
 
-3. Push and create PR to 'next'
-   git push origin feat/my-feature
-
-4. Tests run automatically (Bun + Playwright)
-
-5. Merge after approval
-   - Tests must pass
-   - PR requires approval
-
-6. Tests run on 'next' (no release created)
-```
-
-**Release (→ `main`):**
-
-```
-1. Create PR from 'next' to 'main'
-   - Ensure all features are stable
-   - Review CHANGELOG
-
-2. Tests run automatically
-   - Full Playwright suite
-   - All Bun tests
-   - Matrix testing
-
-3. Merge after approval
-   - Requires maintainer approval
-   - All checks must pass
-
-4. Tests run on 'main'
-   - Complete test suite
-   - Database seeding
-   - Cross-browser testing
-
-5. If tests pass:
-   ✅ semantic-release analyzes commits
-   ✅ Determines version bump
-   ✅ Updates package.json
-   ✅ Generates CHANGELOG.md
-   ✅ Creates GitHub release
-   ✅ Cleans /config/collections
-
-6. If tests fail:
-   ❌ No release created
-   ❌ Maintainers notified
-   ❌ Fix required before retry
-```
-
-### Version Determination
-
-Based on commit messages since last release:
-
-| Commits                    | Version Change | Example       |
-| -------------------------- | -------------- | ------------- |
-| `fix:` only                | PATCH          | 1.2.0 → 1.2.1 |
-| `feat:` present            | MINOR          | 1.2.0 → 1.3.0 |
-| `BREAKING CHANGE:` or `!`  | MAJOR          | 1.2.0 → 2.0.0 |
-| No `feat`/`fix`/`BREAKING` | No release     | -             |
-
----
-
-## Development Workflow
-
-### Step-by-Step Guide
-
-**1. Start a new feature:**
-
-```bash
-# Update local next branch
-git checkout next
-git pull origin next
-
-# Create feature branch
-git checkout -b feat/my-feature
-
-# Or for bug fix
-git checkout -b fix/bug-description
-```
-
-**2. Make changes:**
-
-```bash
-# Write code
-# Add tests
-
-# Run tests locally
-bun test
-bun x playwright test
-
-# Commit with conventional format
-git add .
-git commit -m "feat(auth): add OAuth2 support"
-```
-
-**3. Push and create PR:**
-
-```bash
-# Push to remote
-git push origin feat/my-feature
-
-# Create PR to 'next' on GitHub
-# - Fill in PR template
-# - Link related issues
-# - Request reviewers
-```
-
-**4. Address review comments:**
-
-```bash
-# Make changes
-git add .
-git commit -m "fix(auth): address review comments"
-
-# Push updates
-git push origin feat/my-feature
-```
-
-**5. Merge and cleanup:**
-
-```bash
-# After PR is merged
-git checkout next
-git pull origin next
-
-# Delete feature branch
-git branch -d feat/my-feature
-git push origin --delete feat/my-feature
-```
+| Script                       | Role                           | Command               |
+| :--------------------------- | :----------------------------- | :-------------------- |
+| `security-audit.ts`          | Security vulnerability scanner | `bun run security`    |
+| `generate-sbom.ts`           | SBOM generation                | `bun run audit:sbom`  |
+| `bundle-stats.ts`            | Bundle size analysis           | `bun run build:stats` |
+| `upgrade.ts`                 | Automated core updates         | `bun run upgrade`     |
+| `setup-system.ts`            | System bootstrap               | Dev setup helper      |
+| `generate-core-countries.js` | Country data generator         | Address widget data   |
 
 ---
 
 ## Best Practices
 
-### Commit Messages
+### Commit Workflow
 
-**✅ Good Examples:**
+1.  **Stage changes**: `git add .`
+2.  **Commit**: `git commit -m "feat(auth): add OAuth2 support"` — pre-commit hook runs (DB safety → format+lint → lint-staged → unit tests).
+3.  **Push**: `bun run git push origin feat/my-feature` — pre-push hook runs (production build → `bun test tests/integration/`).
+4.  **Before PR**: Ensure CI passes — local hooks already guarantee the same gate.
 
-```bash
-feat(auth): add OAuth2 support
-fix(api): resolve memory leak in user endpoint
-docs: update testing guide
-test(user): add avatar upload tests
-perf(cache): optimize Redis queries
-refactor(widget): simplify factory logic
-```
+### Manual Verification
 
-**❌ Bad Examples:**
+If you want to run checks outside the hook lifecycle:
 
 ```bash
-fixed stuff
-WIP
-changes
-update
-asdf
+# Pre-commit gate manually
+bun run precommit
+
+# Pre-push gate manually
+bun run gate
+# or: bun run prepush
+
+# Unit + SQLite integration + gate map
+bun run test:doctor
+
+# Integration tests (SQLite; needs build/)
+bun test --timeout 300000 tests/integration/
+
+# Smart Test Orchestrator — auto-detects what to test from git diff
+bun run test:smart
+
+# AI Slop Scanner — detect code smells
+bun run slop
 ```
 
-### Pull Requests
+### Security & Slop Regression Check
 
-**Before creating a PR:**
-
-- ✅ Run tests locally (`bun test`)
-- ✅ Update relevant documentation
-- ✅ Add tests for new features
-- ✅ Follow code style guidelines
-- ✅ Use conventional commit messages
-
-**PR Guidelines:**
-
-- Keep PRs focused and small (< 500 lines preferred)
-- Write clear descriptions
-- Link related issues
-- Respond to reviews promptly
-- Ensure CI passes before requesting review
-
-### Testing
-
-**Test-Driven Development:**
+For changes touching auth, middleware, or API routes, also run:
 
 ```bash
-# 1. Write failing test
-bun test tests/bun/api/my-feature.test.ts
-
-# 2. Implement feature
-# ... code ...
-
-# 3. Verify test passes
-bun test tests/bun/api/my-feature.test.ts
-
-# 4. Run full suite
-bun test
+bun run test:security
+bun run slop
 ```
 
-**Before pushing:**
-
-```bash
-# Run all tests
-bun test tests/bun
-
-# Run E2E tests for affected features
-bun x playwright test tests/my-feature.spec.ts
-
-# Check for linting errors
-bun run lint
-```
+> [!NOTE]
+> On Windows (PowerShell), always use `;` to chain commands. Avoid `&&` as it is not natively supported in PowerShell.
 
 ---
 
 ## Troubleshooting
 
-### Tests Failing in CI but Passing Locally
+### "Permission Denied" on Git Hook
 
-**Common causes:**
+If you are on Linux/macOS and the hook fails to execute:
 
-1. **Different Node/Bun versions**
-   - Solution: Use `.nvmrc` or check CI version
+```
+chmod +x .githooks/pre-commit .githooks/pre-push
+```
 
-2. **Missing environment variables**
-   - Solution: Check GitHub Secrets configuration
+### "Database connection failed" in Tests
 
-3. **Database state issues**
-   - Solution: Ensure tests clean up properly
+Ensure you are using `127.0.0.1` in your `config/private.test.ts` and that the test database is accessible.
 
-4. **Timing issues**
-   - Solution: Use `waitForServer()` helper
+### Bypassing Hooks
 
-### Release Not Created
+`bun run git commit` and `bun run git push` block `--no-verify`. Bypassing requires invoking the system Git binary directly — a deliberate act, not muscle memory. **CI will reject the same failures the hooks catch.**
 
-**Check:**
+### Docker DB Not Reachable During Pre-Push
 
-1. **Did tests pass?**
-   - View GitHub Actions logs
+If the pre-push hook or local CI reports `postgresql is not reachable at 127.0.0.1:5432`:
 
-2. **Did commits use conventional format?**
-   - Must have `feat:`, `fix:`, or `BREAKING CHANGE:`
+```bash
+docker compose -f tests/docker-compose.yml --profile postgresql up -d
+docker compose -f tests/docker-compose.yml --profile mariadb up -d
+docker compose -f tests/docker-compose.yml --profile mongodb up -d
+```
 
-3. **Are you on `main` branch?**
-   - Releases only happen on `main`
-
-4. **Is semantic-release configured?**
-   - Check `.releaserc` configuration
+Credentials must match `src/utils/test-db-credentials.ts` (image defaults: `postgres/postgres`, `root/mariadb`, mongo no-auth).
 
 ---
 
 ## Related Documentation
 
-- [Test Status Report](./test-status.mdx) - Current test coverage and status
-- [User API Tests](./user-api-tests.mdx) - Complete user API test documentation
-- [Contributing Guide](/docs/contributing/contributing-docs.mdx) - How to contribute
-- [Troubleshooting](/docs/troubleshooting.mdx) - Common issues
-
----
-
-**Follow these workflows for smooth development and reliable releases! 🚀**
+- [Test Status Report](/docs/tests/test-status)
+- [API Testing](/docs/tests/api-testing)
+- [Testing Strategy](/docs/tests/testing-strategy)

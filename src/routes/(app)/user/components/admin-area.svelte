@@ -1,0 +1,1072 @@
+<!--
+@file src/routes/(app)/user/components/admin-area.svelte
+@component
+**Admin area for managing users and tokens — Smart Table server mode.**
+
+### Features
+- `createSmartTable({ mode: 'server', onQueryChange })` owns page/sort/selection
+- API fetch for `/api/user` and `/api/token` driven by one controller
+- Shared table chrome (matches entry-list / media / tokens)
+- Bulk actions, copy to clipboard, column manager
+-->
+
+<script lang="ts">
+	import AdminCard from '@components/admin-card.svelte';
+	import Button from '@components/ui/button.svelte';
+	import Badge from '@components/ui/badge.svelte';
+	import { formatDateTime } from '@utils/format-date';
+	// Type guards for template and logic
+	function isToken(row: User | Token): row is Token {
+		return !!row && 'token' in row && typeof row.token === 'string';
+	}
+	function isUser(row: User | Token): row is User {
+		return !!row && '_id' in row && !('token' in row);
+	}
+
+	function getDisplayValue(row: TableDataType, header: TableHeader): string {
+		if (header.key === 'blocked') {
+			return '';
+		}
+		if (isUser(row)) {
+			return String(row[header.key as keyof User] ?? '-');
+		}
+		if (isToken(row)) {
+			return String(row[header.key as keyof Token] ?? '-');
+		}
+		return '-';
+	}
+
+	function checkTokenExpired(row: TableDataType): boolean {
+		if (!(isToken(row) && row.expires)) {
+			return false;
+		}
+		return new Date(row.expires) < new Date();
+	}
+
+	// Components
+	import Avatar from "@components/ui/avatar.svelte";
+
+	import SystemTooltip from '@src/components/system/system-tooltip.svelte';
+	import Role from '@src/components/system/table/role.svelte';
+	import TableFilter from '@src/components/system/table/table-filter.svelte';
+	import TableIcons from '@src/components/system/table/table-icons.svelte';
+	import {
+		createSmartTable,
+		pinCellClass,
+		SMART_TABLE,
+		SMART_TABLE_COLUMN_MANAGER,
+		SMART_TABLE_ROW_HOVER,
+		SMART_TABLE_ROW_SELECTED,
+		SMART_TABLE_TD,
+		SMART_TABLE_TH,
+		SMART_TABLE_THEAD,
+		SMART_TABLE_TOOLBAR,
+		type TableDensity
+	} from '@components/ui/smart-table';
+	import SmartTableShell from '@components/ui/smart-table/smart-table-shell.svelte';
+	import SmartTableSavedViewsMenu from '@components/ui/smart-table/smart-table-saved-views-menu.svelte';
+	import type { SmartTableSavedView } from '@utils/smart-table-saved-views';
+	// Types
+	import { type Role as RoleType, type Token, type User } from '@src/databases/auth/types';
+	import { isAdmin } from '@src/databases/auth/constants';
+	// Types
+	import {
+		adminarea_activesession,
+		adminarea_blocked,
+		adminarea_consumed,
+		adminarea_createat,
+		adminarea_emailtoken,
+		adminarea_expiresin,
+		adminarea_lastaccess,
+		adminarea_notoken,
+		adminarea_nouser,
+		adminarea_token,
+		adminarea_updatedat,
+		adminarea_user_id,
+		email,
+		entrylist_all,
+		form_avatar,
+		multibuttontoken_modalbody,
+		multibuttontoken_modaltitle,
+		role,
+		username
+	} from '@src/paraglide/messages';
+	import { globalLoadingStore, loadingOperations } from '@src/stores/loading-store.svelte.ts';
+	import { normalizeAvatarUrl } from '@utils/avatar';
+	import { toast } from '@src/stores/toast.svelte.ts';
+	// Stores
+	import { logger } from '@utils/logger';
+	import { modalState } from '@utils/modal.svelte';
+	import { showConfirm } from '@utils/modal.svelte';
+	import { untrack } from 'svelte';
+	import { page } from '$app/state';
+	import Multibutton from './multibutton.svelte';
+	import ModalEditToken from './modal-edit-token.svelte';
+	import ModalUserSessions from './modal-user-sessions.svelte';
+	import SmartTableMetricsBadge from '@components/ui/smart-table/smart-table-metrics-badge.svelte';
+
+	type TableDataType = (User | Token) & Record<string, unknown>;
+
+	interface TableHeader {
+		id: string;
+		key: keyof User | keyof Token;
+		label: string;
+		visible: boolean;
+	}
+
+	// Props - Using API for scalability
+	const { currentUser = null, isMultiTenant = false, roles = [] }: { currentUser: User | null; isMultiTenant: boolean; roles: RoleType[] } = $props();
+
+	// Core view state (must exist before smartTable onQueryChange can fetch)
+	let showUserList = $state(true);
+	let showUsertoken = $state(false);
+	let globalSearchValue = $state('');
+	let searchShow = $state(false);
+	let filterShow = $state(false);
+	let columnShow = $state(false);
+	let selectAllColumns = $state(true);
+
+	const viewsScope = $derived(showUserList ? 'users' : 'tokens');
+
+	let activeFacet = $state<'all' | 'admin' | 'user' | 'active' | 'blocked'>('all');
+
+	function selectFacet(facet: 'all' | 'admin' | 'user' | 'active' | 'blocked') {
+		activeFacet = facet;
+		smartTable.pagination.currentPage = 1;
+		fetchData().catch((err) => logger.error('Facet change error:', err));
+	}
+
+	function openUserSessions(targetUser: User) {
+		modalState.trigger(
+			ModalUserSessions as any,
+			{ user: targetUser },
+			() => {}
+		);
+	}
+
+	function getSavedViewSnapshot(): Omit<SmartTableSavedView, 'id' | 'createdAt' | 'updatedAt' | 'name'> {
+		return {
+			filters: { activeFacet },
+			search: globalSearchValue,
+			sort: smartTable.sort,
+			pageSize: smartTable.pagination.pageSize
+		};
+	}
+
+	function applySavedView(view: SmartTableSavedView) {
+		if (view.search != null) globalSearchValue = view.search;
+		if (view.sort?.sortedBy) smartTable.setSort(view.sort.sortedBy, { emit: false });
+		if (view.pageSize) smartTable.setPageSize(view.pageSize, { emit: false });
+		if (view.filters && typeof view.filters === 'object' && 'activeFacet' in view.filters) {
+			activeFacet = (view.filters as Record<string, any>).activeFacet;
+		}
+		fetchData().catch(() => {});
+	}
+
+	function getAdminRowId(row: TableDataType): string {
+		if (isToken(row)) return String(row.token ?? '');
+		if (isUser(row)) return String(row._id ?? '');
+		return '';
+	}
+
+	/** Single controller for page / sort / selection (server mode → API refetch). */
+	const smartTable = createSmartTable({
+		mode: 'server',
+		pageSize: 10,
+		layoutKey: 'admin-area-users-tokens',
+		getRowId: (row: Record<string, unknown>) => getAdminRowId(row as TableDataType),
+		onQueryChange: () => {
+			fetchData().catch((err) => logger.error('AdminArea smartTable query change:', err));
+		}
+	}) as unknown as ReturnType<typeof createSmartTable<TableDataType & Record<string, unknown>>>;
+
+	// System-wide user count for bulk safety checks (search/pagination must not shrink this).
+	const systemUserCount = $derived(page.data.totalUsers ?? smartTable.pagination.totalItems);
+	const tableData = $derived(smartTable.rows);
+	const totalItems = $derived(smartTable.pagination.totalItems);
+	const pagesCount = $derived(smartTable.pagination.pagesCount);
+	const currentPage = $derived(smartTable.pagination.currentPage);
+	const rowsPerPage = $derived(smartTable.pagination.pageSize);
+	const sorting = $derived(smartTable.sort);
+
+	async function fetchData() {
+		await globalLoadingStore.withLoading(
+			loadingOperations.dataFetch,
+			async () => {
+				const endpoint = showUserList ? '/api/user' : '/api/token';
+				// eslint-disable-next-line svelte/prefer-svelte-reactivity
+				const params = new URLSearchParams();
+				params.set('page', String(smartTable.pagination.currentPage));
+				params.set('limit', String(smartTable.pagination.pageSize));
+				params.set('sort', smartTable.sort.sortedBy || 'createdAt');
+				if (smartTable.sort.isSorted !== 0) {
+					params.set('order', smartTable.sort.isSorted === 1 ? 'asc' : 'desc');
+				}
+				if (globalSearchValue) {
+					params.set('search', globalSearchValue);
+				}
+				if (showUserList && activeFacet !== 'all') {
+					if (activeFacet === 'admin' || activeFacet === 'user') {
+						params.set('role', activeFacet);
+					} else if (activeFacet === 'active') {
+						params.set('blocked', 'false');
+					} else if (activeFacet === 'blocked') {
+						params.set('blocked', 'true');
+					}
+				}
+
+				try {
+					const response = await fetch(`${endpoint}?${params.toString()}`);
+					if (!response.ok) {
+						const errorData = await response.json();
+						throw new Error(errorData.message || 'Failed to fetch data');
+					}
+					const result = await response.json();
+					if (result.success) {
+						const items = (result.data || []) as TableDataType[];
+						const total = Number(result.pagination?.totalItems ?? items.length);
+						smartTable.setRows(items);
+						smartTable.setPaginationMeta({
+							totalItems: total,
+							pagesCount: Math.max(1, Math.ceil(total / smartTable.pagination.pageSize)),
+							currentPage: smartTable.pagination.currentPage,
+							pageSize: smartTable.pagination.pageSize
+						});
+					}
+				} catch (err) {
+					const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+					logger.error('AdminArea fetch error:', errorMessage);
+					toast.error(`Error fetching data: ${errorMessage}`);
+					smartTable.setRows([]);
+					smartTable.setPaginationMeta({ totalItems: 0, pagesCount: 1 });
+					throw err;
+				}
+			},
+			'Fetching admin data'
+		);
+	}
+
+	// Custom event handler for updates from Multibutton
+	function handleBatchUpdate(data: { ids: string[]; action: string; type: 'user' | 'token' }) {
+		const { ids, action, type } = data;
+		logger.debug(`[AdminArea] handleBatchUpdate: ${action} on ${type}`, { count: ids.length });
+
+		if (action === 'refresh') {
+			fetchData().catch(() => {});
+			return;
+		}
+
+		// Optimistic update on current smartTable page slice
+		const current = smartTable.rows;
+		if (current && current.length > 0) {
+			let updated = false;
+
+			if (action === 'delete') {
+				const updatedData = current.filter((item: User | Token) => {
+					if (type === 'user' && isUser(item)) {
+						return !ids.includes(item._id);
+					}
+					if (type === 'token' && isToken(item)) {
+						return !ids.includes(item.token);
+					}
+					return true;
+				});
+
+				if (updatedData.length !== current.length) {
+					smartTable.setRows(updatedData as TableDataType[]);
+					updated = true;
+				}
+			} else {
+				const updatedData = current.map((item: User | Token) => {
+					let shouldUpdate = false;
+					if (type === 'user' && isUser(item) && ids.includes(item._id)) {
+						shouldUpdate = true;
+					}
+					if (type === 'token' && isToken(item) && ids.includes(item.token)) {
+						shouldUpdate = true;
+					}
+
+					if (shouldUpdate) {
+						updated = true;
+						if (action === 'block') {
+							return { ...item, blocked: true };
+						}
+						if (action === 'unblock') {
+							return { ...item, blocked: false };
+						}
+					}
+					return item;
+				});
+
+				if (updated) {
+					smartTable.setRows([...updatedData] as TableDataType[]);
+				} else {
+					logger.debug(`[AdminArea] No items matched for ${action} in current tableData`);
+				}
+			}
+
+			if (updated) {
+				smartTable.clearSelection();
+			}
+		}
+	} // Table header definitions
+	const tableHeadersUser = [
+		{ label: adminarea_blocked(), key: 'blocked' },
+		{ label: form_avatar(), key: 'avatar' },
+		{ label: email(), key: 'email' },
+		{ label: username(), key: 'username' },
+		{ label: role(), key: 'role' },
+		{ label: 'Tenant ID', key: 'tenantId' },
+		{ label: adminarea_user_id(), key: '_id' },
+		{ label: adminarea_activesession(), key: 'activeSessions' },
+		{ label: adminarea_lastaccess(), key: 'lastAccess' },
+		{ label: adminarea_createat(), key: 'createdAt' },
+		{ label: adminarea_updatedat(), key: 'updatedAt' }
+	] as const;
+
+	const tableHeaderToken = [
+		{ label: adminarea_blocked(), key: 'blocked' },
+		{ label: email(), key: 'email' },
+		{ label: role(), key: 'role' },
+		{ label: 'Tenant ID', key: 'tenantId' },
+		{ label: adminarea_token(), key: 'token' },
+		{ label: adminarea_expiresin(), key: 'expires' },
+		{ label: adminarea_createat(), key: 'createdAt' },
+		{ label: adminarea_updatedat(), key: 'updatedAt' }
+	] as const;
+
+	const selectAll = {
+		get value() {
+			return smartTable.allSelected;
+		},
+		set value(v: boolean) {
+			smartTable.setSelectAll(v);
+		}
+	};
+
+	let density = $state<TableDensity>(
+		(() => {
+			if (typeof localStorage === 'undefined') return 'normal';
+			try {
+				const settings = localStorage.getItem('userPaginationSettings');
+				const d = settings ? (JSON.parse(settings).density as TableDensity) : 'normal';
+				return d === 'compact' || d === 'comfortable' || d === 'normal' ? d : 'normal';
+			} catch {
+				return 'normal';
+			}
+		})()
+	);
+
+	// Initialize displayTableHeaders with a safe default
+	let displayTableHeaders: TableHeader[] = $state([]);
+
+	$effect(() => {
+		// Update displayTableHeaders when view changes
+		const baseHeaders = showUserList ? tableHeadersUser : tableHeaderToken;
+		const relevantHeaders = isMultiTenant ? baseHeaders : baseHeaders.filter((h) => h.key !== 'tenantId');
+					// Essential columns only visible by default — rest available via column toggle
+					const essentialKeys = showUserList
+						? ['avatar', 'email', 'username', 'role', 'createdAt', 'blocked']
+						: ['email', 'role', 'token', 'expires', 'createdAt', 'blocked'];
+		const newHeaders = relevantHeaders.map((header) => ({
+			label: header.label,
+			key: header.key,
+			visible: essentialKeys.includes(header.key),
+			id: `header-${header.key}`
+		}));
+		displayTableHeaders = newHeaders;
+		smartTable.setColumns(
+			newHeaders.map((h) => ({
+				key: String(h.key),
+				label: h.label,
+				sortable: true,
+				visible: h.visible
+			}))
+		);
+	});
+
+	// Density → controller (for cell padding helpers)
+	$effect(() => {
+		smartTable.setDensity(density);
+	});
+
+	// View / search / user context changes — reset to page 1 (no emit) + fetch once
+	$effect(() => {
+		void showUserList;
+		void showUsertoken;
+		void globalSearchValue;
+		void currentUser;
+
+		untrack(() => {
+			smartTable.clearSelection();
+			smartTable.setPaginationMeta({ currentPage: 1 });
+			fetchData().catch((err) => {
+				logger.error('AdminArea effect fetchData error:', err);
+			});
+		});
+	});
+
+	// Function to edit a specific token
+	function editToken(tokenId: Token) {
+		const tokenData = tokenId;
+		if (!tokenData) {
+			return;
+		}
+
+		modalState.trigger(
+			ModalEditToken as any,
+			{
+				// Use the row _id as the resource id — the list exposes the *hashed* token
+				// value (never the raw credential), so row.token cannot resolve via
+				// getTokenByValue (it re-hashes). tokenData._id hits getTokenById instead.
+				token: tokenData._id,
+				email: tokenData.email,
+				role: tokenData.role,
+				expires: convertDateToExpiresFormat(tokenData.expires),
+				title: multibuttontoken_modaltitle(),
+				body: multibuttontoken_modalbody(),
+				roles // Pass roles explicitly
+			},
+			(result: any) => {
+				if (result?.success) {
+					fetchData().catch(() => {});
+				} else if (result?.success === false) {
+					toast.error({
+						description: result.error || 'Failed to update token'
+					});
+				}
+			}
+		);
+	}
+
+	// Helper function to convert Date to expires format expected by ModalEditToken
+	function convertDateToExpiresFormat(expiresDate: Date | string | null): string {
+		if (!expiresDate) {
+			return '2 days'; // Default
+		}
+
+		const now = new Date();
+		const expires = new Date(expiresDate);
+		const diffMs = expires.getTime() - now.getTime();
+		const diffHours = Math.ceil(diffMs / (1000 * 60 * 60));
+		const diffDays = Math.ceil(diffHours / 24);
+
+		// Match the available options in ModalEditToken
+		if (diffHours <= 2) {
+			return '2 hrs';
+		}
+		if (diffHours <= 12) {
+			return '12 hrs';
+		}
+		if (diffDays <= 2) {
+			return '2 days';
+		}
+		if (diffDays <= 7) {
+			return '1 week';
+		}
+		if (diffDays <= 14) {
+			return '2 weeks';
+		}
+		if (diffDays <= 30) {
+			return '1 month';
+		}
+
+		return '1 month'; // Max available option
+	}
+
+	// Helper function to calculate remaining time until expiration for display in table
+	function getRemainingTime(expiresDate: Date | string | null): string {
+		if (!expiresDate) {
+			return 'Never';
+		}
+
+		const now = new Date();
+		const expires = new Date(expiresDate);
+		const diffMs = expires.getTime() - now.getTime();
+
+		// If expired, return 'Expired'
+		if (diffMs <= 0) {
+			return 'Expired';
+		}
+
+		const diffMinutes = Math.floor(diffMs / (1000 * 60));
+		const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+		const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+		if (diffDays > 0) {
+			const remainingHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+			return remainingHours > 0 ? `${diffDays}d ${remainingHours}h` : `${diffDays}d`;
+		}
+		if (diffHours > 0) {
+			const remainingMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+			return remainingMinutes > 0 ? `${diffHours}h ${remainingMinutes}m` : `${diffHours}h`;
+		}
+		return `${diffMinutes}m`;
+	}
+
+	// Safe date formatter for unknown values coming from API
+	function formatDate(value: unknown): string {
+		if (value === null || value === undefined || value === '') {
+			return '-';
+		}
+		return formatDateTime(value as any, undefined, undefined, '-');
+	}
+
+	// Toggle user blocked status - always show confirmation modal (like Multibutton)
+	async function toggleUserBlocked(user: User) {
+		if (!user._id) {
+			return;
+		}
+
+		// System protection: admins cannot be blocked
+		if (isAdmin(user)) {
+			toast.warning('System admins cannot be blocked.');
+			return;
+		}
+
+		// Prevent admins from blocking themselves
+		if (currentUser && user._id === currentUser._id) {
+			toast.warning('You cannot block your own account');
+			return;
+		}
+
+		const action = user.blocked ? 'unblock' : 'block';
+		const actionPastTense = user.blocked ? 'unblocked' : 'blocked';
+
+		// Always show confirmation modal (same logic as Multibutton) with enhanced styling using theme colors
+		const actionColor = user.blocked ? 'text-success-500' : 'text-error-500';
+		const actionWord = user.blocked ? 'Unblock' : 'Block';
+		const identifier = user.username || user.email || user._id;
+
+		const modalTitle = `Please Confirm User <span class="${actionColor} font-bold">${actionWord}</span>`;
+		const modalBody = user.blocked
+			? `Are you sure you want to <span class="text-success-500 font-semibold">unblock</span> user <span class="text-tertiary-500 font-medium">${identifier}</span>? This will allow them to access the system again.`
+			: `Are you sure you want to <span class="text-error-500 font-semibold">block</span> user <span class="text-tertiary-500 font-medium">${identifier}</span>? This will prevent them from accessing the system.`;
+
+		showConfirm({
+			title: modalTitle,
+			body: modalBody,
+			onConfirm: async () => {
+				await performBlockAction(user, action, actionPastTense);
+			}
+		});
+	}
+
+	async function performBlockAction(user: User, action: string, actionPastTense: string) {
+		if (!user._id) return;
+
+		try {
+			const response = await fetch('/api/user/batch', {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'X-CSRF-Token': page.data.csrfToken || ''
+				},
+				body: JSON.stringify({
+					userIds: [user._id],
+					action
+				})
+			});
+
+			if (!response.ok) {
+				const errText = await response.text();
+				throw new Error(errText || `Failed to ${action} user (Status: ${response.status})`);
+			}
+
+			const result = await response.json();
+
+			if (result.success) {
+				// Optimistic update on current smartTable page
+				smartTable.setRows(
+					smartTable.rows.map((item: Record<string, unknown>) =>
+						isUser(item as TableDataType) && (item as unknown as User)._id === user._id ? { ...item, blocked: !item.blocked } : item
+					) as TableDataType[]
+				);
+				toast.success(`User ${actionPastTense} successfully`);
+			} else {
+				throw new Error(result.message || `Failed to ${action} user`);
+			}
+		} catch (err) {
+			const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+			toast.error(`Failed to ${action} user: ${errorMessage}`);
+		}
+	}
+
+	// Toggle token blocked status - similar to user blocking
+	async function toggleTokenBlocked(token: Token) {
+		if (!token.token) {
+			return;
+		}
+
+		const action = token.blocked ? 'unblock' : 'block';
+		const actionPastTense = token.blocked ? 'unblocked' : 'blocked';
+
+		// Show confirmation modal with enhanced styling using theme colors
+		const actionColor = token.blocked ? 'text-success-500' : 'text-error-500';
+		const actionWord = token.blocked ? 'Unblock' : 'Block';
+		const identifier = token.email || token._id;
+
+		const modalTitle = `Please Confirm Token <span class="${actionColor} font-bold">${actionWord}</span>`;
+		const modalBody = token.blocked
+			? `Are you sure you want to <span class="text-success-500 font-semibold">unblock</span> token for <span class="text-tertiary-500 font-medium">${identifier}</span>? This will allow the token to be used again.`
+			: `Are you sure you want to <span class="text-error-500 font-semibold">block</span> token for <span class="text-tertiary-500 font-medium">${identifier}</span>? This will prevent the token from being used.`;
+
+		showConfirm({
+			title: modalTitle,
+			body: modalBody,
+			onConfirm: async () => {
+				await performTokenBlockAction(token, action, actionPastTense);
+			}
+		});
+	}
+
+	async function performTokenBlockAction(token: Token, action: string, actionPastTense: string) {
+		// Use the row _id — the list exposes the hashed token value, which batch's
+		// findToken cannot resolve (getTokenByValue re-hashes the input).
+		if (!token._id) return;
+
+		try {
+			const response = await fetch('/api/token/batch', {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'X-CSRF-Token': page.data.csrfToken || ''
+				},
+				body: JSON.stringify({
+					tokenIds: [token._id],
+					action
+				})
+			});
+
+			if (!response.ok) {
+				const errText = await response.text();
+				throw new Error(errText || `Failed to ${action} token (Status: ${response.status})`);
+			}
+
+			const result = await response.json();
+
+			if (result.success) {
+				smartTable.setRows(
+					smartTable.rows.map((item: Record<string, unknown>) =>
+						isToken(item as TableDataType) && (item as unknown as Token).token === token.token ? { ...item, blocked: !item.blocked } : item
+					) as TableDataType[]
+				);
+				toast.success(`Token ${actionPastTense} successfully`);
+			} else {
+				throw new Error(result.message || `Failed to ${action} token`);
+			}
+		} catch (err) {
+			const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+			toast.error(`Failed to ${action} token: ${errorMessage}`);
+		}
+	}
+
+	function modalTokenUser() {
+		modalState.trigger(
+			ModalEditToken as any,
+			{
+				title: multibuttontoken_modaltitle(),
+				body: multibuttontoken_modalbody(),
+				roles, // Pass available roles
+				user: currentUser // Pass current user context if needed
+			},
+			(result: any) => {
+				// Refresh data if token was created
+				if (result?.success) {
+					// Automatically switch to Token view so the user can copy the newly generated token
+					showUsertoken = true;
+					showUserList = false;
+					fetchData().catch(() => {});
+				}
+			}
+		);
+	}
+
+	// --- SERVER-SIDE PAGINATION via createSmartTable (API owns filter/sort/page) ---
+	const selectedRows = $derived(smartTable.getSelectedRows() as TableDataType[]);
+
+	function handleCheckboxChange() {
+		const allColumnsVisible = displayTableHeaders.every((header) => header.visible);
+		displayTableHeaders = displayTableHeaders.map((header) => ({
+			...header,
+			visible: !allColumnsVisible
+		}));
+		selectAllColumns = !allColumnsVisible;
+	}
+
+	function showView(view: string) {
+		if (view === 'users') { showUserList = true; showUsertoken = false; }
+		else { showUsertoken = true; showUserList = false; }
+	}
+</script>
+
+	<AdminCard
+		data-testid="user-admin-area"
+		class="flex flex-col border border-surface-500/30 bg-white shadow-sm backdrop-blur-md dark:border-surface-500/40 dark:bg-surface-900/50"
+	>
+		<!-- Header: Tabs + Invite button -->
+		<div class="flex items-center justify-between gap-3 px-4 pt-3">
+			<div class="flex border-b border-surface-500/30 dark:border-surface-500/40 grow" role="tablist" aria-label="User management views">
+				<button
+					type="button"
+					role="tab"
+					aria-selected={showUserList}
+					data-testid="admin-tab-users"
+					onclick={() => showView('users')}
+					class="flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 -mb-px transition-colors {showUserList ? 'border-tertiary-500 dark:border-primary-500 text-tertiary-500 dark:text-primary-500' : 'border-transparent text-surface-500 hover:text-surface-600 dark:hover:text-surface-400'}"
+				>
+					<iconify-icon icon="mdi:account-group" width={18}></iconify-icon>
+					Users
+					<Badge preset="tonal" color="secondary" size="sm" class="ms-1">{systemUserCount}</Badge>
+				</button>
+				<button
+					type="button"
+					role="tab"
+					aria-selected={showUsertoken}
+					data-testid="admin-tab-tokens"
+					onclick={() => showView('tokens')}
+					class="flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 -mb-px transition-colors {showUsertoken ? 'border-tertiary-500 dark:border-primary-500 text-tertiary-500 dark:text-primary-500' : 'border-transparent text-surface-500 hover:text-surface-600 dark:hover:text-surface-400'}"
+				>
+					<iconify-icon icon="material-symbols:key-outline" width={18}></iconify-icon>
+					Invitations
+				</button>
+			</div>
+			<Button
+				variant="surface" size="sm"
+				onclick={modalTokenUser}
+				aria-label={adminarea_emailtoken()}
+				data-testid="email-registration-token-btn"
+				leadingIcon="material-symbols:mail"
+			>
+				Invite User
+			</Button>
+		</div>
+
+		<!-- Toolbar -->
+		<div class={SMART_TABLE_TOOLBAR}>
+			<div class="order-3 flex items-center gap-2 sm:order-2">
+				<TableFilter bind:globalSearchValue bind:searchShow bind:filterShow bind:columnShow bind:density />
+				<SmartTableSavedViewsMenu
+					scope={viewsScope}
+					getSnapshot={getSavedViewSnapshot}
+					onApply={applySavedView}
+				/>
+				<SmartTableMetricsBadge source={showUserList ? 'UserManagement.list' : 'Tokens.list'} />
+			</div>
+
+			<div class="order-2 flex items-center justify-center sm:order-3">
+				<Multibutton
+					{selectedRows}
+					type={showUserList ? 'user' : 'token'}
+					totalUsers={showUserList ? systemUserCount : totalItems}
+					{currentUser}
+					onUpdate={handleBatchUpdate}
+				/>
+			</div>
+		</div>
+
+		{#if showUserList}
+			<!-- Facet Chips -->
+			<div class="flex flex-wrap items-center gap-1.5 px-3 py-1.5 text-xs">
+				<button
+					type="button"
+					onclick={() => selectFacet('all')}
+					class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-medium transition-colors {activeFacet === 'all' ? 'bg-primary-500 text-white' : 'bg-surface-500/10 text-surface-600 hover:bg-surface-500/20 dark:text-surface-400'}"
+				>
+					<span>All</span>
+					<span class="opacity-70">({systemUserCount})</span>
+				</button>
+				<button
+					type="button"
+					onclick={() => selectFacet('admin')}
+					class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-medium transition-colors {activeFacet === 'admin' ? 'bg-primary-500 text-white' : 'bg-surface-500/10 text-surface-600 hover:bg-surface-500/20 dark:text-surface-400'}"
+				>
+					<iconify-icon icon="mdi:shield-crown-outline" width="14" class="text-tertiary-500 dark:text-primary-400"></iconify-icon>
+					<span>Admins</span>
+				</button>
+				<button
+					type="button"
+					onclick={() => selectFacet('user')}
+					class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-medium transition-colors {activeFacet === 'user' ? 'bg-primary-500 text-white' : 'bg-surface-500/10 text-surface-600 hover:bg-surface-500/20 dark:text-surface-400'}"
+				>
+					<iconify-icon icon="mdi:account-outline" width="14"></iconify-icon>
+					<span>Users</span>
+				</button>
+				<button
+					type="button"
+					onclick={() => selectFacet('active')}
+					class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-medium transition-colors {activeFacet === 'active' ? 'bg-primary-500 text-white' : 'bg-surface-500/10 text-surface-600 hover:bg-surface-500/20 dark:text-surface-400'}"
+				>
+					<span class="size-1.5 rounded-full bg-success-500"></span>
+					<span>Active</span>
+				</button>
+				<button
+					type="button"
+					onclick={() => selectFacet('blocked')}
+					class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-medium transition-colors {activeFacet === 'blocked' ? 'bg-primary-500 text-white' : 'bg-surface-500/10 text-surface-600 hover:bg-surface-500/20 dark:text-surface-400'}"
+				>
+					<span class="size-1.5 rounded-full bg-error-500"></span>
+					<span>Blocked</span>
+				</button>
+			</div>
+		{/if}
+
+		{#if columnShow && (tableData?.length || filterShow)}
+			<div class={SMART_TABLE_COLUMN_MANAGER}>
+				<div class="my-2 flex w-full items-center justify-center gap-1">
+					<label class="me-2">
+						<input type="checkbox" bind:checked={selectAllColumns} onclick={handleCheckboxChange} aria-label="Input" />
+						{entrylist_all()}
+					</label>
+
+					{#each displayTableHeaders as header (header.id)}
+						<Button
+							variant={header.visible ? 'secondary' : 'ghost'}
+							size="sm"
+							type="button"
+							onclick={() => {
+								displayTableHeaders = displayTableHeaders.map((h: TableHeader) =>
+									h.id === header.id ? { ...h, visible: !h.visible } : h
+								);
+								selectAllColumns = displayTableHeaders.every((h: TableHeader) => h.visible);
+							}}
+							class="text-xs"
+						>
+							{#if header.visible}
+								<iconify-icon icon="fa:check" width={12} class="me-1"></iconify-icon>
+							{/if}
+							{header.label}
+						</Button>
+					{/each}
+				</div>
+			</div>
+		{/if}
+
+		<SmartTableShell
+			empty={!tableData || tableData.length === 0}
+			emptyTitle={showUserList ? adminarea_nouser() : adminarea_notoken()}
+			emptyDescription="Adjust search or create a new record."
+			emptyIcon={showUserList ? 'mdi:account-off-outline' : 'mdi:key-off-outline'}
+			showPagination={!!(tableData && tableData.length > 0)}
+			currentPage={currentPage}
+			rowsPerPage={rowsPerPage}
+			pagesCount={pagesCount}
+			totalItems={totalItems}
+			onUpdatePage={(page: number) => smartTable.setPage(page)}
+			onUpdateRowsPerPage={(rows: number) => smartTable.setPageSize(rows)}
+		>
+				<table class="{SMART_TABLE} {density === 'compact' ? 'table-compact' : density === 'comfortable' ? 'table-comfortable' : ''}">
+					<thead class={SMART_TABLE_THEAD}>
+						<tr
+							class="border-b border-surface-500/30 dark:border-surface-50 font-semibold tracking-wide uppercase text-xs"
+						>
+							<TableIcons
+								cellClass="w-10 text-center border-e border-surface-500/30 dark:border-surface-600 {pinCellClass('start')}"
+								checked={selectAll.value}
+								onCheck={(checked: boolean) => {
+									selectAll.value = checked;
+								}}
+							/>
+
+							{#each displayTableHeaders.filter((header) => header.visible) as header (header.id)}
+								<th
+									class="{SMART_TABLE_TH} cursor-pointer hover:bg-surface-500/10 dark:hover:bg-surface-800/50"
+									aria-sort={sorting.sortedBy === header.key
+										? sorting.isSorted === 1
+											? 'ascending'
+											: 'descending'
+										: 'none'}
+									onclick={() => smartTable.setSort(String(header.key))}
+								>
+									<div class="flex items-center justify-center gap-1">
+										{header.label}
+										{#if sorting.sortedBy === header.key && sorting.isSorted !== 0}
+											<iconify-icon
+												icon="material-symbols:arrow-upward-rounded"
+												width={18}
+												class="origin-center duration-300 ease-in-out {sorting.isSorted === -1 ? 'rotate-180' : ''}"
+											></iconify-icon>
+										{/if}
+									</div>
+								</th>
+							{/each}
+						</tr>
+					</thead>
+
+					<tbody class="divide-y divide-surface-200/30 dark:divide-surface-700/30">
+						{#each tableData as row, index (getAdminRowId(row) || index)}
+							{@const rowId = getAdminRowId(row)}
+							{@const rowSelected = smartTable.isSelected(rowId)}
+							{const expiresVal: string | Date | null = isToken(row) ? row.expires : null}
+							{const isConsumed = isToken(row) && row.consumed}
+							{const isExpired = showUsertoken && expiresVal && new Date(expiresVal) < new Date()}
+							<tr
+								class="{isExpired || isConsumed
+									? 'bg-surface-500/10 opacity-60 dark:bg-surface-900/20'
+									: ''} {isExpired ? 'bg-error-500/10 dark:bg-error-900/10' : ''} {rowSelected
+									? SMART_TABLE_ROW_SELECTED
+									: showUsertoken
+										? `cursor-pointer ${SMART_TABLE_ROW_HOVER}`
+										: SMART_TABLE_ROW_HOVER}"
+								onclick={(event) => {
+									// Only handle click if it's on a token row and not on the checkbox
+									if (showUsertoken && !(event.target as HTMLElement)?.closest('td:first-child')) {
+										if (isToken(row)) editToken(row);
+									}
+								}}
+							>
+								<TableIcons
+									cellClass="{SMART_TABLE_TD} border-e {pinCellClass('start')}"
+									checked={rowSelected}
+									onCheck={() => {
+										if (rowId) smartTable.toggleSelect(rowId);
+									}}
+								/>
+								{#each displayTableHeaders.filter((header) => header.visible) as header (header.id)}
+									<td class={SMART_TABLE_TD}>
+										{#if header.key === 'blocked'}
+											{#if showUserList}
+												<button
+													type="button"
+													onclick={() => isUser(row) && toggleUserBlocked(row)}
+													aria-label={row.blocked ? 'Click to unblock user' : 'Click to block user'}
+													class="cursor-pointer"
+												>
+													<Badge preset="tonal" color={row.blocked ? 'error' : 'success'} size="sm">
+														{row.blocked ? 'Blocked' : 'Active'}
+													</Badge>
+												</button>
+											{:else}
+												<button
+													type="button"
+													onclick={(event: MouseEvent) => {
+														event.stopPropagation();
+														if (isToken(row)) toggleTokenBlocked(row);
+													}}
+													aria-label={row.blocked ? 'Click to unblock token' : 'Click to block token'}
+													class="cursor-pointer"
+												>
+													<Badge preset="tonal" color={row.blocked ? 'error' : 'success'} size="sm">
+														{row.blocked ? 'Blocked' : 'Active'}
+													</Badge>
+												</button>
+											{/if}
+										{:else if showUserList && header.key === 'avatar'}
+											<Avatar
+												src={currentUser && isUser(row) && row._id === currentUser._id
+													? normalizeAvatarUrl(currentUser.avatar ?? '/Default_User.svg')
+													: isUser(row) && header.key === 'avatar'
+														? normalizeAvatarUrl(row.avatar)
+														: '/Default_User.svg'}
+												initials="Usr"
+												size="size-10"
+												class="rounded-full border border-surface-500/30"
+											/>
+										{:else if header.key === 'role'}
+											<Role
+												value={isUser(row) && header.key === 'role' ? row.role : isToken(row) && header.key === 'role' ? (row.role ?? '') : ''}
+												{roles}
+											/>
+										{:else if header.key === '_id'}
+											<!-- User ID with clipboard functionality and active sessions modal -->
+											<div class="flex items-center justify-center gap-1.5">
+												<span class="font-mono text-sm">{isUser(row) ? row._id : isToken(row) ? row._id : '-'}</span>
+												<SystemTooltip title="Copy User ID to clipboard">
+													<Button
+														variant="ghost"
+														type="button"
+														aria-label="Copy User ID"
+														onclick={(event: MouseEvent) => {
+															event.stopPropagation();
+															const val = String(isUser(row) ? row._id : isToken(row) ? row._id : '');
+															navigator.clipboard
+																.writeText(val)
+																.then(() => {
+																	toast.success('User ID copied to clipboard');
+																})
+																.catch(() => {
+																	toast.error('Failed to copy');
+																});
+														}}
+													 class="p-0! min-w-0 preset-ghost">
+														<iconify-icon icon="oui:copy-clipboard" width={18}></iconify-icon>
+													</Button>
+												</SystemTooltip>
+												{#if showUserList && isUser(row)}
+													<SystemTooltip title="Manage Active Sessions">
+														<Button
+															variant="ghost"
+															type="button"
+															aria-label="Manage active sessions"
+															onclick={(event: MouseEvent) => {
+																event.stopPropagation();
+																openUserSessions(row);
+															}}
+															class="p-0! min-w-0 preset-ghost text-primary-500 hover:text-primary-600 dark:text-primary-400"
+														>
+															<iconify-icon icon="mdi:devices" width={18}></iconify-icon>
+														</Button>
+													</SystemTooltip>
+												{/if}
+											</div>
+										{:else if header.key === 'token'}
+											<!-- Token with clipboard functionality -->
+											<div class="flex items-center justify-center gap-2">
+												<span class="max-w-50 truncate font-mono text-sm">{isToken(row) && header.key === 'token' ? row.token : '-'}</span>
+												<SystemTooltip title="Copy Token to clipboard">
+													<Button
+														variant="ghost"
+														type="button"
+														aria-label="Copy Token"
+														onclick={(event: MouseEvent) => {
+															event.stopPropagation();
+															const val = isToken(row) && header.key === 'token' ? row.token : '';
+															navigator.clipboard
+																.writeText(val)
+																.then(() => {
+																	toast.success('Token copied to clipboard');
+																})
+																.catch(() => {
+																	toast.error('Failed to copy');
+																});
+														}}
+													 class="p-0! min-w-0 preset-ghost">
+														<iconify-icon icon="oui:copy-clipboard" width={18}></iconify-icon>
+													</Button>
+												</SystemTooltip>
+											</div>
+										{:else if ['createdAt', 'updatedAt', 'lastAccess'].includes(String(header.key))}
+											{formatDate(isUser(row) ? row[header.key as keyof User] : isToken(row) ? row[header.key as keyof Token] : undefined)}
+										{:else if header.key === 'expires'}
+											{#if isToken(row)}
+												{#if row.consumed}
+													<span class="font-bold text-tertiary-500 dark:text-primary-500 flex items-center justify-center gap-1">
+														<iconify-icon icon="mdi:check-circle" width={18}></iconify-icon>
+														{adminarea_consumed()}
+													</span>
+												{:else if row.expires}
+													{const isTokenExpired = checkTokenExpired(row)}
+													{const remainingTime = getRemainingTime(row.expires)}
+													<span class={isTokenExpired ? 'font-semibold text-error-500' : ''}>
+														{remainingTime}
+														{#if isTokenExpired}
+															<iconify-icon icon="material-symbols:warning" width={24} class="ms-1 text-error-500"></iconify-icon>
+														{/if}
+													</span>
+												{:else}
+													-
+												{/if}
+											{:else}
+												-
+											{/if}
+										{:else}
+											{getDisplayValue(row, header)}
+										{/if}
+									</td>
+								{/each}
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+		</SmartTableShell>
+	</AdminCard>

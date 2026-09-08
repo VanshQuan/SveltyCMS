@@ -1,0 +1,75 @@
+<!--
+ @file src\components\system\slot.svelte
+ @component Generic Slot renderer for Injection Zones
+-->
+
+<script lang="ts">
+	import '@src/plugins/index';
+	import { slotRegistry } from '@src/plugins/slot-registry.svelte.ts';
+	import type { InjectionZone } from '@src/plugins/types';
+	import { memoizeLazyLoader, type LazyComponent } from '@utils/lazy-component-loader';
+
+	// We can reuse WidgetLoader or create a simple loader since types definition says component is a promise
+	// Actually, WidgetLoader is designed for Widgets with specific props.
+	// Let's create a simple internal loader here or use await block.
+
+	interface Props {
+		name: InjectionZone;
+		props?: Record<string, any>; // Context props passed to the slotted component
+		/** When true, omit block wrappers so slots participate in parent CSS grid/flex */
+		inline?: boolean;
+	}
+
+	const { name, props = {}, inline = false }: Props = $props();
+
+	// In a real implementation, this would be reactive to registry changes if we had a comprehensive store.
+	// For now, we fetch on mount/reactivity.
+
+	// We need to import slotRegistry in a way that works on client usage if it's isomorphic,
+	// but slotRegistry might be populated on client or server?
+	// Plugins usually register on startup. If this is client-side, we need to ensure registry is available.
+	// Assuming plugins register isomorphic slots.
+
+	// Memoized per-slot loaders — see admin-zone.svelte for the rationale
+	// (inline {#await slot.component()} remounts on every parent re-render).
+	const slotLoaders = new Map<string, () => Promise<LazyComponent>>();
+	function componentLoader(slot: { id: string; component: () => Promise<LazyComponent> }): Promise<LazyComponent> {
+		let loader = slotLoaders.get(slot.id);
+		if (!loader) {
+			loader = memoizeLazyLoader(slot.component);
+			slotLoaders.set(slot.id, loader);
+		}
+		return loader();
+	}
+
+	// Read `version` so late registrations (plugin index in lazy route nodes,
+	// onMount registrations) re-run this derived — otherwise slots registered
+	// after first render never appear.
+	const slots = $derived.by(() => {
+		void slotRegistry.version;
+		return slotRegistry
+			.getSlots(name)
+			.filter((slot) => !slot.condition || slot.condition(props));
+	});
+</script>
+
+<div class={inline ? 'contents' : 'slot-zone'} data-zone={name}>
+	{#each slots as slot (slot.id)}
+		<div class={inline ? 'contents' : 'slot-item mb-4 last:mb-0'}>
+			{#await componentLoader(slot)}
+				<div class="h-20 w-full animate-pulse rounded bg-surface-500/10 dark:bg-surface-800"></div>
+			{:then Component}
+				{#if "default" in Component}
+					<Component.default {...props} {...slot.props} />
+				{:else}
+					<Component {...props} {...slot.props} />
+				{/if}
+			{:catch error}
+				<div class="rounded border border-error-500/50 bg-error-500/10 p-2 text-xs text-error-600 dark:bg-error-900/10 dark:text-error-500">
+					<strong>Slot Error ({slot.id}):</strong>
+					{error.message}
+				</div>
+			{/await}
+		</div>
+	{/each}
+</div>

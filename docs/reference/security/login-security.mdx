@@ -1,0 +1,169 @@
+---
+path: "docs/reference/security/login-security.mdx"
+title: "Login Security"
+description: "Implementation details for IP resolution, rate limiter secrets, OAuth HMAC validation, session tracking, accessibility fixes, and new auth methods (API Keys, Magic Links, Guest Auth, WebAuthn)."
+order: 4
+icon: "mdi:shield-check"
+author: "SveltyCMS Team"
+created: "2026-05-24"
+updated: "2026-08-21"
+tags:
+  - "security"
+  - "authentication"
+  - "rate-limiting"
+  - "oauth"
+  - "accessibility"
+---
+
+# Login Security
+
+This document details how we have implemented the best A++ security for the SveltyCMS authentication flow, along with essential accessibility improvements.
+
+## Security Improvements
+
+### 1. Audit Log & Rate Limiting IP Resolution
+
+Client IP address resolution is centralized through `getClientIp(event)` (`src/utils/security/client-ip.ts`) across all authentication, rate limiting, and audit logging flows. Rather than trusting raw `X-Forwarded-For` request headers directly (which is vulnerable to client-side IP spoofing), `getClientIp` enforces reverse-proxy boundary verification. Scanner rule `ip-spoofing-x-forwarded-for` in `scripts/scan-security-risk.ts` enforces this across the entire server codebase. Additionally, session records capture the resolved IP address and User-Agent at creation time for Active Device tracking.
+
+### 2. OAuth State HMAC Verification
+
+The Google OAuth flow (`google-auth.ts`) has been hardened using HMAC-SHA256 signatures for the `state` parameter.
+
+- **Generation**: The state payload is signed during `generateGoogleAuthUrl`.
+- **Verification**: The signature is verified on the callback (`signInOAuth`) using `verifyOAuthState`.
+  This prevents OAuth state manipulation and ensures the integrity of the invitation token during the OAuth flow.
+
+### 3. Separate Rate Limiter Secret
+
+The `RateLimiter` cookie signature has been decoupled from the primary `JWT_SECRET_KEY`. It now uses `RATE_LIMIT_SECRET` with a secure fallback (`JWT_SECRET_KEY + "-ratelimit"`). This compartmentalization prevents a compromised rate-limit secret from jeopardizing the entire authentication system.
+
+### 4. RFC 6585 Compliance (Retry-After Header)
+
+All endpoints utilizing the `RateLimiter` now correctly inject the `Retry-After: 60` HTTP header upon returning a `429 Too Many Requests` status, ensuring compliance with RFC 6585 and properly signaling clients to back off.
+
+### 5. Demo Tenant Capacity Limit
+
+To prevent resource exhaustion during demo environments, a strict cap of 100 users per tenant is enforced during the `signUp` action. This leverages the `getUserCount` method from the authentication adapter to provide an early exit if the limit is reached.
+
+### 6. Account Lockout & Brute-Force Prevention
+
+Accounts are locked for 15 minutes after 5 consecutive failed login attempts. This is enforced in `AuthNamespace.login()` (`src/services/sdk/namespaces/auth-namespace.ts`) which gates the REST and GraphQL login paths, and redundantly in `Auth.authenticate()` (`src/databases/auth/index.ts`) for direct database authentication calls.
+
+- **Lockout check**: Before password verification, `lockoutUntil` is checked. Active lockouts return 403 with remaining time.
+- **Failed attempt tracking**: Each failed attempt increments `failedAttempts`. At 5 failures, `lockoutUntil` is set to `now + 15 minutes`.
+- **Auto-reset**: Lockout state is cleared on successful login or when the lockout expires.
+- **Consistent error messages & timing-safe normalization (CWE-208)**: Both "user not found" and "wrong password" return identical `"Invalid credentials"`. Furthermore, when a user is not found, `AuthNamespace.login` executes `verifyDummyPassword` against a static Argon2id hash (`DUMMY_ARGON2_HASH`), ensuring identical response latency (~50–80ms) and preventing email enumeration via timing side-channels.
+
+### 7. Password-Reset Token Expiry (Diagnosable)
+
+`Auth.consumeToken()` / adapter `consumeToken()` **refuse expired tokens** (`expires > now` on claim). Failures return structured codes for the login UI:
+
+| Code                     | UI toast                                          |
+| :----------------------- | :------------------------------------------------ |
+| `TOKEN_EXPIRED`          | “This reset link has expired. Request a new one…” |
+| `TOKEN_ALREADY_CONSUMED` | “This reset link was already used…”               |
+| `TOKEN_NOT_FOUND`        | Generic invalid link                              |
+
+- **SQL**: `relational-auth.ts` — atomic update with `gt(expires, now)`, then diagnose.
+- **Mongo**: claim filter includes `expires: { $gt: new Date() }`.
+- **UI**: `sign-in.svelte` `handleResetSubmit` maps `result.code` to toasts (no false success toast).
+- **Remote**: `auth.remote.ts` `resetPWInternal` forwards `code` to the client.
+- **E2E**: `tests/e2e/routes/login/extended-auth.spec.ts` — `seed-expired-password-reset` testing action seeds a past-expiry `password_reset` token; submit asserts **Link expired** toast (no soft-skip).
+
+## Accessibility Fixes (WCAG 2.2 AA)
+
+To ensure the authentication pages are accessible to all users, the following fixes were implemented on `sign-in.svelte` and `sign-up.svelte`:
+
+- **A1**: Removed `role="button"` from the main `<section>` element.
+- **A2**: Added programmatic focus to the `#twofa-code` input field using `tick()` when Two-Factor Authentication is required (see [Authentication documentation](./authentication-system.mdx)).
+- **A5/P7**: Implemented `prefers-reduced-motion` CSS media queries to disable animations (e.g., the `.wiggle` effect) for users who prefer reduced motion.
+
+- **A6**: Added skip links (`<a href="#signin-form" class="sr-only focus:not-sr-only">Skip to form</a>`) at the top of the authentication forms for keyboard navigation.
+- **A8**: Improved contrast for hint texts by changing `text-surface-500` to `text-surface-600 dark:text-surface-400`.
+- **A9**: Enhanced visual focus indicators by adding `:focus-visible` outline styles to the main section.
+- **A10**: Added `<svelte:head><meta name="robots" content="noindex, nofollow" /></svelte:head>` to `+page.svelte` to prevent search engines from indexing the login page.
+
+## Session & Device Tracking
+
+SveltyCMS captures device information at session creation for security auditing and the Active Devices UI.
+
+### Device Info Capture
+
+When a user logs in, the following data is captured and stored with the session record:
+
+- **User-Agent**: Full browser and OS information (e.g., `Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/...`)
+- **IP Address**: Resolved from `X-Forwarded-For` or `X-Real-IP` headers (proxy-aware)
+
+### Active Devices UI
+
+Users can view and manage their active sessions from **User Settings → Security** (`/user`):
+
+- **View**: Sessions grouped by device/browser (user-agent parsed into Mac / PC / phone / tablet with browser label), last activity time, and current-session indicator
+- **Revoke**: Per-device revoke (signs out that browser immediately) or "revoke all others" — cross-session revokes require re-authentication with your current password (5-min proof, see Session Validation Layers); the action purges the session from all cache layers (turbo, LRU, Redis, database)
+- **Auto-Cleanup**: Sessions not belonging to the password-changer are automatically invalidated on password change; blocked/deleted users are cut off immediately (see Session Validation Layers)
+
+### Session Device Policy
+
+By default each user holds **one active session per device** (`SESSION_DEVICE_POLICY = "single-per-device"`): a new login on a device invalidates that device's previous session (exact user-agent match), while other devices stay signed in. Re-login on the same device reuses the existing session where possible instead of churning new ones.
+
+The policy is enterprise-configurable via **System Settings → Security → Session Device Policy** (seeded by default, editable per deployment):
+
+| Value                         | Behavior                                                                                                                               |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `single-per-device` (default) | One session per user per device — new logins evict the previous session of that device (same user-agent); other devices are unaffected |
+| `single-per-user`             | One active session per user in total — any new login evicts all other sessions across all devices                                      |
+| `allow-multiple`              | No eviction — unlimited concurrent sessions (dedup/reuse disabled)                                                                     |
+
+**Implementation notes**:
+
+- Eviction is **best-effort and never blocks a login** (availability-first; failures are logged and the session proceeds).
+- An evicted session is purged from every layer: database row, in-memory/Redis session store, session cache, and turbo-auth context.
+- Rotated sessions and the freshly created session are never evicted.
+- **Device identity** is the exact user-agent string captured at login — two browsers on one machine count as different devices; the same browser on two machines counts as the same device class. IP is stored for auditing but deliberately **not** used for device matching (privacy + NAT friendliness).
+- Device/IP data lives only as long as the session row; expired rows are purged by the background `session-cleanup` queue task (every 5 minutes).
+- Logins without a user-agent (legacy clients) skip eviction entirely.
+
+### Session Validation Layers & Lifecycle
+
+Session validation is a **4-layer pipeline** (fastest first):
+
+1. **Turbo auth context** (in-memory, 60s absolute TTL) — GET/HEAD/OPTIONS fast path; skips all validation below; never slides on access (anti timing-attack).
+2. **Session cache** (in-memory LRU, 10k entries) — validated sessions with a 24h trust window. Warm hits are **0 DB round-trips**.
+3. **Distributed cache** (Redis `session:{tenant}:{id}`) + in-memory/Redis session store — cross-node fallback.
+4. **Database** — cold path, **single-flight coalesced** (concurrent cold requests await one validation instead of racing). All four adapters implement `auth.validateSession` as a **single JOIN** (`auth_sessions` ⋈ `auth_users`). On success the user is reused; on definitive miss the session is invalid; on transient failure the cookie is kept. The two-step `getSessionTokenData` + `getUserById` path is only used when `validateSession` is absent (unit-test mocks). Production adapters never fall through to those extra round-trips.
+
+Lifecycle semantics:
+
+- **Definitive invalidation** (expired, revoked, user deleted, session row gone) → cookie deleted immediately.
+- **Transient failures** (DB blip, in-flight coalesce) → request proceeds unauthenticated but the **cookie is kept**; the next request retries. A momentary failure never logs the user out.
+- **Blocked users** are cut off immediately: `block`/`unblock`/`delete` purges every session layer for the affected users (LRU cache, turbo, session store, Redis) and the DB re-validation path enforces the `blocked` flag. Deleted users are likewise cut off at validation time.
+- **Session lifetime** (`SESSION_TTL_HOURS`, default 24h, configurable in System Settings → Security) is applied at login **and** session rotation — rotation never extends the session beyond the configured policy.
+- **Idle timeout** (`SESSION_IDLE_HOURS`, default 0 = disabled) signs the session out after N hours without any request. It rides entirely on the session-cache LRU timestamps (sliding on every authenticated request, enforced on warm hits and distributed entries) — **zero extra queries or writes**. After a restart the clock restarts from the first validated request; the absolute lifetime still bounds the session.
+- **Re-authentication for session management** (Laravel-style): revoking any _other_ session (device revoke, "sign out all others") requires the current password. `POST /api/user/sessions/reauth` verifies it and returns a **stateless HMAC proof** (5 minutes, bound to the current session, `JWT_SECRET_KEY`-signed, constant-time verified). Ending the current session (logout) needs no proof. A stolen session therefore cannot revoke the real user's other devices.
+- **Admin session console** (API): `GET /api/user/sessions?admin=1&userId=X` lists another user's active sessions (admins only); `DELETE /api/user/sessions/:id?admin=1` revokes without a re-auth proof. UI is planned (Access Management).
+- **Negative Bloom cache** short-circuits repeat lookups of revoked/expired sessions (~2392x speedup on repeated misses); the 60s refresh cooldown prevents DB stampedes.
+- **Credential-free session snapshots**: session caches and the in-memory/Redis session store never retain credential material (`password` hash, `totpSecret`, `backupCodes`, `resetToken`, `googleRefreshToken`, `twoFactorTrustedDevices`). The stripping happens at every cache/store write boundary (hook + store `set()`), so `locals.user` exposes identity, role, and permissions only. Password-verifying endpoints (`verify-password`, 2FA disable, session re-auth) always fetch a fresh user from the DB before comparing hashes — the snapshot never doubles as a credential oracle.
+- **Session context anomaly (log-only)**: on the DB validation path, the stored session IP / user-agent is compared against the current request; a drift (e.g. stolen cookie used from another network) is logged once per session per hour (`[Auth] Session context change`) with **no action taken** — no lockout, no logout, per OWASP session-management guidance. Logs feed monitoring/alerting without false-positive lockouts on rotating NATs.
+- **Max sessions per user** (`SESSION_MAX_PER_USER`, default 0 = unlimited): when the cap is exceeded at login, the least recently active session is evicted across all layers (Keycloak-style). Complements the device policy — recommended together with `allow-multiple`.
+
+### API Endpoints
+
+- `GET /api/user/sessions` — List all active sessions for the authenticated user
+- `DELETE /api/user/sessions/:sessionId` — Revoke a specific session across all cache layers
+
+## Auth Methods
+
+The SveltyCMS auth surface has been expanded with 4 additional authentication methods. See the [Authentication System Architecture](./authentication-system.mdx) for full details and security considerations:
+
+- **API Keys** (`sck_*`): Machine-to-machine bearer tokens with SHA-256 hashed storage, scoped permissions, admin REST API, and instant cache invalidation on revoke.
+- **Magic Links**: Passwordless email login via single-use tokens with 15-min TTL, TOCTOU-safe consumption, and anti-enumeration responses.
+- **Guest Auth**: Ephemeral `ANONYMOUS_USER` on public routes with read-only `guest` role — stateless, no session created.
+- **WebAuthn/Passkeys** (~75%): Biometric login via platform authenticators — challenge/response ceremony complete, COSE→JWK attestation, CBOR parsing. Settings-page UI pending.
+
+---
+
+## Related
+
+- [Security Overview](./index.mdx)
+- [API Security & Token Hardening](./api-security.mdx)
+- [Architecture Overview](../index.mdx)

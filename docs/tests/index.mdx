@@ -1,739 +1,487 @@
 ---
-path: 'docs/tests/index.mdx'
-title: 'Testing Documentation'
-description: 'Complete testing guide for SveltyCMS including test status, API test coverage, and automated testing workflows.'
+path: "docs/tests/index.mdx"
+title: "Testing Documentation"
+description: "Complete testing guide for SveltyCMS including Unit tests (Vitest/Bun), Playwright E2E tests, GitHub Actions automation, and local testing workflows."
 order: 1
-icon: 'mdi:test-tube'
-author: 'admin'
-created: '2025-11-08'
-updated: '2025-11-08'
+icon: "mdi:test-tube"
+author: "SveltyCMS Team"
+created: "2025-09-28"
+updated: "2026-08-06"
 tags:
-  - 'testing'
-  - 'documentation'
-  - 'quality-assurance'
-  - 'ci-cd'
+  - "testing"
+  - "documentation"
+  - "quality-assurance"
+  - "ci-cd"
+  - "vitest"
+  - "bun"
+  - "playwright"
+  - "lane-router"
 ---
 
 # SveltyCMS Testing Documentation
 
-Comprehensive testing documentation for SveltyCMS covering unit tests, integration tests, E2E tests, and CI/CD workflows.
+> [!NOTE] Competitive comparisons based on publicly available documentation as of June 2026. Performance data self-measured via `bun test tests/benchmarks/`.
 
-## Overview
+**Last Updated:** August 6, 2026  
+**Source of Truth:** `.githooks/*` + `package.json` + GitHub Actions on the current branch/PR  
+**Core Gates:** Pre-commit (unit + `risk:audit`) → pre-push (build 4 adapters + tenant + SQLite integration) → CI multi-DB + E2E  
+**Start here:** `bun run test:doctor` (prints the gate map and runs unit + SQLite integration)  
+**Primary Goal:** [100% three-layer completeness](./three-layer-completeness.mdx) (critical inventory, not vanity line %)  
+**Primary Safety Rule:** Local and CI tests must never use live credentials or production data  
+**Recent hot area:** Request Lane Router + response cache — see [Test Status](./test-status.mdx) and [performance-architecture](../reference/database/performance-architecture.mdx)
 
-SveltyCMS uses a multi-layered testing strategy to ensure code quality and reliability:
+## Layer ownership (where new work goes)
 
-- **🧪 Bun Tests** - Fast unit and integration tests
-- **🎭 Playwright Tests** - Comprehensive E2E browser testing
-- **🔄 CI/CD Automation** - Automated testing on every commit
-- **📊 Test Coverage** - Tracking and reporting
+| Concern                                                       | Unit               | Integration                                         | E2E                      |
+| :------------------------------------------------------------ | :----------------- | :-------------------------------------------------- | :----------------------- |
+| Pure helpers / eligibility (`page-utils`, count-cache keying) | ✅                 | —                                                   | —                        |
+| Lane classifier + response-cache keying                       | ✅                 | ✅ `request-lane-headers`                           | ✅ `hooks-lane-smoke`    |
+| Adapter contracts (`findPage`, count modes, DB result shapes) | mocks only         | ✅ `tests/integration/databases/*-contract.test.ts` | —                        |
+| Full HTTP middleware + API envelopes                          | dispatcher helpers | ✅ `tests/integration/api/`                         | golden journeys only     |
+| Browser UX / control-map routes                               | —                  | —                                                   | ✅ seed-first Playwright |
 
----
+> [!IMPORTANT]
+> Do **not** add Playwright specs for adapter-only APIs. Product APIs like `crud.findPage` / `count({ mode })` are covered by **unit + database integration contracts** until a real admin list control-map uses them — then one seed-backed E2E golden path is enough. See [Database tests — list/count mapping](./database-tests.mdx#three-layer-mapping-list--count-product-apis).
 
-## Why Bun for Testing SvelteCMS?
+> [!TIP]
+> Live dashboard: **[Test Status](./test-status.mdx)**. Architecture: **[ADR Testing 2026](./adr-testing-2026.mdx)** (includes A++ suite contract + residual golden closure).
 
-SvelteCMS is a **database-agnostic, headless CMS** built with SvelteKit. We chose Bun as our primary testing framework for several strategic reasons:
+> [!IMPORTANT]
+> Historical totals and pass rates drift quickly. Treat GitHub Actions as the only current status board for counts, pass rate, and branch health.
 
-### 🚀 Speed & Performance
+## Quick Links
 
-**Lightning-Fast Execution**
+- [Testing Overview & Strategy](./testing-strategy.mdx) 🚀
+- **[ADR: Testing 2026](./adr-testing-2026.mdx)** — pyramid, fixtures, soft-skip ban, testid policy (webhooks reference)
+- **[Three-Layer Completeness (100% Goal)](./three-layer-completeness.mdx)** 🎯
+- **[Headless-First Test Inventory](./headless-test-inventory.mdx)** 🧠 — P0/P1 tiers, session→page, import-boundary
+- [Contract Tests](./testing-strategy.mdx#1-contract-tests-universal-adapter-verification) 🔗
+- [Smart Orchestrator](./testing-strategy.mdx#smart-test-orchestrator) 🧠
+- [Master Performance Leaderboard](../project/benchmarks/index.mdx) 🏆
+- [Audit (Analysis)](../project/benchmarks/index.mdx)
+- [Memory Stability Audit](../project/benchmarks/benchmark_sqlite.mdx#memGrowth) 🚀
+- [Black-Box Testing Architecture](./black-box-testing.mdx)
+- **[E2E Architecture & Flow](./e2e-architecture.mdx)** 🏗️
+- **[E2E Troubleshooting Guide](./e2e-troubleshooting.mdx)** 🚀
+- **[Git Workflow & Quality Gate](./git-workflow.mdx)**
+- **[Security Testing](./security-testing.mdx)** (Encryption, Auth, Fail-Closed API)
+- **[Benchmark Collection Isolation](./benchmark-isolation.mdx)** 🛡️
+- **[Test Status (dashboard)](./test-status.mdx)** — live health, hot areas, open gaps, commands
+- [API Coverage Report](./api-testing.mdx)
+- [API Unit Helpers](./api-unit-helpers.mdx) (shared `invokeApi` / mock events)
+- [Widget Coverage](./widget-test-coverage.mdx)
 
-- **Up to 100x faster** than traditional Node.js test runners (Jest, Mocha)
-- Tests run in milliseconds, not seconds
-- Our 76-test utility suite completes in **~1.5 seconds**
-- Full API test suite (460+ tests) completes in **~15-20 seconds**
-- Instant feedback during development with watch mode
+### Route-Specific E2E Specs
 
-**Why Speed Matters for a Headless CMS:**
+- [Setup Wizard E2E Tests](./routes/setup.mdx) 🧙‍♂️
+- [Authentication E2E Tests](./routes/login.mdx) 🔑
+- [User Profile & Management E2E Tests](./routes/user.mdx) 👤
+- [Dashboard Tests (widget-agnostic)](./routes/dashboard.mdx) 📊
+- [Media Gallery Tests](./routes/mediagallery.mdx) 🖼️
+- [Access Management Tests](./routes/access-management.mdx) 🛡️
+- [System Settings Tests](./routes/system-settings.mdx) ⚙️
+- [Collection Builder E2E Tests](./routes/collection-builder.mdx) 🛠️
+- [System Config E2E Tests](./routes/system.mdx) ⚙️
 
-- Rapid iteration on API endpoints and business logic
-- Quick validation of database operations across multiple adapters
-- Immediate feedback when testing widget validation and security
-- Faster CI/CD pipelines = faster releases
-
-### 🎯 Perfect Match for SvelteCMS Architecture
-
-**Database Agnostic Testing**
-
-- SvelteCMS supports MongoDB, PostgreSQL, MySQL, and more
-- Bun's speed allows us to run tests against **multiple database adapters** without painful wait times
-- Quick switching between database backends during development
-- Comprehensive contract testing for database interface
-
-**Headless CMS Requirements**
-
-- REST API testing (460+ endpoint tests)
-- GraphQL API validation
-- Widget system testing (security, validation, rendering)
-- Multi-tenant isolation testing
-- Cache layer verification (Redis operations)
-- Authentication & authorization flows
-
-**Native TypeScript Support**
-
-- Zero configuration needed - Bun runs `.ts` files directly
-- No transpilation overhead
-- Perfect for SvelteKit's TypeScript-first approach
-- Type-safe test code matches production code
-
-### ⚡ Built-in Features
-
-**No Configuration Needed**
-
-```typescript
-// Just import and go - no jest.config.js, no babel setup
-import { describe, it, expect } from 'bun:test';
-```
-
-**Modern JavaScript/TypeScript**
-
-- Native ES modules support
-- Top-level await
-- Import maps and path aliases work out of the box
-- Matches SvelteKit's modern JavaScript approach
-
-**Built-in Mocking**
-
-- Simple, powerful mocking without additional libraries
-- Mock fetch, modules, timers
-- Perfect for testing API endpoints and external services
-
-### 🔧 Agnostic Architecture Benefits
-
-**Testing Multiple Implementations**
-
-```typescript
-// Same test suite runs against all database adapters
-describe('Database Interface', () => {
-	testDatabaseContract(mongoAdapter);
-	testDatabaseContract(postgresAdapter);
-	testDatabaseContract(mysqlAdapter);
-});
-```
-
-**API-First Testing**
-
-- Test REST endpoints independently of frontend
-- Validate GraphQL schema and resolvers
-- Ensure consistent behavior across all API versions
-- Test webhook integrations and SSE streams
-
-**Widget System Validation**
-
-- Security testing (XSS prevention, HTML sanitization)
-- Schema validation (Valibot/Zod integration)
-- Dependency checking
-- Rendering logic verification
-
-### 📊 Real Performance Comparison
-
-| Test Runner | 76 Utility Tests | 460+ API Tests | Full Suite |
-| ----------- | ---------------- | -------------- | ---------- |
-| **Bun**     | ~1.5s ✅         | ~20s ✅        | <5min ✅   |
-| Jest        | ~15s ❌          | ~3min ❌       | ~20min ❌  |
-| Vitest      | ~8s ⚠️           | ~90s ⚠️        | ~12min ⚠️  |
-
-### 🛡️ Security & Cryptography
-
-**Argon2id Password Hashing**
-
-- Bun's native crypto module fully supports Argon2id
-- Test quantum-resistant password hashing (125ms per hash)
-- Verify timing attack resistance
-- Ensure proper salt generation
-
-**AES-256-GCM Encryption**
-
-- Native crypto support for encryption testing
-- SHA-256 checksum verification
-- Secure token generation validation
-
-### 🌐 Multi-Tenant Testing
-
-**Isolation Verification**
-
-- Quickly test tenant data separation
-- Validate cache key prefixing
-- Ensure database query filtering
-- Test tenant-specific configurations
-
-**Performance at Scale**
-
-- Simulate multiple tenants
-- Test concurrent operations
-- Verify resource limits
-- Benchmark query performance
-
-### 💡 Developer Experience
-
-**Watch Mode**
+### Running Tests Locally
 
 ```bash
-bun test --watch tests/bun/api/
-# Instant re-runs on file changes
+# Single entrypoint: print gate map + unit + SQLite integration
+bun run test:doctor
+bun run test:doctor --list          # map only
+bun run test:doctor --unit-only     # skip integration
+
+# 1. White-box unit (Vitest 5)
+bun run test:unit
+bun run test:watch            # interactive TDD watch mode
+bun run test:ui               # Vitest 5 visual web UI with trace viewer
+bun run test:changed          # smart incremental testing on git changes
+bun run test:security         # focused hooks security suite
+bun run test:unit:coverage    # P0 gate coverage (outputs to .vitest/coverage)
+bun run check
+
+# 2. Black-box integration (SQLite; harness starts preview + private.test.ts)
+#    Prefers an existing build/; otherwise builds with COMPILE_ALL_ADAPTERS
+bun run test:integration
+# or without package build wrapper (if build/ already exists):
+bun test --timeout 300000 tests/integration/
+
+# 3. Playwright E2E — CI-parity (preview :4173)
+bun run test:e2e
+# Dev-server shortcut only (Vite :5173 — not CI-identical):
+bun run test:e2e:dev
+# Reuse existing build:
+bun run test:e2e:quick
+
+# 4. Smart runner — auto-detects suites from git diff
+bun run test:smart
+
+# Safety guard for generated test config
+bun run scripts/check-test-db-safety.ts
+
+# Single integration contract against the active test database
+bun test --timeout 300000 tests/integration/databases/contract.test.ts
+
+# Complete Enterprise Performance Matrix
+bun run scripts/benchmark-matrix/index.ts
+
+# Single benchmark
+bun test tests/benchmarks/api-latency.test.ts
 ```
 
-**Beautiful Output**
+> [!TIP]
+> SveltyCMS benchmarks are **Environment-Aware**. If you execute a benchmark file with `bun run`, the system will automatically inform you and reroute the execution through the **Bun Test Engine** to ensure accurate micro-latency measurements and proper cleanup of background services.
 
-- Clear, colorful test results
-- Failed test diffs are easy to read
-- Stack traces point to exact issues
-- Coverage reports are clean and actionable
+### Local Docker Database Setup
 
-**No Package Bloat**
-
-- Single binary includes test runner
-- No need for separate test dependencies
-- Reduced `node_modules` size
-- Faster CI/CD installs
-
-### 🔄 Headless CMS Specific Use Cases
-
-**Content Type Testing**
-
-```typescript
-// Test dynamic content type creation
-it('should create custom content type', async () => {
-	const schema = { title: 'string', body: 'richtext' };
-	const contentType = await createContentType(schema);
-	expect(contentType.id).toBeDefined();
-});
-```
-
-**API Endpoint Coverage**
-
-```typescript
-// Test all CRUD operations
-describe('Content API', () => {
-	it('should create entry', async () => {
-		/* ... */
-	});
-	it('should read entry', async () => {
-		/* ... */
-	});
-	it('should update entry', async () => {
-		/* ... */
-	});
-	it('should delete entry', async () => {
-		/* ... */
-	});
-	it('should list entries with pagination', async () => {
-		/* ... */
-	});
-});
-```
-
-**Widget Validation**
-
-```typescript
-// Test widget security and validation
-it('should prevent XSS in RichText widget', async () => {
-	const malicious = '<script>alert("xss")</script>';
-	const sanitized = await validateRichText(malicious);
-	expect(sanitized).not.toContain('<script>');
-});
-```
-
-### 📈 Continuous Integration Benefits
-
-**Faster Pipelines**
-
-- GitHub Actions workflows complete in minutes, not hours
-- Parallel test execution across multiple database adapters
-- Matrix testing (MongoDB, PostgreSQL, MySQL) runs simultaneously
-- Quick feedback on pull requests
-
-**Cost Efficiency**
-
-- Less CI/CD compute time = lower costs
-- Faster builds = more frequent deployments
-- Developer productivity increases
-
-### 🎯 The Bottom Line
-
-For SvelteCMS, a **database-agnostic, headless CMS**, Bun provides:
-
-✅ **Speed** - Test 460+ API endpoints in seconds  
-✅ **Simplicity** - Zero configuration TypeScript testing  
-✅ **Compatibility** - Native crypto, fetch, and modern APIs  
-✅ **Scalability** - Test multiple database adapters efficiently  
-✅ **Reliability** - Comprehensive test coverage without slowdown  
-✅ **Developer Joy** - Instant feedback, beautiful output, watch mode
-
-**Result:** We can maintain **86% API coverage (460+ tests)** and **100% utility coverage (76 tests)** while keeping our test suite fast enough to run on every commit.
-
----
-
-## Quick Start
-
-### Running Tests
+`tests/docker-compose.yml` is the canonical local database stack. Start only the profiles you need:
 
 ```bash
-# Run all unit tests (fast)
-bun test tests/bun
-
-# Run E2E tests
-bun x playwright test
-
-# Run all tests
-bun run test:all
+docker compose -f tests/docker-compose.yml --profile mongodb up -d
+docker compose -f tests/docker-compose.yml --profile postgresql up -d
+docker compose -f tests/docker-compose.yml --profile mariadb up -d
+docker compose -f tests/docker-compose.yml --profile redis up -d
 ```
 
-### Test Status
-
-Current test coverage: **77%+ pass rate** with **97+ passing tests**
-
-See [Test Status Report](./test-status.mdx) for detailed breakdown.
-
----
-
-## Documentation Index
-
-### 1. [Test Status Report](./test-status.mdx)
-
-**Purpose:** Current status of all test suites  
-**Updated:** November 8, 2025
-
-**Contains:**
-
-- Test pass/fail statistics
-- Category-wise coverage
-- Known issues and fixes
-- Action items and priorities
-- Recent improvements
-
-**Quick Stats:**
-
-- ✅ 97+ passing tests
-- 📁 17 test files
-- ⚡ ~25s execution time
-- 🎯 150+ assertions
-
----
-
-### 2. [User API Tests](./user-api-tests.mdx)
-
-**Purpose:** Complete documentation for user API integration tests  
-**Updated:** November 8, 2025
-
-**Contains:**
-
-- Full endpoint coverage (8/8 endpoints)
-- 47 comprehensive tests
-- Test suite descriptions
-- Helper function documentation
-- Security testing details
-- Troubleshooting guide
-
-**Test Coverage:**
-
-- ✅ User creation & authentication
-- ✅ Profile updates & permissions
-- ✅ Avatar management (upload/delete)
-- ✅ User invitations (email tokens)
-- ✅ Error handling & edge cases
-- ✅ Session management
-- ✅ API availability checks
-
----
-
-### 3. [Database & Authentication Testing](./database-tests.mdx)
-
-**Purpose:** Comprehensive guide for database layer and authentication system testing  
-**Updated:** November 8, 2025
-
-**Contains:**
-
-- Database interface contract tests (50+ tests)
-- MongoDB adapter implementation tests (40+ tests)
-- Authentication system tests (50+ tests)
-- Test infrastructure setup guide
-- Multi-tenant testing strategies
-- Security testing best practices
-
-**Test Coverage:**
-
-- ✅ Database interface contract validation
-- ✅ MongoDB-specific features
-- ✅ Quantum-resistant password hashing (Argon2id)
-- ✅ Session management & rotation
-- ✅ Token generation & validation
-- ✅ Role-based permissions
-- ✅ Two-factor authentication (2FA)
-- ✅ Multi-tenant isolation
-
-**Status:** 📝 Scaffolded (140+ test cases awaiting database setup)
-
----
-
-### 4. [Git Workflow & Testing](./git-workflow.mdx)
-
-**Purpose:** Git branching strategy and automated testing workflows  
-**Updated:** November 8, 2025
-
-**Contains:**
-
-- Branching strategy (main/next)
-- Commit message conventions
-- GitHub Actions workflows
-- Automated testing process
-- Release process
-- Development workflow
-- Best practices
-
-**Key Topics:**
-
-- 🌿 Branch protection rules
-- 📝 Conventional commits
-- 🤖 CI/CD automation
-- 🚀 Semantic versioning
-- ✅ Test gating for releases
-
----
-
-## Testing Architecture
-
-### Test Layers
-
-```
-┌─────────────────────────────────────────┐
-│         E2E Tests (Playwright)          │
-│  User flows, UI interactions, browser   │
-│         testing across devices          │
-├─────────────────────────────────────────┤
-│    Integration Tests (Bun + Server)     │
-│   API endpoints, database operations,   │
-│        service integration tests        │
-├─────────────────────────────────────────┤
-│       Unit Tests (Bun - Fast!)          │
-│  Business logic, utilities, services,   │
-│     widgets, security, validation       │
-└─────────────────────────────────────────┘
-```
-
-### Test Frameworks
-
-**Bun Test v1.3.1**
-
-- Lightning-fast JavaScript test runner
-- Built-in TypeScript support
-- Watch mode for development
-- Coverage reporting
-
-**Playwright**
-
-- Cross-browser testing (Chromium, Firefox, WebKit)
-- Visual regression testing
-- Network interception
-- Device emulation
-
----
-
-## Test Categories
-
-### ✅ Fully Tested (100% Coverage)
-
-1. **Security Response Service** (8 tests)
-   - XSS detection and prevention
-   - HTML sanitization
-   - Script tag filtering
-   - Malformed input handling
-
-2. **Widget Validation** (8 tests)
-   - RichText widget security
-   - Form validation
-   - Required field checking
-   - Empty content detection
-
-3. **Cache System** (17 tests)
-   - Redis operations
-   - Pattern matching
-   - Multi-tenant isolation
-   - Performance testing
-
-4. **UI Components** (5 tests)
-   - Store management
-   - State handling
-   - Screen responsiveness
-
-5. **Content Utilities** (6 tests)
-   - ID normalization
-   - Object handling
-   - Type conversion
-
-6. **User API** (47 tests)
-   - Complete endpoint coverage
-   - Authentication flows
-   - Avatar management
-   - Error handling
-
-### ⚠️ Partially Tested
-
-7. **Collection Builder** (4/7 tests - 60%)
-   - Widget filtering ✅
-   - Widget search ✅
-   - Schema access ✅
-   - Widget activation ✅
-   - Field instances ❌
-   - Complete workflows ❌
-   - Configuration validation ❌
-
-### ❌ Needs Implementation
-
-8. **Other API Endpoints** (0/4 tests)
-   - System API
-   - Media API
-   - Token API
-   - Collections API
-
----
-
-## Test Infrastructure
-
-### File Structure
-
-```
-tests/
-├── bun/                          # Unit & integration tests
-│   ├── api/                      # API endpoint tests
-│   │   ├── user.test.ts         # User API (47 tests) ✅
-│   │   ├── system.test.ts       # System API ❌
-│   │   ├── media.test.ts        # Media API ❌
-│   │   ├── token.test.ts        # Token API ❌
-│   │   └── collections.test.ts  # Collections API ❌
-│   │
-│   ├── services/                 # Service layer tests
-│   │   └── SecurityResponseService.test.ts ✅
-│   │
-│   ├── widgets/                  # Widget tests
-│   │   ├── richText.test.ts     # RichText widget ✅
-│   │   └── ...
-│   │
-│   ├── helpers/                  # Test utilities
-│   │   ├── testSetup.ts         # Fixtures & cleanup
-│   │   └── server.ts            # Server wait helper
-│   │
-│   └── mocks/                    # Environment mocks
-│       └── setup.ts             # Comprehensive mocks
-│
-└── playwright/                   # E2E tests
-    ├── auth/                     # Authentication flows
-    ├── collections/              # Collection management
-    └── ...
-```
-
-### Helper Utilities
-
-**`tests/bun/helpers/testSetup.ts`**
-
-- Test fixtures with role resolution
-- Database cleanup utilities
-- Environment initialization
-- First-user detection
-
-**`tests/bun/helpers/server.ts`**
-
-- Server availability checking
-- Timeout prevention
-- API base URL configuration
-
-**`tests/bun/mocks/setup.ts`**
-
-- Svelte 5 rune mocking
-- Widget factory mocking
-- i18n translation mocking
-- Setup wizard state mocking
-
----
-
-## CI/CD Integration
-
-### GitHub Actions Workflows
-
-**On every push to `next`:**
-
-- ✅ Run all Bun tests
-- ✅ Run Playwright E2E tests
-- ✅ Matrix testing (3 browsers × 2 modes)
-- ❌ No release created
-
-**On merge to `main`:**
-
-- ✅ Run complete test suite
-- ✅ Only release if tests pass
-- ✅ Semantic versioning
-- ✅ Changelog generation
-
-### Test Gating
-
-Releases are **blocked** if:
-
-- Any test fails
-- Coverage drops below threshold
-- Security vulnerabilities detected
-- Lint errors present
-
----
-
-## Best Practices
-
-### Writing Tests
-
-**✅ Good Test Structure:**
-
-```typescript
-describe('Feature Name', () => {
-	beforeEach(async () => {
-		await cleanupTestDatabase();
-	});
-
-	it('should handle expected behavior', async () => {
-		// Arrange
-		const input = {
-			/* test data */
-		};
-
-		// Act
-		const result = await functionUnderTest(input);
-
-		// Assert
-		expect(result).toBeDefined();
-		expect(result.success).toBe(true);
-	});
-
-	it('should reject invalid input', async () => {
-		const result = await functionUnderTest(null);
-		expect(result.success).toBe(false);
-	});
-});
-```
-
-**Key Principles:**
-
-- Test one thing per test
-- Use descriptive test names
-- Clean up after tests
-- Mock external dependencies
-- Test both success and failure cases
-
-### Test Coverage Goals
-
-- **Critical paths:** 100% coverage
-- **Business logic:** 90%+ coverage
-- **API endpoints:** 100% endpoint coverage
-- **Security features:** 100% coverage
-- **Utilities:** 80%+ coverage
-
----
-
-## Troubleshooting
-
-### Common Issues
-
-**1. Test Timeouts**
+| Profile      | Port    | Runner default credentials                                           |
+| :----------- | :------ | :------------------------------------------------------------------- |
+| `mongodb`    | `27017` | no auth (official image default)                                     |
+| `postgresql` | `5432`  | `DB_USER=postgres`, `DB_PASSWORD=postgres`, `DB_NAME=sveltycms_test` |
+| `mariadb`    | `3306`  | `DB_USER=root`, `DB_PASSWORD=mariadb`, `DB_NAME=sveltycms_test`      |
+| `redis`      | `6379`  | Used by benchmark `*-redis` variants                                 |
+
+Run DB-backed suites after the matching profile is healthy. Integration uses the **in-suite harness** (`tests/integration/harness.ts`) — set `DB_TYPE` (and credentials) then run Bun test:
 
 ```bash
-# Symptom: beforeEach/afterEach hook timed out
-
-# Solutions:
-- Ensure server is running (bun run dev)
-- Check database connection
-- Verify port availability
-- Use waitForServer() helper
+DB_TYPE=mongodb bun test --timeout 300000 tests/integration/
+DB_TYPE=postgresql bun test --timeout 300000 tests/integration/
+DB_TYPE=mariadb bun test --timeout 300000 tests/integration/
+bun run scripts/benchmark-matrix/index.ts --db=postgresql --no-build
 ```
 
-**2. Database Connection Errors**
+Stop profiles with:
 
 ```bash
-# Symptom: Authentication system not available
-
-# Solutions:
-- Start MongoDB service
-- Check .env configuration
-- Verify database credentials
-- Check multi-tenant settings
+docker compose -f tests/docker-compose.yml --profile mongodb down
+docker compose -f tests/docker-compose.yml --profile postgresql down
+docker compose -f tests/docker-compose.yml --profile mariadb down
+docker compose -f tests/docker-compose.yml --profile redis down
 ```
 
-**3. Module Not Found**
+### Files Used By Each Runner
+
+| Runner      | Main config/scripts                                                        | Test files                                          | Test-only state                                                                                                         |
+| :---------- | :------------------------------------------------------------------------- | :-------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------- |
+| Unit        | `vitest.config.ts`, `tests/unit/setup.ts`, `tests/unit/bun-preload.ts`     | `tests/unit/**/*.test.ts`                           | In-memory mocks and `$app` / `$env` aliases under `tests/unit/mocks/`                                                   |
+| Integration | `tests/integration/harness.ts`, `scripts/check-test-db-safety.ts`          | `tests/integration/**/*.test.ts`                    | `config/private.test.ts`, `tests/e2e/.auth/test-secret.txt`, `config/collections/test/…`, `.compiledCollections/test/…` |
+| E2E         | `playwright.config.ts`, `scripts/run-e2e.ts`, `tests/e2e/helpers/api.ts`   | `tests/e2e/**/*.spec.ts`, `tests/e2e/auth.setup.ts` | `config/private.test.ts`, `tests/e2e/.auth/`, temp SQLite DB names containing `e2e` or `test`                           |
+| Benchmarks  | `scripts/benchmark-matrix/`, `tests/benchmarks/modules/benchmark-utils.ts` | `tests/benchmarks/**/*.test.ts`                     | `bench_tmp_<db>_<pid>` databases, `tests/benchmarks/results/`, `.compiledCollections/test/<workspace>/`                 |
+
+### Live Config Safety Contract
+
+Local tests and benchmarks must not mutate a user's live CMS setup:
+
+- `config/private.ts` is never renamed, copied from, deleted, or used by local integration tests. The integration harness and Vite `TEST_MODE` alias `@config/private` to `config/private.test.ts`.
+- `config/private.test.ts` must contain an isolated DB name. `src/utils/test-db-safety.ts` allows names containing `test`, `bench`, `e2e`, or ending in `_functional`; `scripts/check-test-db-safety.ts` blocks unsafe files.
+- `config/collections/` root and `.compiledCollections/` root are user-owned. Test fixtures go under `config/collections/test/`, tenant-specific test paths such as `config/test-setup-presets/collections/`, or `.compiledCollections/test/<workspace>/`.
+- `bun run test:doctor` / hooks / CI use isolated test config and DBs only — they must never back up/replace or connect through live `config/private.ts` (see `private-config-policy.ts`). CI may write an ephemeral `private.ts` on the runner only.
+
+### Tiered Local Testing
+
+SveltyCMS enforces a **three-tier** local testing strategy. Source of truth: `.githooks/*` + `package.json` + `.github/workflows/ci.yml`.
 
 ```bash
-# Symptom: Cannot find module
+# Tier 1: Pre-Commit (automatic, ~40s) — DB safety → format+lint → lint-staged → unit
+git commit -m "feat: my change"
 
-# Solutions:
-- Run: bun install
-- Check import paths
-- Verify file exists
-- Check bunfig.toml preload
+# Tier 2: Pre-Push (automatic, ~5 min) — production build + SQLite integration
+bun run git push origin my-branch
+# Manual equivalent:
+bun run gate
+
+# Tier 3: Manual local health (before PR)
+bun run test:doctor                 # unit + SQLite integration + gate map
+bun run test:e2e                    # optional full browser suite
+# Full multi-DB + benches + 6 E2E groups: GitHub Actions only
+```
+
+| Command                     |   Build    | SQLite integration | Multi-DB / benches / E2E |
+| :-------------------------- | :--------: | :----------------: | :----------------------: |
+| `git commit` (hook)         |     —      |         —          |        unit only         |
+| `git push` / `bun run gate` |   always   |       always       |       — (CI-only)        |
+| `bun run test:doctor`       | if missing |       always       |  optional `--with-e2e`   |
+| GitHub Actions              |   always   |       always       |       full matrix        |
+
+See **[Git Workflow & Quality Gate](./git-workflow.mdx)** for Docker prerequisites, credential parity, and scripts audit.
+
+## Current GitHub Actions Gate
+
+The `next` branch workflow currently validates changes in this order:
+
+1. `bootstrap` — Bun install, codegen verification, E2E secret generation.
+2. `whitebox` — format, lint, check, unit, CVE audit, secret misuse, deploy-backdoor probe.
+3. `build` — Production bundle (`COMPILE_ALL_ADAPTERS=true`).
+4. `db-tests` — Black-box integration matrix across SQLite, MongoDB, MariaDB, and PostgreSQL.
+5. `bench-core` — Core performance benchmarks per adapter (CI-only; not pre-push).
+6. `e2e-prep` — wizard + auth-setup, then `e2e` × 6 named groups (Playwright).
+7. `all-green` — consolidates job results.
+
+Pre-push locally is **build + SQLite integration only**. Multi-DB, benchmarks, and E2E remain GitHub-only unless you run them manually (`test:e2e`, `DB_TYPE=… bun test tests/integration/`).
+
+This matters because integration and E2E failures are not just "test" failures. They also validate production build output, redirect logic, auth cookies, and database bootstrap behavior.
+
+## Enterprise TQA (Total Quality Assurance) Methodology
+
+SveltyCMS has adopted a **Four-Pillar Total Quality Assurance (TQA)** model to guarantee enterprise-grade resilience, going beyond standard functional verification. This methodology is the standard for all development efforts.
+
+### 1. White-Box Testing (Unit)
+
+**"Test the code knowing how it works."**
+
+- **Focus:** Logic correctness, edge cases, internal consistency.
+- **Tools:** Vitest / Bun Unit Tests.
+- **What we test:** Pure functions, utility validators, service methods, Svelte 5 reactivity logic, database proxy behaviors (self-healing HMR recovery, tenant auto-injection, hot-swap zero-tax), and tenant filter application logic.
+- **Benefit:** Provides high speed and deep coverage, ensuring internal logic is mathematically sound.
+- **New:** `tests/unit/core/` — 23 dedicated tests for `proxy-utils.ts` and `relational-utils.ts` covering previously untested database layer patterns.
+
+### 2. Black-Box Testing (Integration & E2E)
+
+**"Test the system as a consumer sees it."**
+
+- **Focus:** API Contracts, Security Boundaries, Real-World Behavior.
+- **Tools:** Playwright (E2E) & API Integration Tests.
+- **What we test:** The entire middleware chain (Firewall $\to$ Auth $\to$ Logic $\to$ DB). The system is treated as an opaque box, guaranteeing **Database Agnosticism** and **Fail-Closed Authorization**.
+
+### 3. Audit (High-Frequency Benchmark)
+
+**"Reality simulation with extreme stress and chaos resilience."**
+
+- **Focus:** Performance and System Stability (SRE/Chaos Engineering).
+- **Tools:** 50-test Benchmark Matrix (`scripts/benchmark-matrix/`).
+- **Coverage:** 9 dimensions across SQLite, PostgreSQL, MariaDB, MongoDB + Redis variants.
+- **Intelligence:** Rolling trend baselines, 7 root cause categories, cross-test correlation, adaptive budgets.
+- **Reports:** 8 per-database MDX reports with Measures/Budget/Code/Why context.
+- **Latest SQLite:** 0.074ms DB raw, 0.59ms REST p95, 381ms cold start.
+- **Guide:** `docs/project/benchmarks/index.mdx`
+
+### 4. Accessibility Audit (WCAG 3.0 & ATAG 2.0)
+
+**"Guarantee universal access and cognitive usability."**
+
+- **Focus:** WCAG 3.0 Functional Outcomes, Keyboard Traversal, Assistive Tech compatibility.
+- **Tools:** `@axe-core/playwright`, Lighthouse, Manual Keyboard & Screen Reader audits.
+- **What we test:** Page contrast, focus traps, focus indicators, keyboard navigation, ARIA semantics, and screen reader announcements.
+- **Benefit:** Ensures that both CMS administrators (ATAG 2.0) and visitors have an optimal, non-excluding experience.
+
+### 🔬 Detailed Audit Module Explanation
+
+| Benchmark                       | Proves                                                                                          | Operational Importance                               | Est. Time |
+| :------------------------------ | :---------------------------------------------------------------------------------------------- | :--------------------------------------------------- | :-------- |
+| **admin-ux-vitality**           | Simulates complex Svelte 5 logic overhead for massive, multi-widget forms.                      | Critical performance audit for UX Vitality.          | ~30s      |
+| **ai-performance**              | Measures the internal CMS tax for AI enrichment and layout generation.                          | Critical performance audit for AI Overhead.          | ~25s      |
+| **api-latency**                 | Measures the base network and HTTP overhead for the simplest possible API calls.                | Critical performance audit for API Latency.          | ~12s      |
+| **auth-performance**            | Measures JWT verification, session retrieval, and permission matrix resolution overhead.        | Critical performance audit for Auth Trace.           | ~18s      |
+| **build-analysis**              | Measures production bundle size, chunk count, and build performance.                            | Critical performance audit for Build.                | ~85s      |
+| **cache-hit-ratio**             | Audits Redis cache hit/miss ratio, invalidation speed, and cold/warm fill performance.          | Critical performance audit for Cache Efficiency.     | ~10s      |
+| **cache-performance**           | Audits the performance gain of the 2-layer Hybrid Cache across various system modules.          | Critical performance audit for Cache.                | ~15s      |
+| **cache-service**               | Benchmarks L1 cache hit latency and pattern invalidation at scale (1k items @ 200k noise).      | Critical performance audit for Cache Internals.      | ~60s      |
+| **chaos-resilience**            | Simulates 500ms database brownouts and measures CMS availability and stability.                 | Critical performance audit for Resilience.           | ~60s      |
+| **circuit-breaker-failover**    | Measures system graceful degradation when external services fail.                               | Critical performance audit for Circuit-Breaker.      | ~25s      |
+| **client-journey**              | E2E journey: Login -> List -> View -> Edit -> Save -> Realtime. Measures cumulative latency.    | Critical performance audit for Journey.              | ~60s      |
+| **cold-start-phased**           | Measures the time to READY state (serving traffic) vs WARMED state (background tasks).          | Critical performance audit for Cold Start.           | ~10s      |
+| **concurrency-race**            | Verifies atomic consistency and lost-update protection.                                         | Critical performance audit for Concurrency.          | ~40s      |
+| **content-scale-stress**        | Measures scan performance on 1,000+ files under `.compiledCollections/test/stress/` (isolated). | Critical performance audit for Content Stress.       | ~45s      |
+| **content-scan**                | Self-Healing scanner over `.compiledCollections/test/scan/` — never touches user root files.    | Critical performance audit for Scan.                 | ~8s       |
+| **content-incremental-reload**  | Incremental vs full reload under `.compiledCollections/test/incremental/` (1k fixtures).        | Critical performance audit for Hot Reload.           | ~4s       |
+| **data-residency-failover**     | Simulates geopolitical boundary crossing and verifies PII field blocking for residency laws.    | Critical performance audit for Data Sovereignty.     | ~15s      |
+| **database-performance**        | Direct low-level benchmarks of Create, Read, Update, Delete on the current database adapter.    | Critical performance audit for DB Raw p95.           | ~35s      |
+| **dev-dependency-load**         | Measures overhead of the build, sync, and lint toolchain.                                       | Critical performance audit for DX-Tooling.           | ~30s      |
+| **edge-sync**                   | Verifies distributed L1/L2 cache invalidation latency across simulated nodes.                   | Critical performance audit for Edge Sync.            | ~5s       |
+| **failure-propagation**         | Measures system overhead when downstream dependencies (DB/Redis) fail or timeout.               | Critical performance audit for Fast-Fail.            | ~30s      |
+| **graphql-api-performance**     | Resolver execution time and throughput for common queries.                                      | Critical performance audit for GraphQL.              | ~25s      |
+| **graphql-stress**              | High-concurrency GraphQL query stress test for resolver efficiency.                             | Critical performance audit for GQL Stress.           | ~60s      |
+| **hooks-performance**           | High-resolution micro-benchmarks (µs) for individual middleware layers.                         | Critical performance audit for Hooks Trace.          | ~12s      |
+| **index-pressure**              | Measures complex filtering and sorting performance on 100,000+ entry collections.               | Critical performance audit for Index Pressure.       | ~180s     |
+| **local-api-performance**       | Measures LocalCMS SDK overhead vs direct adapter calls to verify zero-tax dispatching.          | Critical performance audit for SDK Tax.              | ~60s      |
+| **media-performance**           | Measures image resizing, SHA-256 media hashing, and metadata extraction efficiency.             | Critical performance audit for Media.                | ~50s      |
+| **media-upload-stress**         | Stress-tests large file upload throughput, concurrent transfers, and streaming efficiency.      | Critical performance audit for Upload Speed.         | ~180s     |
+| **memory-stability**            | Long-running soak test to identify memory leaks and GC pressure.                                | Critical performance audit for Memory.               | ~70s      |
+| **migration-scale**             | Measures system ingestion limits and read performance on 10,000+ entries.                       | Critical performance audit for Migration.            | ~120s     |
+| **mixed-workload**              | Production request mix: 60% Reads, 20% Writes, 15% GraphQL, 5% Media.                           | Critical performance audit for Mixed.                | ~60s      |
+| **multi-tenant-performance**    | Stress-tests cross-tenant isolation and security boundary latency.                              | Critical performance audit for Tenancy.              | ~45s      |
+| **negative-cache**              | Benchmarks 404-miss response times and cache lookup speedup.                                    | Critical performance audit for Negative Cache.       | ~20s      |
+| **openapi-performance**         | Generation and caching efficiency of the dynamic OpenAPI 3.1.0 specification.                   | Critical performance audit for OpenAPI.              | ~12s      |
+| **production-day**              | Simulates a realistic multi-user workload: 40% list, 20% read, 25% update, 10% media, 5% GQL.   | Critical performance audit for Production Stability. | ~120s     |
+| **realtime-performance**        | Benchmarks WebSocket connection/broadcast latency.                                              | Critical performance audit for Real-Time.            | ~15s      |
+| **relational-performance**      | Stress-tests JOINs, population strategies, and deeply nested relationships (depth 2–3).         | Critical performance audit for Relational.           | ~35s      |
+| **rest-api-performance**        | End-to-end throughput and latency of the unified REST dispatcher.                               | Critical performance audit for REST.                 | ~25s      |
+| **revision-stress**             | Benchmarks performance degradation as document history grows to 100+ versions.                  | Critical performance audit for Revision Stress.      | ~45s      |
+| **right-to-be-forgotten-audit** | Measures performance of deep-deletion across all linked tables.                                 | Critical performance audit for GDPR.                 | ~35s      |
+| **security-audit**              | Impact of Fail-Closed Dispatcher, Payload scanning, and SHA-256 Audit Chaining.                 | Critical performance audit for Security.             | ~20s      |
+| **seo-performance**             | E2E audit of Redirect Middleware, 404 Logging, and Sitemap Caching performance.                 | Critical performance audit for SEO.                  | ~30s      |
+| **setup-proxy**                 | Measures cold-start initialization latency and proxy header (X-Forwarded-\*) parsing overhead.  | Critical performance audit for Setup Security.       | ~15s      |
+| **state-machine-transition**    | Validates rapid IDLE -> READY self-healing cycles.                                              | Critical performance audit for State-Machine.        | ~15s      |
+| **telemetry-performance**       | Measures the overhead of telemetry data collection and cryptographic signing.                   | Critical performance audit for Telemetry.            | ~8s       |
+| **temporal-integrity**          | Verifies timezone normalization and deterministic UTC persistence.                              | Critical performance audit for Temporal.             | ~20s      |
+| **throttling-backoff-stress**   | Measures rate-limiting consistency under 10x design load.                                       | Critical performance audit for Throttling.           | ~30s      |
+| **transaction-acid**            | Measures commit/rollback latency and transaction isolation performance.                         | Critical performance audit for ACID.                 | ~25s      |
+| **truth-latency**               | The definitive truth audit: SDK vs Dispatcher vs Real HTTP (Production Standalone).             | Critical performance audit for Truth Audit.          | ~15s      |
+| **sse-broadcast**               | Measures EventBus → SSE stream broadcast latency and handshake timing.                          | Critical performance audit for Real-Time Broadcast.  | ~20s      |
+| **widget-performance**          | Audits server-side processing cost of built-in widgets (Input, RichText, Relation).             | Critical performance audit for Widgets.              | ~25s      |
+
+---
+
+## Test Architecture & Isolation
+
+SveltyCMS uses a strict isolation strategy so tests **never** touch production credentials, live databases, or user collection files at the root of `config/collections/` and `.compiledCollections/`. Enforcement is code-level — see **[Benchmark Collection Isolation](./benchmark-isolation.mdx)** for the full contract.
+
+```mermaid
+graph TD
+    subgraph levels [Testing Levels]
+        Unit[Unit Tests<br/>tests/unit — bun-preload mocks]
+        Int[Integration<br/>harness + bun test]
+        E2E[E2E<br/>Playwright + temp DB]
+        Bench[Benchmark Matrix<br/>child process + bench_tmp DB]
+    end
+
+    subgraph config [Config]
+        PC[config/private.ts<br/>LIVE — tests never use]
+        PT[config/private.test.ts<br/>matrix / TEST_MODE]
+    end
+
+    subgraph user [User Live Collections]
+        UC[config/collections/*.ts]
+        CC[.compiledCollections/*.js]
+    end
+
+    subgraph bench [Benchmark Fixtures]
+        BT[config/collections/test/]
+        BC[.compiledCollections/test/]
+    end
+
+    Unit --> PT
+    Int --> PT
+    E2E --> PT
+    Bench --> PT
+    Bench --> BC
+    Int --> BT
+```
+
+### Isolation Guarantees by Artifact
+
+| Artifact                         |       Unit        |               Integration               |            E2E             |                              Benchmark                              |
+| :------------------------------- | :---------------: | :-------------------------------------: | :------------------------: | :-----------------------------------------------------------------: |
+| **config/private.ts**            |   Never touched   |          Never touched locally          | Never touched in TEST_MODE |                            Never touched                            |
+| **config/private.test.ts**       | bun-preload mocks |             Auto-generated              |   Generated test config    |                          `writeTestConfig`                          |
+| **config/collections/** (root)   |    Never reads    |               Never reads               |        Never reads         |   Never writes; matrix purge removes known benchmark debris only    |
+| **config/collections/test/**     |    Never reads    | Writes `integration_test_collection.ts` |        Never reads         |                    Benchmark TS sources (if any)                    |
+| **.compiledCollections/** (root) |    Never reads    |               Never reads               |        Never reads         | Read-only for user files; purge removes known benchmark debris only |
+| **.compiledCollections/test/**   |    Never reads    |         Integration fixture JS          |        Never reads         |               Scan/stress/incremental workspaces only               |
+| **User database**                |  In-memory mocks  |              Temp DB only               |        Temp DB only        |                       `bench_tmp_<db>_<pid>`                        |
+| **Content store**                | Mocked singleton  |               Per-process               |        Per-browser         |                     Per matrix server + temp DB                     |
+
+> [!IMPORTANT]
+> Local `TEST_MODE` uses `config/private.test.ts` as the only file-based private config. CI may create an ephemeral `config/private.ts` only on fresh runners for build parity; local developer workspaces must not rely on or mutate the live file.
+
+### How Benchmarks Use Collections
+
+**API benchmarks** (relational, REST, GraphQL throughput) — no user filesystem writes:
+
+1. **Setup**: `setup-benchmarks.ts` seeds via `POST /api/testing` (LocalCMS inside the matrix server)
+2. **Stable data**: `ensureStableTestData()` creates `BenchmarkStable` in DB/content store only
+3. **Cleanup**: PID-scoped temp DB; `ConfigSafeguard.restore()` purges artifacts on exit
+
+**Filesystem benchmarks** (content-scan, scale-stress, incremental-reload) — isolated workspaces only:
+
+1. **Prepare**: `prepareBenchmarkCompiledWorkspace("scan" | "stress" | "incremental")` under `.compiledCollections/test/`
+2. **Run**: Scanner walks the full tree; user root files remain untouched
+3. **Cleanup**: `cleanupBenchmarkCompiledWorkspace()` or matrix `purgeBenchmarkCollectionArtifacts()`
+
+> [!CAUTION]
+> Never write benchmark fixtures to `config/collections/` or `.compiledCollections/` **root**. The matrix pre-purge and GraphQL `isMockScanCollection()` filter exist because root pollution previously caused 150+ mock types and matrix GraphQL HTTP 500 errors.
+
+### What the Benchmark Logs Mean
+
+| Log Message                                                                | Meaning                                                                                                                                                        |
+| :------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SKIP_GATEKEEPER=true -> bypassing firewall, rate-limit, and state checks` | Intentional -- benchmarks measure raw DB/GraphQL performance without security middleware overhead. Your production gatekeeper is unaffected.                   |
+| `Auth warmup failed (Status 401) -- non-critical`                          | Benchmarks authenticate via `x-test-secret` header, not login credentials. The warmup tries a soft admin login as a best-effort pre-warm; failure is harmless. |
+| `Cold Start: Nms`                                                          | The benchmark child process startup time -- measures SveltyCMS boot speed, not your running instance.                                                          |
+
+---
+
+### 🔬 The Four-Pillar Coverage Model
+
+> [!NOTE]
+> The counts and pass/fail labels below are illustrative coverage snapshots, not a live CI dashboard.
+
+### 🟢 1. Unit Test Breakdown (White-Box)
+
+| Test Category        | Status         | Pass Rate | Tests      |
+| :------------------- | :------------- | :-------- | :--------- |
+| Unit Tests (Core)    | ✅ Passing     | 100%      | 1,293+     |
+| Utility Functions    | ✅ Passing     | 100%      | (incl.)    |
+| Widget Validation    | ✅ Passing     | 100%      | (incl.)    |
+| Stores & Hooks       | ✅ Passing     | 100%      | (incl.)    |
+| **TOTAL UNIT TESTS** | **✅ Passing** | **100%**  | **1,293+** |
+
+### 🟡 2. Integration & E2E Tests (Black-Box)
+
+| Test Type             | Status         | Pass Rate | Tests   |
+| :-------------------- | :------------- | :-------- | :------ |
+| Core API Integration  | ✅ Passing     | 100%      | 453     |
+| E2E Workflows         | ✅ Passing     | 100%      | 40      |
+| **TOTAL B.BOX TESTS** | **✅ Passing** | **100%**  | **493** |
+
+### 🔴 3. Benchmark Audit (System Resilience)
+
+The benchmark suite is critical for SRE-grade confidence, covering **120+ metrics** and providing the deepest validation of the platform's capabilities.
+
+| Metric Area               | Proof Point Achieved                                     | Status      |
+| :------------------------ | :------------------------------------------------------- | :---------- |
+| **Chaos Resilience**      | System remains operational during 500ms brownouts.       | ✅ Verified |
+| **Temporal Integrity**    | UTC normalization confirmed across all timezones.        | ✅ Verified |
+| **Concurrency Proof**     | Lost Update Race Conditions protected by atomic locking. | ✅ Verified |
+| **Index Pressure**        | Read performance on 100,000+ entries (sub-ms).           | ✅ Verified |
+| **Migration & Ingestion** | Rate: > 6,625 entries/s                                  | ✅ Verified |
+| **Master Leaderboard**    | Side-by-side comparison of all 4 DBs.                    | ✅ Verified |
+
+### 🔵 4. Accessibility Audit (Universal Usability)
+
+Dedicated automated and cognitive checkpoints integrated into CI and developer quality gates to meet WCAG 3.0 / ATAG 2.0 requirements.
+
+| Metric Area                    | Proof Point Achieved                                       | Status      |
+| :----------------------------- | :--------------------------------------------------------- | :---------- |
+| **Automated Axe Audits**       | 0 critical Axe accessibility violations on setup and CRUD. | ✅ Verified |
+| **Keyboard Traversal & Focus** | Full keyboard flow usability without focus traps.          | ✅ Verified |
+| **Contrast & Theming**         | Minimum 4.5:1 text-to-background contrast on all themes.   | ✅ Verified |
+| **Assistive Technology Sync**  | Screen-reader accessible landmarks and live regions.       | ✅ Verified |
+
+---
+
+## 🚀 Running the Tests
+
+### Parallel E2E Suite (Playwright)
+
+```bash
+# Run with 4 concurrent workers
+npx playwright test --workers=4
+```
+
+### Unit Tests (Bun)
+
+```bash
+# Run all unit tests (Component, Service & Utility)
+bun run test:unit
 ```
 
 ---
 
-## Performance Benchmarks
+## Related Documentation
 
-### Test Execution Times
-
-| Category  | Tests   | Time     | Per Test   |
-| --------- | ------- | -------- | ---------- |
-| Security  | 8       | <100ms   | ~12ms      |
-| Widgets   | 8       | <500ms   | ~60ms      |
-| Cache     | 17      | <2s      | ~115ms     |
-| User API  | 47      | ~5s      | ~106ms     |
-| **Total** | **97+** | **~25s** | **~257ms** |
-
-### Performance Targets
-
-- ✅ Unit tests: <1s per file
-- ✅ Integration tests: <5s per file
-- ✅ E2E tests: <60s per spec
-- ✅ Full suite: <5min
-
----
-
-## Contributing
-
-### Adding New Tests
-
-1. **Choose the right location:**
-   - Unit tests → `tests/bun/`
-   - E2E tests → `tests/playwright/`
-
-2. **Follow naming conventions:**
-   - Test files: `*.test.ts`
-   - Spec files: `*.spec.ts`
-
-3. **Use existing helpers:**
-   - Import from `tests/bun/helpers/`
-   - Reuse test fixtures
-   - Follow established patterns
-
-4. **Update documentation:**
-   - Add test description
-   - Update test status
-   - Document any new helpers
-
-### Pull Request Checklist
-
-- [ ] Tests added for new features
-- [ ] All tests pass locally
-- [ ] No linting errors
-- [ ] Documentation updated
-- [ ] Test coverage maintained or improved
-
----
-
-## Resources
-
-### Related Documentation
-
-- [API Documentation](/docs/api/index.mdx)
-- [Contributing Guide](/docs/contributing/contributing-docs.mdx)
-- [Architecture Overview](/docs/architecture/index.mdx)
-- [Troubleshooting](/docs/troubleshooting.mdx)
-
-### External Resources
-
-- [Bun Test Documentation](https://bun.sh/docs/cli/test)
-- [Playwright Documentation](https://playwright.dev/)
-- [Conventional Commits](https://www.conventionalcommits.org/)
-- [Semantic Versioning](https://semver.org/)
-
----
+- [API Testing](./api-testing.mdx)
+- **[Accessibility Audit](./accessibility-audit.mdx)** ♿️ (Mandatory CI Check)
+- [Testing Strategy](./testing-strategy.mdx)
+- [Benchmark Collection Isolation](./benchmark-isolation.mdx)
+- **[Test Status (dashboard)](./test-status.mdx)** — live health, hot areas, open gaps, commands
+- [Widget Coverage](./widget-test-coverage.mdx)

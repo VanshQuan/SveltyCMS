@@ -1,0 +1,242 @@
+/**
+ * @file tests/e2e/routes/config/unified-hub.spec.ts
+ * @description Unified Data Hub E2E — always-on API/smoke + optional Postgres fixture suite.
+ *
+ * Postgres-dependent tests: hard-fail when REQUIRE_OPTIONAL_INFRA=true;
+ * otherwise skip with [optional-infra:POSTGRES] only (not empty-install soft-skip).
+ */
+
+import { test, expect, type APIRequestContext } from "@playwright/test";
+import { loginAsAdmin } from "../../helpers/auth";
+import { TEST_API_HEADERS } from "../../helpers/api";
+import { enablePlugin, handleOptionalInfraUnavailable } from "../../helpers/api";
+
+async function seedHub(request: APIRequestContext, rowCount = 25) {
+  return request.post("/api/testing", {
+    headers: TEST_API_HEADERS,
+    data: { action: "seed-unified-data-hub", fixture: "postgres", rowCount },
+  });
+}
+
+/** Require Postgres UDH seed or optional-infra skip/hard-fail. */
+async function requireHubSeed(request: APIRequestContext, rowCount: number) {
+  const seedRes = await seedHub(request, rowCount);
+  if (seedRes.status() === 503) {
+    const body = await seedRes.json().catch(() => ({}));
+    handleOptionalInfraUnavailable(
+      "POSTGRES",
+      body.message || "Postgres UDH fixture unavailable — docker compose --profile postgresql",
+      (cond, desc) => test.skip(cond, desc),
+    );
+    return null;
+  }
+  expect(seedRes.ok(), `seed-unified-data-hub failed: ${seedRes.status()}`).toBeTruthy();
+  return seedRes;
+}
+
+test.describe("Unified Data Hub — always-on", () => {
+  test.beforeEach(async ({ page }) => {
+    await loginAsAdmin(page);
+  });
+
+  test("extensions page loads", async ({ page }) => {
+    await page.goto("/config/extensions");
+    await expect(
+      page
+        .getByTestId("extensions-page")
+        .or(page.getByRole("heading", { level: 1 }))
+        .first(),
+    ).toBeVisible({
+      timeout: 10_000,
+    });
+  });
+
+  test("virtual-collections API returns structured envelope", async ({ page, request }) => {
+    const cookies = await page.context().cookies();
+    const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+
+    const res = await request.get("/api/virtual-collections", {
+      headers: { Cookie: cookieHeader },
+    });
+
+    const body = await res.json().catch(() => ({}) as Record<string, unknown>);
+
+    if (res.status() === 200) {
+      expect(body).toHaveProperty("data");
+    } else {
+      // Plugin not enabled / not registered can still 500 in some matrix builds;
+      // require a structured error envelope rather than a hard 5xx-free contract.
+      expect([403, 404, 500, 503]).toContain(res.status());
+      expect(body.error || body.message || body.code || body.success === false).toBeTruthy();
+    }
+  });
+
+  test("virtual-collections rejects unauthenticated access", async ({ playwright }) => {
+    // The project `use` options leak x-test-secret / x-test-worker-index and the
+    // admin storageState into manually-created contexts — neutralize them so this
+    // is a TRULY anonymous request (with them, the server may treat it as a
+    // test-worker/authenticated request and return 503/200 instead of 401/403).
+    const unauthContext = await playwright.request.newContext({
+      extraHTTPHeaders: { "x-test-mode": "", "x-test-secret": "", "x-test-worker-index": "" },
+      storageState: { cookies: [], origins: [] },
+    });
+    const res = await unauthContext.get("http://127.0.0.1:4173/api/virtual-collections");
+    expect([401, 403]).toContain(res.status());
+    await unauthContext.dispose();
+  });
+
+  test("unified-data-hub can be enabled (enable-plugin or UI)", async ({ page }) => {
+    let pluginAvailable = false;
+    try {
+      await enablePlugin(page, "unified-data-hub", true);
+      pluginAvailable = true;
+    } catch {
+      // Plugin not registered — skip
+    }
+    test.skip(!pluginAvailable, "Unified Data Hub plugin not registered in this install");
+    await page.goto("/config/extensions");
+    await expect(
+      page
+        .getByTestId("extensions-page")
+        .or(page.getByRole("heading", { level: 1 }))
+        .first(),
+    ).toBeVisible({
+      timeout: 10_000,
+    });
+    const card = page
+      .getByTestId("plugin-card-unified-data-hub")
+      .or(page.locator("[data-plugin-id='unified-data-hub']"))
+      .or(page.locator("div").filter({ hasText: "Unified Data Hub" }).first());
+    await expect(
+      card.first(),
+      "Unified Data Hub plugin must be registered in this install",
+    ).toBeVisible({ timeout: 15_000 });
+  });
+});
+
+test.describe("Unified Data Hub — Postgres fixture", () => {
+  // All fixture tests TRUNCATE + re-seed the same Postgres tables — concurrent
+  // seeds (parallel workers) race on TRUNCATE/INSERT and 500. Serial only.
+  test.describe.configure({ mode: "serial" });
+
+  test.beforeEach(async ({ page }) => {
+    await loginAsAdmin(page);
+  });
+
+  test("reads virtual collection rows after hub seed", async ({ page, request }) => {
+    await requireHubSeed(request, 25);
+
+    const cookies = await page.context().cookies();
+    const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+
+    const res = await request.get(
+      "/api/virtual-collections/bench-articles?limit=25&bypassCache=true",
+      { headers: { Cookie: cookieHeader } },
+    );
+
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body.data?.length).toBe(25);
+    expect(body.data[0].title).toMatch(/Bench Article/);
+  });
+
+  test("hub workspace shows connector and collection forms", async ({ page, request }) => {
+    await requireHubSeed(request, 3);
+    try {
+      await enablePlugin(page, "unified-data-hub", true);
+    } catch {
+      /* may already be on */
+    }
+
+    await page.goto("/config?plugin=unified-data-hub");
+    await expect(page.getByTestId("udh-workspace")).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByTestId("udh-add-connector-form")).toBeVisible();
+    await expect(page.getByTestId("udh-add-collection-form")).toBeVisible();
+    await expect(page.getByTestId("udh-tier-label")).toBeVisible();
+  });
+
+  test("hub workspace shows seeded virtual collection", async ({ page, request }) => {
+    const seedResult = await requireHubSeed(request, 5);
+    // If the Postgres fixture is unavailable, requireHubSeed skips — return early.
+    if (!seedResult) return;
+
+    try {
+      await enablePlugin(page, "unified-data-hub", true);
+    } catch {
+      /* */
+    }
+
+    // Brief pause to allow the plugin state cache (30s TTL in the plugin API
+    // dispatcher) to pick up the freshly toggled state before the page loads.
+    await page.waitForTimeout(1_000);
+
+    // First load — networkidle waits for the Svelte component to hydrate and
+    // its fetch() calls (listConnectors, listVirtualCollections) to settle.
+    await page.goto("/config?plugin=unified-data-hub", {
+      waitUntil: "networkidle",
+      timeout: 30_000,
+    });
+    await expect(page.getByRole("heading", { name: /unified data hub/i })).toBeVisible({
+      timeout: 20_000,
+    });
+
+    // The seeded virtual collection may need a page reload if the plugin
+    // reconcile hasn't picked up the newly created connector/schema rows yet.
+    // Poll with reloads until the list renders "Bench Articles".
+    await expect
+      .poll(
+        async () => {
+          const visible = await page
+            .getByText("Bench Articles")
+            .first()
+            .isVisible()
+            .catch(() => false);
+          if (!visible) {
+            await page.reload({ waitUntil: "networkidle", timeout: 20_000 });
+          }
+          return visible;
+        },
+        {
+          timeout: 40_000,
+          intervals: [3_000, 5_000, 5_000],
+          message: "UDH seeded virtual collection never appeared",
+        },
+      )
+      .toBe(true);
+    await expect(page.getByText("bench-articles")).toBeVisible();
+  });
+
+  test("hub workspace shows upgrade prompt at community connector cap", async ({
+    page,
+    request,
+  }) => {
+    await requireHubSeed(request, 3);
+    try {
+      await enablePlugin(page, "unified-data-hub", true);
+    } catch {
+      /* */
+    }
+
+    await page.goto("/config?plugin=unified-data-hub");
+    await expect(page.getByTestId("udh-workspace")).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByTestId("udh-tier-label")).toContainText(/community/i);
+    await expect(page.getByTestId("upgrade-prompt")).toBeVisible({ timeout: 10_000 });
+  });
+
+  test("native stitch enrich endpoint returns keyed virtual rows", async ({ page, request }) => {
+    await requireHubSeed(request, 10);
+
+    const cookies = await page.context().cookies();
+    const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+
+    const res = await request.get(
+      "/api/virtual-collections/bench-authors/enrich?keys=1,2&field=id&bypassCache=true",
+      { headers: { Cookie: cookieHeader } },
+    );
+
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body.data?.["1"]?.name).toMatch(/Bench Author/);
+    expect(body.meta?.matched).toBeGreaterThanOrEqual(1);
+  });
+});

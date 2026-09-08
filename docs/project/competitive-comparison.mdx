@@ -1,0 +1,299 @@
+---
+path: "docs/project/competitive-comparison.mdx"
+title: "Competitive Comparison"
+description: "A strategic, EU-compliant buyer's guide comparing SveltyCMS with Payload CMS, Strapi, and Directus across total cost of ownership, compliance readiness, and time-to-market."
+author: "SveltyCMS Team"
+created: "2026-03-21"
+updated: "2026-09-08"
+tags:
+  - "comparison"
+  - "buyers-guide"
+  - "tco"
+  - "compliance"
+  - "payload"
+  - "strapi"
+  - "directus"
+---
+
+# Competitive Comparison: The Buyer's Guide
+
+This guide is written for CTOs, lead architects, and agency owners evaluating a content platform — not for a feature-list debate. Instead of comparing how the engines work, it compares what each platform lets your team do:
+
+- **What it costs to run** (total cost of ownership)
+- **How fast you can ship** (time-to-market)
+- **Whether you pass the security review** (compliance readiness)
+- **What is included versus what is paid** (free core vs. paid tiers)
+
+We compare SveltyCMS with Payload CMS, Strapi, and Directus based on publicly available documentation and pricing pages as of July 2026, on a like-for-like basis: SveltyCMS's free core is compared against each platform's free/community edition, with paid-tier availability noted separately. Where a competitor offers something we include for free in paid tiers, we say so. Where a competitor is genuinely stronger — a bigger marketplace, a deeper React integration — the [Verdict](#verdict) section says that too.
+
+This page follows EU Directive 2006/114/EC and German UWG §6 requirements for comparative advertising: all claims are date-stamped, based on verifiable public sources, and written in neutral, descriptive language. See [Sources and Methodology](#sources-and-methodology) for details.
+
+## Decision snapshot (facts, not pitch)
+
+What differs in **public product packaging** and **our self-measured stack** (not a ranking of which vendor is “best”):
+
+| Decision factor            | SveltyCMS (self-hosted core)                                                                                               | Payload CMS                                                                      | Strapi                                                                                          | Directus                                                          |
+| :------------------------- | :------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------- | :---------------------------------------------------------------- |
+| **SSO / SAML / OIDC**      | Documented in core                                                                                                         | Plugin / Enterprise SAML (public docs)                                           | Pro / Enterprise (public pricing)                                                               | Built-in (OIDC / LDAP / SAML)                                     |
+| **SCIM 2.0**               | Documented in core                                                                                                         | Enterprise (public docs)                                                         | Enterprise (public docs)                                                                        | Enterprise module (public docs)                                   |
+| **Audit logs**             | Crypto-chained logs in core (self-described)                                                                               | Enterprise (public docs)                                                         | Plugin / Enterprise (public docs)                                                               | Activity log; audit module Enterprise                             |
+| **Multi-tenancy**          | Native `tenantId` isolation in core                                                                                        | Not documented as built-in (as of July 2026 public docs)                         | Not documented as built-in                                                                      | Enterprise plan (public docs)                                     |
+| **Cold start**             | **&lt; 1s** progressive init (**our** measure, Bun/local)                                                                  | ~3–5s (figures from public write-ups; not same harness)                          | ~4–8s (public write-ups)                                                                        | ~3–6s (public write-ups)                                          |
+| **Admin UI runtime model** | Svelte 5 compile (no React VDOM in admin)                                                                                  | React VDOM                                                                       | React admin                                                                                     | Vue reactivity                                                    |
+| **i18n**                   | Paraglide compile-time; EN/DE shipped; extra locales GUI + machine-translate then human review (self-described, Sept 2026) | i18next runtime; 30+ admin languages in `@payloadcms/translations` (public docs) | Admin locales via `config.locales` (code); content locales from a predefined list (public docs) | vue-i18n runtime; Data Studio languages via Crowdin (public docs) |
+| **Out-of-the-box API**     | REST + GraphQL + OpenAPI 3.1                                                                                               | REST + GraphQL                                                                   | REST + GraphQL                                                                                  | REST + GraphQL                                                    |
+| **Developer Tools**        | In-app OpenAPI + GraphQL Playground in core                                                                                | Separate Swagger / GraphQL plugins                                               | Separate Swagger / GraphQL plugins                                                              | Built-in GraphQL / REST app                                       |
+| **Schema Authoring**       | Visual GUI + Live Split-View + SQL Ingestion + Code-First                                                                  | Code-first TS files only (public docs)                                           | Visual Content-Type Builder (GUI only)                                                          | Visual Data Model Builder on SQL                                  |
+| **Editorial Workflows**    | Multi-stage FSM + RBAC review gates in core                                                                                | Draft/Publish in Community; Workflows in Enterprise (docs)                       | Draft/Publish in Community; Workflows in Enterprise (pricing)                                   | Custom status flows in core                                       |
+| **Multi-environment sync** | Hybrid TS schemas + 4 safety modes + PII-safe sync (core)                                                                  | Code-first schemas + DB migrations                                               | Data transfer CLI / plugins                                                                     | CLI schema sync (`d6s sync`) (v12.3)                              |
+| **Field-level encryption** | Native AES-256-GCM in core                                                                                                 | Hooks / marketplace plugin (public docs)                                         | Marketplace plugin (public docs)                                                                | Client-responsible / extensions                                   |
+| **Rate limiting & DoS**    | Token-Bucket (Redis/local memory in core)                                                                                  | Not documented as built-in                                                       | Plugin-based (public docs)                                                                      | Plugin-based (public docs)                                        |
+
+> Competitor cold-start numbers are **not** measured with our suite. Treat them as orientation only. Verify current tiers on each vendor’s pricing page.
+
+## Total Cost of Ownership: Free Core vs. Paid Tiers
+
+A meaningful difference in this comparison is where enterprise-grade capabilities sit. In SveltyCMS they are part of the free core; in several alternatives they are offered only in paid tiers. The table below compares like for like — the capabilities themselves, and where each platform places them.
+
+| Capability                   | Typical placement in alternatives                             | In SveltyCMS               |
+| :--------------------------- | :------------------------------------------------------------ | :------------------------- |
+| SSO / SAML / OIDC            | Paid tiers (Strapi, Payload); built-in (Directus)             | **Included in core, free** |
+| SCIM 2.0 provisioning        | Paid tiers / enterprise modules (Payload, Strapi, Directus)   | **Included in core, free** |
+| Compliance-grade audit logs  | Enterprise tiers (Payload, Directus); plugin-based (Strapi)   | **Included in core, free** |
+| Multi-stage review workflows | Enterprise tiers (Strapi, Contentful, Sanity; public docs)    | **Included in core, free** |
+| Developer & API Playground   | External tooling / separate plugins (public docs Sept 2026)   | **Included in core, free** |
+| Polymorphic Block Builder    | Core/custom components or paid blocks (public docs Sept 2026) | **Included in core, free** |
+| Visual Schema Split-View     | Separate / partial implementations (public docs Sept 2026)    | **Included in core, free** |
+| Database DDL/Schema Ingest   | Custom migration scripts / manual SQL (public docs Sept 2026) | **Included in core, free** |
+| Multi-tenancy                | Custom implementation or enterprise plans                     | **Included in core, free** |
+| Secure media sharing         | Plugin-based or separate tooling                              | **Included in core, free** |
+| DAM analytics                | Plugins / enterprise modules                                  | **Included in core, free** |
+| Field-level encryption       | Hooks / marketplace plugins (public docs as of Sept 2026)     | **Included in core, free** |
+| Rate limiting                | Plugin-based or reverse-proxy configurations                  | **Included in core, free** |
+| Collection ETag / 304        | App- or CDN-level HTTP caching (public docs as of Sept 2026)  | **Included in core, free** |
+| Streamed collection export   | REST/CLI export (often fully buffered; public docs Sept 2026) | **Included in core, free** |
+
+Whether a capability is “free core” vs “paid tier” is a **packaging** difference on public pricing pages — not proof of implementation quality. Always re-check each vendor’s current tier matrix.
+
+> **Note on methodology:** Tier information is based on public pricing pages and documentation as of July 2026. Vendor pricing and tiering change frequently — verify against current pricing pages before a final decision.
+
+## Performance & Architecture: What the Admin Costs You
+
+Every CMS admin panel carries a cost: cold-start latency, server memory, and runtime shipped to visitors. The difference between platforms is where that cost is paid — and who pays it.
+
+| Capability         | SveltyCMS                                                                 | Payload CMS                                   | Strapi                              | Directus                         |
+| :----------------- | :------------------------------------------------------------------------ | :-------------------------------------------- | :---------------------------------- | :------------------------------- |
+| **Stack**          | SvelteKit 2 + Svelte 5 (Runes)                                            | Next.js + React                               | Koa + React admin                   | Vue 3 + Express                  |
+| **Admin UI model** | Svelte 5 compile                                                          | React VDOM                                    | React admin                         | Vue reactivity                   |
+| **Cold start**     | **&lt; 1s progressive (our measure)**                                     | ~3–5s (public write-ups)                      | ~4–8s                               | ~3–6s                            |
+| **i18n**           | Paraglide (compile-time); extra locales start as machine-translate drafts | i18next (runtime); community language modules | Plugin / `config.locales` (runtime) | vue-i18n (runtime); Crowdin      |
+| **Type safety**    | TypeScript + Valibot                                                      | Zod (common)                                  | Partial                             | Partial                          |
+| **Production DBs** | MongoDB, MariaDB, PostgreSQL, SQLite                                      | MongoDB, PostgreSQL                           | SQLite, PostgreSQL, MySQL, MariaDB  | PostgreSQL, MySQL, SQLite, MSSQL |
+
+Cold start and admin model affect **your** compute and UX; competitor cold-start numbers are **not** same-harness comparisons.
+
+### List / count product layer (self-measured, 2026-08-04)
+
+Optional dual-query list paths (`findMany` + exact `count`) vs shared **`findPage`** / **count modes**. Numbers are **adapter-layer** averages on one machine — not HTTP E2E, not competitor benches.
+
+| Engine     | LIST+COUNT (legacy) | `findPage` (hasMore) | vs legacy | Count estimate (unfiltered) | Count exact (filtered) | L1 count cache hit |
+| :--------- | ------------------: | -------------------: | --------: | --------------------------: | ---------------------: | -----------------: |
+| SQLite     |            0.192 ms |             0.086 ms |     ~2.2× |                    0.023 ms |               0.120 ms |          ~0.024 ms |
+| PostgreSQL |            2.233 ms |             1.008 ms |     ~2.2× |                    0.745 ms |               2.197 ms |          ~0.024 ms |
+| MariaDB    |            1.086 ms |             0.664 ms |     ~1.6× |                    0.502 ms |               0.936 ms |          ~0.029 ms |
+| MongoDB    |            4.925 ms |             0.867 ms |     ~5.7× |                    0.492 ms |               3.817 ms |          ~0.025 ms |
+
+**What this is not:** “0.024 ms list responses.” That figure is **repeat `count` L1 hits** only. Full list rows still cost ~`findPage` (+ HTTP/compression). Networked raw CRUD remains ~0.5–2 ms RTT-bound.
+
+### Verified Head-to-Head Database Benchmarks (10,000 Documents, PostgreSQL 18, Concurrent 8c)
+
+> **Engine note:** These numbers were measured on **PostgreSQL 18** (September 2026, byte-identical dataset across all platforms, multi-worker concurrent 8c harness). See [Performance Architecture](../reference/database/performance-architecture.mdx).
+
+Self-measured throughput (Requests / Sec) across SveltyCMS (Node & Bun 1.4), Payload CMS v3 & v4, Directus 12, and Strapi v5 on identical hardware:
+
+| Workload                 | SveltyCMS (Node) | SveltyCMS (Bun 1.4) | Payload v3 | Payload v4 | Directus 12 | Strapi v5 | Winner & Notes                                 |
+| :----------------------- | :--------------- | :------------------ | :--------- | :--------- | :---------- | :-------- | :--------------------------------------------- |
+| **`findById`**           | 3,207 req/s      | **3,480 req/s**     | 862 req/s  | 900 req/s  | 570 req/s   | 634 req/s | **SveltyCMS-Bun** (3.8× over competitor max)   |
+| **`findByIdRandom`**     | 843 req/s        | **1,030 req/s**     | 921 req/s  | 945 req/s  | 543 req/s   | 652 req/s | **SveltyCMS-Bun** (Direct un-cached DB lookup) |
+| **`listPlain`**          | **4,090 req/s**  | 2,145 req/s         | 793 req/s  | 802 req/s  | 494 req/s   | 409 req/s | **SveltyCMS-Node** (5.1× over competitor max)  |
+| **`listFilterSort`**     | **3,270 req/s**  | 1,668 req/s         | 540 req/s  | 525 req/s  | 379 req/s   | 289 req/s | **SveltyCMS-Node** (6.0× over competitor max)  |
+| **`listLarge`**          | **936 req/s**    | 918 req/s           | 280 req/s  | 286 req/s  | 242 req/s   | 147 req/s | **SveltyCMS-Node** (3.2× over competitor max)  |
+| **`findMissing` (404)**  | 4,189 req/s      | **6,925 req/s**     | 493 req/s  | 500 req/s  | 738 req/s   | 566 req/s | **SveltyCMS-Bun** (9.3× over competitor max)   |
+| **`graphql`**            | **2,215 req/s**  | 1,799 req/s         | 605 req/s  | 621 req/s  | 436 req/s   | 427 req/s | **SveltyCMS-Node** (3.5× over competitor max)  |
+| **`create`**             | 1,662 req/s      | **2,008 req/s**     | 678 req/s  | 586 req/s  | 328 req/s   | 367 req/s | **SveltyCMS-Bun** (2.9× over competitor max)   |
+| **`update`**             | 1,673 req/s      | **2,146 req/s**     | 509 req/s  | 414 req/s  | 285 req/s   | 332 req/s | **SveltyCMS-Bun** (4.2× over competitor max)   |
+| **`mixed` (Read/Write)** | **1,154 req/s**  | 631 req/s           | 579 req/s  | 555 req/s  | 374 req/s   | 367 req/s | **SveltyCMS-Node** (1.9× over competitor max)  |
+
+> **Methodology & Transparency Note:** Standardized concurrent benchmark run (8 workers, 10,000 seeded documents per engine) on native PostgreSQL 18 via docker-compose harness. SveltyCMS wins 10 out of 10 workloads across all four alternatives. All comparisons comply with EU Directive 2006/114/EC and German UWG §6 standards.
+
+**Reproduce:** `bun test tests/benchmarks/competitive-workload-replica.test.ts` · methodology: [benchmarks](./benchmarks/index.mdx) · detail: [Performance Architecture](../reference/database/performance-architecture.mdx).
+
+## Media & Digital Asset Management
+
+For agencies and media teams, the DAM is where hours disappear. These are the operations that typically cost time and money — and who supports them out of the box.
+
+| Capability                               | SveltyCMS                                                 | Payload CMS                  | Strapi                       | Directus                     |
+| :--------------------------------------- | :-------------------------------------------------------- | :--------------------------- | :--------------------------- | :--------------------------- |
+| **Large-file uploads**                   | **Byte-level streaming with backpressure**                | Buffer-based                 | Buffer-based                 | Buffer-based                 |
+| **Duplicate storage costs**              | **SHA-256 content-addressable deduplication**             | _Not documented as built-in_ | Plugin-based                 | _Not documented as built-in_ |
+| **Secure external sharing**              | **HMAC-signed, password-protected share links**           | Standard auth only           | Plugin-based                 | Standard auth only           |
+| **Per-file version history**             | **Diff / compare / restore per file**                     | _Not documented as built-in_ | _Not documented as built-in_ | Content revisions only       |
+| **Safe deletion (reference protection)** | **Reverse-index + publish-state gate (409 Conflict)**     | _Not documented as built-in_ | _Not documented as built-in_ | _Not documented as built-in_ |
+| **DAM analytics**                        | **Built-in usage, folder, and quota insights**            | _Not documented as built-in_ | Plugin-based                 | Insights module              |
+| **Bulk operations**                      | **Selection toolbar, 4× concurrency, publish-state gate** | _Not documented as built-in_ | Plugin-based                 | Built-in                     |
+| **Signed URLs**                          | **HMAC-SHA256, timing-safe, tenant-scoped**               | _Not documented as built-in_ | Plugin-based                 | _Not documented as built-in_ |
+| **Pre-upload optimization**              | **WebGPU client-side compression**                        | _Not documented as built-in_ | _Not documented as built-in_ | _Not documented as built-in_ |
+| **Storage backends**                     | Local, S3, R2, Cloudinary (pluggable adapters)            | S3 plugin                    | Upload providers             | Storage adapters             |
+| **Media type safety**                    | Discriminated unions + exhaustive type guards             | Basic discrimination         | Media library plugin         | File library                 |
+
+**Why this matters:** content-addressable deduplication and client-side compression can reduce storage and bandwidth costs; signed, password-protected links let editors share assets with clients and partners without standing up a separate file-drop service.
+
+## Security & Compliance: The Audit-Ready Checklist
+
+SOC 2, HIPAA, and GDPR reviews ask the same handful of questions: _Who accessed what? How are sessions protected? Can logs be tampered with? How do users authenticate and deprovision?_ Every row below is a question your auditor will ask — and what each platform answers out of the box.
+
+| Compliance question                        | SveltyCMS                                                                     | Payload CMS                           | Strapi                         | Directus                                             |
+| :----------------------------------------- | :---------------------------------------------------------------------------- | :------------------------------------ | :----------------------------- | :--------------------------------------------------- |
+| **Who changed what? (audit logs)**         | **Built-in & tamper-evident — SHA-256 chained (Core, free)**                  | Enterprise tier                       | Plugin-based / Enterprise tier | Native activity log; audit module in Enterprise tier |
+| **How do users sign in? (SSO/SAML/OIDC)**  | **Built-in — all 3 logout flows (RP-initiated, front-channel, back-channel)** | Plugin-based; SAML in Enterprise tier | Paid Pro / Enterprise tier     | Built-in SSO                                         |
+| **How are users provisioned? (SCIM 2.0)**  | **Native endpoints (RFC 7644), Core, free**                                   | Enterprise tier                       | Enterprise tier                | Enterprise module                                    |
+| **Are permission changes instant? (RBAC)** | **Instant invalidation (< 1ms)**                                              | TTL-based caching                     | TTL-based caching              | TTL-based caching                                    |
+| **Where are secrets stored?**              | Bootstrap secrets in `config/private.ts`; other secrets DB-driven Settings UI | Environment variables (common)        | Environment variables          | Environment variables                                |
+| **Session & CSRF hardening**               | `__Host-` cookie prefix + per-origin tokens                                   | Built-in                              | Built-in                       | Built-in                                             |
+| **Rate limiting**                          | **Built-in Token-Bucket (Redis L2 + local memory fallback + tiers)**          | _Not documented as built-in_          | Rate limit plugin              | Rate limit plugin                                    |
+| **Field-level encryption (ALE)**           | **Native AES-256-GCM in core (< 18 µs, < 3% write impact, zero-tax)**         | Hooks / marketplace plugin            | Marketplace plugin             | Client-responsible / extensions                      |
+| **Path traversal protection**              | **Dual guard: string check + `path.resolve()` prefix**                        | _Not documented as built-in_          | Partial                        | Partial                                              |
+| **SVG sanitization**                       | **Iterative XML scrubbing + attribute validation**                            | _Not documented as built-in_          | _Not documented as built-in_   | _Not documented as built-in_                         |
+| **API key security**                       | **HMAC-SHA-256 with server secret (v2 format)**                               | SHA-256 hashing                       | SHA-256 hashing                | SHA-256 hashing                                      |
+| **CORS policy**                            | Origin allowlist — no reflection with credentials                             | Configurable                          | Configurable                   | Configurable                                         |
+| **MIME enforcement**                       | Strict allowlist (image/video/audio/pdf/archive)                              | Default-only coverage                 | Default-only coverage          | Default-only coverage                                |
+| **GraphQL hardening**                      | Introspection blocked unconditionally in production                           | Configurable                          | Configurable                   | Configurable                                         |
+| **Secret scanning in CI**                  | **6-rule static analysis + 5 architecture rules**                             | _Not documented as built-in_          | _Not documented as built-in_   | _Not documented as built-in_                         |
+| **Clickjacking protection**                | `X-Frame-Options: DENY` + CSP `frame-ancestors: none`                         | X-Frame-Options only                  | X-Frame-Options only           | X-Frame-Options only                                 |
+| **Session performance at scale**           | 10,000 hot sessions (LRU + TTL)                                               | Default                               | Default                        | Default                                              |
+
+**Compliance takeaway:** SveltyCMS documents audit trails, SSO, and RBAC as **core** features. That can reduce paid add-ons versus some vendors’ public tier maps — it is **not** a SOC 2 / HIPAA certification claim. Always map controls to your auditor’s checklist.
+
+## Developer Experience: Time-to-Market
+
+Time-to-market depends on the platform your team can ship with today. This is how each option gets you from content model to production API.
+
+| Capability                    | SveltyCMS                                        | Payload CMS                  | Strapi                                                                | Directus                     |
+| :---------------------------- | :----------------------------------------------- | :--------------------------- | :-------------------------------------------------------------------- | :--------------------------- |
+| **Schema definition**         | **Hybrid — code + GUI with bi-directional sync** | Code-first                   | GUI-first                                                             | GUI-first + code extensions  |
+| **Local development**         | **Zero-latency `LocalCMS` (bypasses HTTP)**      | Local API                    | _Not documented as built-in_                                          | _Not documented as built-in_ |
+| **API surface**               | **REST + GraphQL + OpenAPI 3.1.0**               | REST + GraphQL               | REST + GraphQL                                                        | REST + GraphQL               |
+| **Real-time & collaboration** | **SSE + WebSocket (Yjs collaboration)**          | _Not documented as built-in_ | WebSocket plugin                                                      | WebSocket + SSE              |
+| **Extensibility**             | Built-in theme/plugin catalog                    | Plugin directory             | Plugin marketplace — one of the largest of the four, to our knowledge | Marketplace                  |
+
+**A note on Strapi's marketplace:** Strapi's plugin marketplace is one of the largest of the four, to our knowledge — a real strength if you need a mature off-the-shelf integration, and a reason Strapi remains a strong default for teams that assemble integrations.
+
+## Multi-Environment Synchronization: Schema as Code & Content Promotion
+
+Moving configuration and content across dev, staging, and production environments is a critical workflow for enterprise delivery pipelines. Each platform takes a distinct architectural approach:
+
+| Capability                        | SveltyCMS                                                                                                | Payload CMS                            | Strapi                                                         | Directus                                    |
+| :-------------------------------- | :------------------------------------------------------------------------------------------------------- | :------------------------------------- | :------------------------------------------------------------- | :------------------------------------------ |
+| **Schema definition model**       | **Hybrid — native TypeScript (`config/collections/*.ts`) + GUI with bi-directional sync**                | Code-first (TypeScript configs)        | GUI-first (schema files generated)                             | GUI-first + code extensions                 |
+| **Configuration sync workflow**   | **`ConfigPromotionService` (`/api/config/*`) with 4 safety modes (`add`, `merge`, `mirror`, `replace`)** | Git repo commits + database migrations | Data transfer CLI (`strapi transfer`) / community sync plugins | `@directus/cli` (`d6s sync pull/diff/push`) |
+| **Drift detection**               | **Deterministic SHA-256 checksums + plan preview before apply**                                          | Custom / Drizzle migration checks      | CLI data transfer diff                                         | JSON diff preview (`d6s sync diff`)         |
+| **Content movement between envs** | **Channel-based push/pull (`/api/content-sync/*`) + NDJSON packages**                                    | Custom migration scripts / REST export | `strapi transfer` (content & files)                            | Directus sync / API export                  |
+| **PII anonymization on sync**     | **Deterministic PII scrubbing on pull (Core, free)**                                                     | _Not documented as built-in_           | _Not documented as built-in_                                   | _Not documented as built-in_                |
+| **Audit logging for sync**        | **Tamper-evident SHA-256 chained audit ledger**                                                          | Enterprise tier                        | Plugin / Enterprise tier                                       | Enterprise module                           |
+
+**Workflow comparison:**
+
+- **SveltyCMS** maintains schemas as native TypeScript files on disk (`config/collections/*.ts`), ensuring compile-time type safety. Platform configuration (roles, permissions, settings, automations) is exported to deterministic JSON bundles in `config/sync/` for Git promotion. Content sync operates over dedicated channels with native PII anonymization.
+- **Directus 12.3** introduced Environment Sync via `@directus/cli` (`d6s`), which exports schema and configuration to JSON files in Git and provides `sync pull`, `sync diff`, and `sync push` commands for multi-environment delivery.
+- **Payload CMS** uses a code-first model where schemas live directly in TypeScript files in Git, relying on standard Git pull requests and database migrations across environments.
+- **Strapi** provides `strapi transfer` (Data Transfer) for pushing and pulling schemas, content, and files between instances via CLI transfer tokens.
+
+## Accessibility: Compliance for Every User
+
+Accessibility is a procurement requirement in public-sector and enterprise deals. WCAG conformance should be designed in, not retrofitted.
+
+| Capability               | SveltyCMS                                     | Payload CMS                     | Strapi                          | Directus                        |
+| :----------------------- | :-------------------------------------------- | :------------------------------ | :------------------------------ | :------------------------------ |
+| **Accessibility target** | **WCAG 2.2 AA / ATAG 2.0 / WCAG 3.0-ready**   | No published conformance target | No published conformance target | No published conformance target |
+| **RTL support**          | **Tailwind v4 logical properties**            | Partial                         | Partial                         | Partial                         |
+| **Keyboard navigation**  | **Full keyboard support + ARIA-live regions** | Partial                         | Partial                         | Partial                         |
+
+## Common Scenarios
+
+### Scenario A — The Edge-Deployed Global App
+
+**The problem.** You are shipping a customer-facing site to users on three continents. Latency on customer-facing pages can measurably affect conversions, and serverless cold starts can interrupt the experience.
+
+**What you need.** Edge-friendly deployment, i18n that doesn't add runtime to pages, sub-second cold starts, and media delivered from object storage close to users.
+
+**Why SveltyCMS.** The admin compiles away to zero runtime, Paraglide i18n compiles to a zero-runtime bundle, cold starts stay under a second, and the R2/S3 storage adapters plus signed URLs support global media delivery. The stack deploys to edge runtimes as SvelteKit.
+
+**How the alternatives compare.** React-based alternatives include runtime admin overhead and runtime i18n on pages; published benchmarks place their cold starts in the seconds range on edge/serverless runtimes.
+
+### Scenario B — The B2B SaaS Provider
+
+**The problem.** You sell software to enterprises that run a security review before closing. SSO, SCIM, and audit logs are on the checklist — and so is the vendor's price tag.
+
+**What you need.** SAML/OIDC SSO, SCIM provisioning, tamper-evident audit logs, and multi-tenancy so each customer's data stays isolated.
+
+**Why SveltyCMS may fit.** Public docs place SSO, SCIM, chained audit logs, and multi-tenancy in **core**. That can reduce paid-tier dependencies versus some alternatives — still map controls to your auditor; not a certification claim.
+
+**How the alternatives compare.** In Strapi and Payload, SSO, SCIM, and audit logs are offered in paid enterprise tiers; in Directus, compliance-grade audit logs and SCIM are enterprise modules. Custom implementation is possible but represents additional engineering effort.
+
+### Scenario C — The Media-Heavy Agency
+
+**The problem.** You run client sites with large media libraries. Uploads can time out, duplicates inflate storage bills, and sharing assets with clients often means standing up a separate service.
+
+**What you need.** Streaming uploads, deduplication, secure client sharing, per-file version history, and usage analytics.
+
+**Why SveltyCMS may fit.** Documented streaming uploads, content-hash dedup, signed share links, per-file history, and DAM analytics in core (verify current docs for your release).
+
+**How the alternatives compare.** Alternatives typically rely on buffer-based uploads and plugin-based workflows for sharing, deduplication, and analytics, or on separate file-sharing tooling.
+
+## Commerce packaging (public docs, August 2026)
+
+Like-for-like notes on **documented native ecommerce capabilities**. Not a ranking; verify current vendor docs before a purchase decision.
+
+| Area                                     | SveltyCMS (self-hosted, Aug 2026)                                 | Payload CMS ecommerce plugin (public docs / RFC)                 |
+| :--------------------------------------- | :---------------------------------------------------------------- | :--------------------------------------------------------------- |
+| Catalog (products, variants, categories) | Preset collections                                                | Documented native                                                |
+| Catalog import (Woo / Shopify)           | Smart Importer (`--format=woocommerce` / `shopify`)               | Documented import paths vary by plugin                           |
+| Admin dashboard (orders / inventory)     | Freemium widgets, 14-day trial (`dashboard:commerce-*`)           | Admin UI is documented as part of the ecommerce plugin           |
+| Reviews                                  | Preset `product_reviews`                                          | Not listed as a native plugin feature                            |
+| Carts / orders                           | Opt-in Commerce plugin: guest cart + checkout (`/api/commerce/*`) | Documented native                                                |
+| Coupons / shipping / tax **data**        | Preset tables; live UPS/FedEx/DHL + TaxJar are **paid plugins**   | Shipping, taxes, discount codes documented as native gaps or RFC |
+| Totals / PaymentIntent amount            | `computeTotals`; pay uses server `grandTotal` (orderId only)      | Open issue: adapter uses `cart.subtotal` as PaymentIntent amount |
+| Subscriptions / gift cards / bundles     | Commerce Pro-gated; Stripe Billing not wired                      | Documented native gaps / RFC                                     |
+| Multi-tenancy on commerce data           | `tenantId` on every commerce query                                | Not documented as built-in                                       |
+
+Product map: [E-Commerce Overview](../reference/architecture/ecommerce-overview.mdx) (core stays a CMS; store pieces are plugins / widgets / gated handlers).
+
+## Verdict
+
+No CMS wins every evaluation — and claiming otherwise is how trust gets lost. Here is our honest read:
+
+- **Choose SveltyCMS when** you need enterprise-grade security and compliance (SSO, SCIM, tamper-evident audit logs) without enterprise pricing; you need Git-driven Schema as Code with native TypeScript and PII-safe multi-environment sync in core; you're building performance-sensitive or edge-deployed products; you run multi-tenant SaaS; your team is already SvelteKit or wants a single coherent stack rather than a separate admin framework layered on the front end; or your workloads are media-heavy.
+- **Choose Payload CMS when** your team is React/Next.js and wants to share components between the admin and the front end, or when a code-first model deeply integrated with Next.js outweighs the cost of composing plugins for SSO, audit, and rate limiting.
+- **Choose Strapi when** the plugin marketplace is your priority — one of the largest ecosystems of the four, to our knowledge, suited to teams that ship by assembling integrations — and your security requirements fit within its free tier; SSO, SCIM, and audit logs are offered in paid tiers.
+- **Choose Directus when** you want to manage an existing SQL database with a powerful admin UI, you want to use the Directus 12.3 CLI (`d6s`) for JSON-based environment sync, you're data-first rather than content-first, or you need MSSQL support. Budget for enterprise modules if compliance-grade audit logging or SCIM are on your checklist.
+
+---
+
+## Sources and Methodology
+
+- **Date of assessment:** July 2026 (list/count adapter numbers refreshed **2026-08-04**; commerce table **2026-08-19**). Vendor docs and pricing change; re-check before purchase decisions.
+- **Like-for-like basis:** SveltyCMS free core vs each platform’s free/community edition where applicable; paid tiers noted separately. Self-hosted deployments.
+- **Performance figures:** SveltyCMS numbers are **self-measured** (`tests/benchmarks/`, Intel i7-13700H class host, Bun 1.3.x). Competitor cold starts are **public write-ups**, **not** our harness. No third-party audit of our benches.
+- **What we avoid:** Absolute speed rankings, “only platform,” or “0.024 ms list responses” without defining the exact operation (count L1 vs full list vs HTTP).
+- **Primary sources:**
+  - Payload CMS — [documentation](https://payloadcms.com/docs) · [pricing](https://payloadcms.com/pricing)
+  - Strapi — [documentation](https://docs.strapi.io) · [pricing](https://strapi.io/pricing)
+  - Directus — [documentation](https://docs.directus.io) · [pricing](https://directus.io/pricing)
+  - SveltyCMS benchmark reports and reproduction commands ([local](./benchmarks/index.mdx))
+- **Legal basis:** This comparison is prepared in accordance with EU Directive 2006/114/EC on misleading and comparative advertising ([EUR-Lex](https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32006L0114)) and German UWG §6 (Unfair Competition Act). Feature-tier claims are verifiable against the vendor documentation and pricing pages listed above.
+
+## Related
+
+- [Achievements Log 2026](./achievements-2026.mdx)
+- [Benchmark Reports](./benchmarks/index.mdx)
+- [Media System Architecture](../reference/architecture/media-system.mdx)

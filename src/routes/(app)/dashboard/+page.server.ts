@@ -2,155 +2,154 @@
  * @file src/routes/(app)/dashboard/+page.server.ts
  * @description Server-side logic for the dashboard page.
  *
- * ### Props
- * - `user`: The authenticated user data.
- * - `availableWidgets`: Dynamically discovered widgets from the widgets folder
- *
  * Features:
  * - User authentication and authorization
- * - Dynamic widget discovery from widgets folder
+ * - Widget picker metadata from widget.json (no Svelte module eval)
+ * - Marketplace-portable widget packages (widgets/<folder>/index.svelte + widget.json)
+ * - Saved layout hydrated via LocalCMS/db so the client skips /api/system-preferences
  * - Server-side UUID v4 generation for new widgets
- * - Support for dynamic width and height sizing
  */
 
-import { redirect, json, error } from '@sveltejs/kit';
-import type { PageServerLoad, Actions } from './$types';
-import { readdirSync } from 'fs';
-import { join } from 'path';
-import { v4 as uuidv4 } from 'uuid';
+import { error, json } from "@sveltejs/kit";
+import { isAdmin } from "@src/databases/auth/constants";
+import type { DashboardWidgetConfig } from "@src/content/types";
+import type { DatabaseId } from "@src/databases/db-interface";
+import { logger } from "@utils/logger";
+import { getAuthenticatedUser } from "@utils/page-guards.server";
+import { generateUUID as uuidv4 } from "@utils/native-utils";
+import { getHotCollections } from "@src/services/intelligence/behavioral-learner";
+import { rethrow } from "@utils/error-handling";
+import type { Actions, PageServerLoad } from "./$types";
+import { getInstalledDashboardWidgets } from "./widgets/manifest-registry";
+import {
+  filterPickerByPlugins,
+  manifestsToPickerList,
+  normalizeDashboardLayout,
+  sortWidgetsByHotCollections,
+} from "./widget-runtime";
 
-// System Logger
-import { logger } from '@utils/logger.server';
+const LAYOUT_KEY = "dashboard.layout.default";
 
-interface WidgetInfo {
-	componentName: string;
-	name: string;
-	icon: string;
-	description?: string;
+async function loadUserDashboardLayout(
+  userId: string,
+  tenantId: DatabaseId | null | undefined,
+): Promise<DashboardWidgetConfig[] | null> {
+  try {
+    const { getDb } = await import("@src/databases/db");
+    const db = getDb();
+    if (!db?.system?.preferences) return null;
+    const result = await db.system.preferences.get(LAYOUT_KEY, {
+      scope: "user",
+      userId: userId as DatabaseId,
+      tenantId,
+    });
+    if (!result.success) return null;
+    if (result.data == null) return [];
+    return normalizeDashboardLayout(result.data);
+  } catch (err) {
+    rethrow(err);
+    logger.debug("Dashboard layout not available from DB; client will fetch", err);
+    return null;
+  }
 }
 
-async function getWidgetMetadata(componentName: string): Promise<WidgetInfo> {
-	try {
-		const widgetModule = await import(`./widgets/${componentName}.svelte`);
-		if (widgetModule.widgetMeta) {
-			return {
-				componentName,
-				name: widgetModule.widgetMeta.name,
-				icon: widgetModule.widgetMeta.icon,
-				description: widgetModule.widgetMeta.description
-			};
-		}
-		logger.warn(`Widget ${componentName} has no widgetMeta export, using fallback`);
-	} catch (err) {
-		logger.error(`Failed to load metadata for widget ${componentName}:`, err);
-	}
+export const load: PageServerLoad = async ({ locals, parent }) => {
+  const user = getAuthenticatedUser(locals);
+  // Prefer hook flag; only treat role as admin when locals.isAdmin is undefined
+  const isAdminUser = locals.isAdmin === true || isAdmin(user);
+  const tenantRoles = locals.roles ?? [];
 
-	return {
-		componentName,
-		name: componentName
-			.replace('Widget', '')
-			.replace(/([A-Z])/g, ' $1')
-			.trim(),
-		icon: 'mdi:widgets',
-		description: 'Custom dashboard widget'
-	};
-}
+  // Check if user has permission to access dashboard.
+  // Guard tenantRoles: locals.roles can be undefined (e.g. roles not yet loaded), and calling
+  // .some() on undefined would 500 the whole dashboard instead of doing a clean permission check.
+  const hasDashboardPermission =
+    isAdminUser ||
+    tenantRoles.some((role) =>
+      role.permissions?.some((p) => {
+        const [resource, action] = p.split(":");
+        return resource === "dashboard" && action === "read";
+      }),
+    );
 
-async function discoverWidgets(): Promise<WidgetInfo[]> {
-	try {
-		const widgetsPath = join(process.cwd(), 'src/routes/(app)/dashboard/widgets');
-		const files = readdirSync(widgetsPath, { withFileTypes: true });
+  if (!hasDashboardPermission) {
+    logger.warn(
+      `User ${user._id} (${user.email}) does not have permission to access dashboard. Redirecting.`,
+    );
+    throw error(403, "Insufficient permissions to access dashboard");
+  }
 
-		const widgetPromises = files
-			.filter((file) => file.isFile() && file.name.endsWith('Widget.svelte'))
-			.map(async (file) => {
-				const componentName = file.name.replace('.svelte', '');
-				return await getWidgetMetadata(componentName);
-			});
+  logger.trace(`User authenticated successfully for dashboard: ${user._id}`);
 
-		const widgets = await Promise.all(widgetPromises);
-		const sortedWidgets = widgets.sort((a, b) => a.name.localeCompare(b.name));
+  const { _id, ...rest } = user;
+  const userId = _id.toString();
+  const tenant = locals.tenantId || "global";
+  const hotCollections = getHotCollections(tenant, 20);
+  const hotIds = new Set(hotCollections.map((c) => c.id));
 
-		logger.trace(`Discovered ${sortedWidgets.length} dashboard widgets`);
-		return sortedWidgets;
-	} catch (err) {
-		logger.error('Failed to discover widgets:', err);
-		return [];
-	}
-}
+  let pluginStates: Record<string, boolean> = {};
+  try {
+    const parentData = await parent?.();
+    pluginStates = (parentData?.pluginStates ?? {}) as Record<string, boolean>;
+  } catch (err) {
+    rethrow(err);
+    logger.debug(
+      "Dashboard parent pluginStates unavailable; plugin-gated widgets stay hidden",
+      err,
+    );
+  }
 
-export const load: PageServerLoad = async ({ locals }) => {
-	const { user, isAdmin, roles: tenantRoles } = locals;
-	if (!user) {
-		logger.warn('User not authenticated, redirecting to login.');
-		throw redirect(301, '/login');
-	}
+  const picker = filterPickerByPlugins(
+    sortWidgetsByHotCollections(manifestsToPickerList(getInstalledDashboardWidgets()), hotIds),
+    pluginStates,
+  );
+  logger.trace(`Discovered ${picker.length} optional dashboard widgets (widget.json)`);
 
-	// Check if user has permission to access dashboard
-	const hasDashboardPermission =
-		isAdmin ||
-		tenantRoles.some((role) =>
-			role.permissions?.some((p) => {
-				const [resource, action] = p.split(':');
-				return resource === 'dashboard' && action === 'read';
-			})
-		);
+  const initialPreferences = await loadUserDashboardLayout(userId, locals.tenantId);
 
-	if (!hasDashboardPermission) {
-		logger.warn(`User ${user._id} (${user.email}) does not have permission to access dashboard. Redirecting.`);
-		throw error(403, 'Insufficient permissions to access dashboard');
-	}
-
-	logger.trace(`User authenticated successfully for dashboard: ${user._id}`);
-
-	const { _id, ...rest } = user;
-	const availableWidgets = await discoverWidgets();
-
-	return {
-		pageData: {
-			user: {
-				id: _id.toString(),
-				...rest
-			},
-			isAdmin
-		},
-		availableWidgets
-	};
+  return {
+    pageData: {
+      user: { id: userId, ...rest },
+      isAdmin: isAdminUser,
+    },
+    availableWidgets: picker,
+    initialPreferences,
+    hotCollections,
+  };
 };
 
 export const actions: Actions = {
-	default: async ({ request, locals }) => {
-		const user = locals.user;
-		if (!user) {
-			logger.warn('Unauthorized attempt to add widget');
-			throw error(401, 'Unauthorized');
-		}
+  default: async ({ request, locals }) => {
+    const user = getAuthenticatedUser(locals);
 
-		const data = await request.json();
-		const { userId, component, label, icon, size } = data;
+    const data = await request.json();
+    const { userId, component, label, icon, size } = data;
 
-		if (userId !== user._id.toString()) {
-			logger.warn(`User ID mismatch: ${userId} vs ${user._id}`);
-			throw error(403, 'Forbidden');
-		}
+    if (userId !== user._id.toString()) {
+      logger.warn(`User ID mismatch: ${userId} vs ${user._id}`);
+      throw error(403, "Forbidden");
+    }
 
-		if (!component || !label || !icon || !size || typeof size.w !== 'number' || typeof size.h !== 'number') {
-			logger.error('Invalid widget data:', data);
-			throw error(400, 'Invalid widget data');
-		}
+    if (
+      !(component && label && icon && size) ||
+      typeof size.w !== "number" ||
+      typeof size.h !== "number"
+    ) {
+      logger.error("Invalid widget data:", data);
+      throw error(400, "Invalid widget data");
+    }
 
-		const widget = {
-			id: uuidv4(),
-			component,
-			label,
-			icon,
-			size,
-			gridPosition: 0,
-			movable: true,
-			resizable: true
-		};
+    const widget = {
+      id: uuidv4(),
+      component,
+      label,
+      icon,
+      size,
+      gridPosition: 0,
+      movable: true,
+      resizable: true,
+    };
 
-		logger.trace(`Created widget ${widget.id} for user ${userId}`);
-		return json(widget);
-	}
+    logger.trace(`Created widget ${widget.id} for user ${userId}`);
+    return json(widget);
+  },
 };

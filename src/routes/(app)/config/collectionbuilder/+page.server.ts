@@ -2,90 +2,194 @@
  * @file src/routes/(app)/config/collectionbuilder/+page.server.ts
  * @description Server-side logic for Collection Builder page authentication and authorization.
  *
- * #Features:
- * - Checks for authenticated user in locals (set by hooks.server.ts).
- * - Verifies user permissions for collection builder access (`config:collectionbuilder`).
- * - Fetches initial content structure data from `contentManager`.
- * - Determines user's admin status based on roles.
- * - Redirects unauthenticated users to login.
- * - Throws 403 error for insufficient permissions.
- * - Returns user data and content structure for client-side rendering.
+ * Updates:
+ * - Uses the enhanced functional contentSystem facade.
+ * - Centralized permission checking for all actions using a helper function.
+ * - Standardized error handling for consistency across load/actions.
  */
 
-import { error, redirect } from '@sveltejs/kit';
-import type { PageServerLoad } from './$types';
-
-// Auth - Use cached roles from locals instead of global config
-import { hasPermissionWithRoles } from '@src/databases/auth/permissions';
-
 // System Logger
-import { contentManager } from '@root/src/content/ContentManager';
-import { logger } from '@utils/logger.server';
+import { contentSystem } from "@src/content/index.server";
+// Auth - Use cached roles from locals instead of global config
+import { hasCollectionBuilderPermission } from "@src/databases/auth/permissions";
+import { error, fail, isRedirect, isHttpError } from "@sveltejs/kit";
+import { logger } from "@utils/logger";
+import { getAuthenticatedUser } from "@utils/page-guards.server";
+import type { Actions, PageServerLoad } from "./$types";
+import { serializeStructureNodes } from "./collectionbuilder-local.server";
+import { parseIdList, parseJsonArray, parseOperations } from "./collectionbuilder-utils";
+
+/**
+ * @internal Helper function to enforce collection builder permissions.
+ * @throws {Error} If user lacks required permission or is not logged in.
+ */
+function requireCollectionBuilderPermission(locals: App.Locals): void {
+  const user = getAuthenticatedUser(locals);
+  const { roles: tenantRoles, isAdmin } = locals;
+  if (!hasCollectionBuilderPermission(user, tenantRoles, isAdmin)) {
+    logger.warn("[CollectionBuilder] Permission denied for action.", {
+      userId: user._id,
+    });
+    throw error(403, "Insufficient permissions to manage collections");
+  }
+}
 
 export const load: PageServerLoad = async ({ locals }) => {
-	try {
-		const { user, roles: tenantRoles, isAdmin } = locals;
+  try {
+    const user = getAuthenticatedUser(locals);
+    const { isAdmin, tenantId } = locals;
 
-		// User authentication already done by handleAuthorization hook
-		if (!user) {
-			logger.warn('User not authenticated, redirecting to login');
-			throw redirect(302, '/login');
-		}
+    requireCollectionBuilderPermission(locals);
 
-		// Check user permission for collection builder using cached roles from locals
-		const hasCollectionBuilderPermission = hasPermissionWithRoles(user, 'config:collectionbuilder', tenantRoles);
+    if (!contentSystem.isInitialized) {
+      try {
+        await contentSystem.initialize(tenantId, true);
+      } catch (err) {
+        // Never hard-500 the builder when the content engine is still warming
+        // after setup (observed: fresh installs got “collections can't be
+        // found” 500s). Log and fall through to the empty-state self-heal.
+        logger.warn(
+          "[CollectionBuilder] Content engine init failed — rendering empty structure:",
+          err,
+        );
+      }
+    }
 
-		if (!hasCollectionBuilderPermission) {
-			const userRole = tenantRoles.find((r) => r._id === user.role);
-			logger.warn('Permission denied for collection builder', {
-				userId: user._id,
-				userRole: user.role,
-				roleFound: !!userRole,
-				isAdmin: userRole?.isAdmin,
-				rolePermissions: userRole?.permissions?.length || 0
-			});
-			throw error(403, 'Insufficient permissions');
-		}
+    let contentStructure = await contentSystem
+      .getContentStructureFromDatabase("flat", tenantId)
+      .catch((err) => {
+        logger.warn("[CollectionBuilder] Structure read failed — treating as empty:", err);
+        return [] as never[];
+      });
 
-		// Initialize ContentManager before accessing data
-		await contentManager.initialize();
+    // Self-heal empty DB after a skipReconciliation setup — one full refresh only.
+    if ((!contentStructure || contentStructure.length === 0) && contentSystem.isInitialized) {
+      logger.warn(
+        "[CollectionBuilder] No content nodes found despite system being initialized. Triggering refresh...",
+      );
+      try {
+        await contentSystem.refresh(tenantId, false, false);
+        contentStructure = await contentSystem.getContentStructureFromDatabase("flat", tenantId);
+      } catch (err) {
+        logger.warn(
+          "[CollectionBuilder] Self-heal refresh failed — rendering empty structure:",
+          err,
+        );
+        contentStructure = [];
+      }
+    }
 
-		// Fetch the initial content structure directly from database
-		// CollectionBuilder needs the current database state (not in-memory cache) to:
-		// - See the most recently persisted order and parentId values
-		// - Ensure consistency when saving drag-and-drop changes back to DB
-		// - Work with the actual stored data, not cached/compiled schemas
-		// The database stores lightweight metadata without heavy collectionDef.fields arrays
-		const contentStructure = await contentManager.getContentStructureFromDatabase('nested');
+    if (!Array.isArray(contentStructure)) {
+      logger.error("[CollectionBuilder] contentStructure is not an array!", {
+        type: typeof contentStructure,
+      });
+    }
 
-		// Use isAdmin from locals (already computed by handleAuthorization hook)
-		// No need to re-calculate from roles
+    const serializedStructure = serializeStructureNodes(contentStructure || []);
+    const userId = user._id?.toString();
 
-		// Serialize ObjectIds to strings for client-side usage
-		// This is crucial because MongoDB ObjectId instances cannot be serialized by SvelteKit
-		const serializedStructure = contentStructure.map((node) => ({
-			...node,
-			_id: node._id.toString(),
-			...(node.parentId ? { parentId: node.parentId.toString() } : {})
-		}));
+    return {
+      user: {
+        id: userId || "missing-user-id",
+        email: user.email,
+        username: user.username,
+        role: user.role,
+        avatar: user.avatar,
+        locale: user.locale,
+        isAdmin,
+      },
+      contentStructure: serializedStructure,
+    };
+  } catch (err) {
+    // Re-throw SvelteKit's special error/redirect objects (they are NOT instanceof Error)
+    if (isRedirect(err) || isHttpError(err)) {
+      throw err;
+    }
+    if (err instanceof Error && "status" in err) {
+      throw err;
+    }
+    const message = `Error in load function: ${err instanceof Error ? err.message : String(err)}`;
+    logger.error(message, {
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    throw error(500, message);
+  }
+};
 
-		// Return user data with proper admin status and the content structure
-		const { _id, ...rest } = user;
-		return {
-			user: {
-				id: _id.toString(),
-				...rest,
-				isAdmin // Add the properly calculated admin status
-			},
-			contentStructure: serializedStructure
-		};
-	} catch (err) {
-		if (err instanceof Error && 'status' in err) {
-			// This is likely a redirect or an error we've already handled
-			throw err;
-		}
-		const message = `Error in load function: ${err instanceof Error ? err.message : String(err)}`;
-		logger.error(message);
-		throw error(500, message);
-	}
+export const actions: Actions = {
+  deleteCollections: async ({ request, locals }) => {
+    requireCollectionBuilderPermission(locals);
+
+    const formData = await request.formData();
+    const ids = parseIdList(parseJsonArray(formData.get("ids")));
+
+    if (!ids) {
+      return fail(400, { message: "Invalid IDs for deletion" });
+    }
+
+    try {
+      const currentStructure = await contentSystem.getContentStructureFromDatabase(
+        "flat",
+        locals.tenantId,
+      );
+      const idSet = new Set(ids);
+      const operations = (currentStructure || [])
+        .filter((node: { _id?: { toString(): string }; path?: string }) =>
+          idSet.has(node._id?.toString() ?? ""),
+        )
+        .map((node: { path?: string }) => ({
+          type: "delete" as const,
+          node: { path: node.path ?? "" },
+        }));
+
+      await contentSystem.upsertContentNodes(operations, locals.tenantId);
+      await contentSystem.refresh(locals.tenantId);
+      const { invalidateFirstCollectionPathCache } =
+        await import("@utils/server/collection-utils.server");
+      invalidateFirstCollectionPathCache();
+
+      return { success: true };
+    } catch (err) {
+      logger.error("Error deleting collections:", err);
+      return fail(500, { message: "Failed to delete collections" });
+    }
+  },
+
+  saveConfig: async ({ request, locals }) => {
+    requireCollectionBuilderPermission(locals);
+
+    const formData = await request.formData();
+    const operations = parseOperations(parseJsonArray(formData.get("items")));
+
+    if (!operations) {
+      return fail(400, { message: "Invalid items for save" });
+    }
+
+    try {
+      const { executeGuiStructureSave } = await import("./collectionbuilder.server");
+      return await executeGuiStructureSave(locals.tenantId ?? null, operations);
+    } catch (err) {
+      logger.error("Error saving config:", err);
+      return fail(500, { message: "Failed to save configuration" });
+    }
+  },
+
+  loadPreset: async ({ request, locals }) => {
+    requireCollectionBuilderPermission(locals);
+
+    const formData = await request.formData();
+    const presetId = String(formData.get("presetId") ?? "").trim();
+
+    try {
+      const { installPresetCollections } = await import("./collectionbuilder.server");
+      const result = await installPresetCollections(locals.tenantId ?? null, presetId);
+      const { invalidateFirstCollectionPathCache } =
+        await import("@utils/server/collection-utils.server");
+      invalidateFirstCollectionPathCache();
+      return result;
+    } catch (err) {
+      logger.error("Failed to install preset:", err);
+      return fail(500, { message: "Failed to install preset" });
+    }
+  },
 };

@@ -1,0 +1,55 @@
+/**
+ * @file src/routes/api/preview/+server.ts
+ * @description Draft-mode handshake for live preview (sets cookies, redirects to target page).
+ */
+
+import { previewService } from "@src/services/content/preview-service";
+import { redirect } from "@sveltejs/kit";
+import { raise } from "@utils/error-handling";
+import type { RequestHandler } from "./$types";
+
+export const GET: RequestHandler = async ({ url, cookies }) => {
+  const previewToken = url.searchParams.get("preview_token") || url.searchParams.get("token");
+  const slug = url.searchParams.get("slug") || "/";
+
+  if (!previewToken) {
+    raise(400, "Missing preview_token");
+  }
+
+  const validated = previewService.validateToken(previewToken);
+  if (!validated.valid) {
+    raise(401, "Invalid or expired preview token");
+  }
+
+  const isSecure = url.protocol === "https:";
+
+  cookies.set("cms_draft_mode", "true", {
+    path: "/",
+    httpOnly: true,
+    sameSite: isSecure ? "none" : "lax",
+    secure: isSecure,
+    maxAge: 60 * 60,
+  });
+
+  cookies.set("cms_preview_entry", validated.entryId, {
+    path: "/",
+    httpOnly: true,
+    sameSite: isSecure ? "none" : "lax",
+    secure: isSecure,
+    maxAge: 60 * 60,
+  });
+
+  // 🛡️ Only allow relative paths — block protocol-relative (//evil.com) and
+  // absolute URLs so a crafted slug cannot turn this into an open redirect.
+  if (
+    slug.startsWith("//") ||
+    slug.startsWith("http://") ||
+    slug.startsWith("https://") ||
+    slug.startsWith("/\\") ||
+    slug.includes("\\")
+  ) {
+    raise(400, "Invalid preview target");
+  }
+  const target = slug.startsWith("/") ? slug : `/${slug}`;
+  throw redirect(307, `${target}?preview_token=${encodeURIComponent(previewToken)}`);
+};

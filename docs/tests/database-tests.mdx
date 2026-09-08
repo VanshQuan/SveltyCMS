@@ -1,756 +1,310 @@
 ---
-path: 'docs/tests/database-tests.mdx'
-title: 'Database & Authentication Testing Guide'
-description: 'Comprehensive guide for testing the database layer, authentication system, and MongoDB adapter in SveltyCMS.'
+path: "docs/tests/database-tests.mdx"
+title: "Database & Authentication Testing Guide"
+description: "Comprehensive guide for testing the database layer, authentication system, and multi-database support in SveltyCMS."
 order: 4
-icon: 'mdi:database-check'
-author: 'admin'
-created: '2025-11-08'
-updated: '2025-11-08'
+icon: "mdi:database-check"
+author: "SveltyCMS Team"
+created: "2025-11-08"
+updated: "2026-08-04"
 tags:
-  - 'testing'
-  - 'database'
-  - 'authentication'
-  - 'mongodb'
-  - 'security'
+  - "testing"
+  - "database"
+  - "authentication"
+  - "sqlite"
+  - "mongodb"
 ---
 
 # Database & Authentication Testing Guide
 
 ## Overview
 
-SveltyCMS uses a **database-agnostic architecture** with an interface (`IDBAdapter`) that can be implemented for any database system. Currently, MongoDB is the primary adapter, with SQL support planned.
+SveltyCMS uses a **database-agnostic architecture** via the `IDBAdapter` interface. In 2026, we enhanced our strategy with **Parallel Worker Isolation** and **Triple-Lock Security** to ensure high performance and zero production risk.
 
-This guide covers testing for:
+This guide covers:
 
-- **Database Interface Contract** - Ensures adapters implement the full interface
-- **MongoDB Adapter** - Tests MongoDB-specific implementation
-- **Authentication System** - Tests user auth, sessions, tokens, permissions
-- **Multi-Tenant Support** - Tests tenant isolation and scoping
+- **SQLite (Default)**: Primary driver for unit and integration tests.
+- **Parallel Worker Isolation**: How we run concurrent tests without database locks.
+- **Strict Isolation**: How we protect production data from test interference.
+- **Network Standardization**: Why we use `127.0.0.1` exclusively for testing.
 
-## Architecture
+## The SQLite-First Strategy (2026)
 
-### Database Layers
+Previously, local testing required a running MongoDB instance, which often led to authentication errors or "Server Busy" timeouts.
 
-```
-┌─────────────────────────────────────┐
-│    Application Code (Services)      │
-└──────────────┬──────────────────────┘
-               │
-┌──────────────▼──────────────────────┐
-│    Database Interface (IDBAdapter)   │ ← Contract Tests
-│  - CRUD Operations                   │
-│  - Auth Methods                      │
-│  - Query Builder                     │
-│  - Batch Operations                  │
-└──────────────┬──────────────────────┘
-               │
-┌──────────────▼──────────────────────┐
-│   MongoDB Adapter Implementation     │ ← Adapter Tests
-│  - MongoDBAdapter class              │
-│  - Mongoose Models                   │
-│  - MongoDB-specific features         │
-└──────────────┬──────────────────────┘
-               │
-┌──────────────▼──────────────────────┐
-│      MongoDB Database                │
-└─────────────────────────────────────┘
-```
+### Why SQLite for Tests?
 
-### Authentication System
-
-```
-┌─────────────────────────────────────┐
-│        Auth Class                    │ ← Auth System Tests
-│  - User Management                   │
-│  - Session Management                │
-│  - Token Management                  │
-│  - Role & Permission System          │
-│  - 2FA/TOTP                          │
-│  - Quantum-Resistant (Argon2id)      │
-└──────────────┬──────────────────────┘
-               │
-┌──────────────▼──────────────────────┐
-│    Database Adapter (IDBAdapter)     │
-└─────────────────────────────────────┘
-```
-
-## Test Files
-
-### 1. Database Interface Tests
-
-**File:** `tests/bun/databases/db-interface.test.ts`
-
-**Purpose:** Validate that database adapters properly implement the `IDBAdapter` interface contract.
-
-**Coverage:** 50+ test cases across 15+ test suites
-
-**Key Test Areas:**
-
-#### Connection Management (5 tests)
-
-- `connect()` method implementation
-- `disconnect()` method implementation
-- `isConnected()` status checking
-- Error handling for connection failures
-- Reconnection logic
-
-#### CRUD Operations (8 tests)
-
-- `findOne()` - Single document retrieval
-- `findMany()` - Multiple documents with filters
-- `create()` - Document creation
-- `update()` - Document updates
-- `delete()` - Document deletion
-- `batchCreate()` - Bulk creation
-- `batchUpdate()` - Bulk updates
-- `batchDelete()` - Bulk deletion
-
-#### Authentication Interface (12 tests)
-
-- User management methods
-  - `createUser()`, `getUserById()`, `getUserByEmail()`
-  - `updateUser()`, `deleteUser()`, `listUsers()`
-- Session management methods
-  - `createSession()`, `getSession()`, `deleteSession()`
-  - `invalidateUserSessions()`, `cleanupExpiredSessions()`
-- Token management methods
-  - `createToken()`, `validateToken()`, `consumeToken()`
-  - `cleanupExpiredTokens()`
-- Role & permission methods
-  - `createRole()`, `getRole()`, `updateRole()`, `deleteRole()`
-
-#### Query Builder (6 tests)
-
-- Filter construction
-- Sort operations
-- Pagination (offset, limit)
-- Field selection
-- Join operations
-- Aggregation pipelines
-
-#### Content Management (7 tests)
-
-- Content CRUD operations
-- Version management
-- Publishing workflow
-- Metadata handling
-- Relationships
-
-#### Media Management (5 tests)
-
-- Upload handling
-- Retrieval by ID/path
-- Deletion
-- Metadata storage
-- Transformations
-
-**Running:**
-
-```bash
-bun test tests/bun/databases/db-interface.test.ts
-```
+1. **Zero Latency**: No network overhead; tests run in milliseconds.
+2. **Zero Config**: No Docker or local Mongo service required.
+3. **Deterministic**: Every test run starts with a fresh database.
 
 ---
 
-### 2. MongoDB Adapter Tests
+## ⚡ Parallel Worker Isolation
 
-**File:** `tests/bun/databases/mongodb-adapter.test.ts`
+To maximize performance, SveltyCMS supports parallel E2E testing using a **Database-per-Worker** strategy.
 
-**Purpose:** Test MongoDB-specific implementation details and optimizations.
+### How it Works:
 
-**Coverage:** 40+ test cases across 10 test suites
-
-**Key Test Areas:**
-
-#### Model Registration (4 tests)
-
-- Idempotent model registration
-- User model registration
-- Session model registration
-- Token model registration
-
-#### Connection Management (5 tests)
-
-- Connection with retry logic
-- Exponential backoff implementation
-- Connection pooling
-- Disconnect handling
-- Error recovery
-
-#### CRUD Operations (7 tests)
-
-- Create with schema validation
-- Read with projections
-- Update operations (findOneAndUpdate)
-- Delete operations (findOneAndDelete)
-- Upsert operations
-- Array operations ($push, $pull)
-
-#### Batch Operations (4 tests)
-
-- Parallel batch processing
-- Transaction support
-- Error handling in batches
-- Performance optimization
-
-#### Query Builder (6 tests)
-
-- Complex filter queries
-- Aggregation pipelines
-- Population (joins)
-- Text search
-- Geospatial queries
-- Index usage
-
-#### Transaction Support (3 tests)
-
-- Multi-document ACID transactions
-- Atomic operations
-- Rollback on error
-
-#### MongoDB Features (5 tests)
-
-- Index creation and usage
-- Full-text search
-- Geospatial queries
-- TTL indexes
-- Aggregation framework
-
-#### Error Handling (3 tests)
-
-- Network errors
-- Validation errors
-- Duplicate key errors
-
-#### Performance (3 tests)
-
-- Query optimization
-- Connection pooling
-- Bulk write performance
-
-**Running:**
-
-```bash
-bun test tests/bun/databases/mongodb-adapter.test.ts
-```
+1.  **Header-Based Routing**: Playwright workers include an `x-test-worker-index` header in every request.
+2.  **Dynamic Connection Map**: The SQLite adapter maintains a map of worker-specific connections.
+3.  **Isolated Files**: Each worker operates on its own dedicated file (e.g., `cms_worker1.db`), eliminating "Database is locked" errors and allowing 4+ concurrent workers.
 
 ---
 
-### 3. Authentication System Tests
+## Test Architecture
 
-**File:** `tests/bun/databases/auth-system.test.ts`
+### Isolation Flow
 
-**Purpose:** Comprehensive testing of authentication, authorization, and security features.
+SveltyCMS enforces a hard boundary between production and testing:
 
-**Coverage:** 50+ test cases across 12 test suites
+1. **TEST_MODE**: Enabled for integration / E2E / local harnesses (`private-config-policy.ts`).
+2. **Config Redirect**: Automated runs load **`config/private.test.ts` only** — never the developer's live `config/private.ts` (user DB risk).
+3. **Safety Guard**: `config-state.ts` fails if `TEST_MODE` uses a non-isolated `DB_NAME` or a name equal to live `private.ts`.
+4. **Triple-Lock Security**: Testing routes are stripped from production builds and require a cryptographic handshake for activation.
 
-**Key Test Areas:**
+### Database Test Sequence
 
-#### Password Security (5 tests)
+````mermaid
+sequenceDiagram
+    participant Runner as Playwright Worker
+    participant Server as Preview Server
+    participant DB as SQLite (worker_X.db)
 
-- **Argon2id hashing** (quantum-resistant)
-- Password verification
-- Unique salt generation
-- Minimum password length
-- Timing attack prevention
-
-**Security Features:**
-
-- Memory-hard algorithm (prevents GPU cracking)
-- Time-hard algorithm (prevents ASIC acceleration)
-- Quantum-resistant design
-- Configurable work factors
-
-#### User Management (9 tests)
-
-- Create user with required fields
-- Prevent duplicate emails
-- Retrieve by ID/email
-- Update user attributes
-- Delete user
-- List users with pagination
-- Block/unblock users
-- Tenant scoping
-
-#### Session Management (9 tests)
-
-- Create session for authenticated user
-- Validate active session
-- Reject expired session
-- Delete session (logout)
-- Invalidate all user sessions
-- Cleanup expired sessions
-- Update session expiry
-- Session rotation
-- Session fixation attack prevention
-
-**Session Security:**
-
-- Secure cookies (HttpOnly, Secure, SameSite)
-- Session rotation on privilege change
-- Automatic expiry and cleanup
-- CSRF token integration
-
-#### Token Management (8 tests)
-
-- Create token with expiration
-- Validate active token
-- Reject expired token
-- Consume token (one-time use)
-- Reject consumed token
-- Cleanup expired tokens
-- Block/unblock tokens
-- Token hashing before storage
-
-**Token Types:**
-
-- Password reset tokens
-- Email verification tokens
-- API tokens
-- Invitation tokens
-
-#### Role Management (6 tests)
-
-- Create role with permissions
-- Retrieve role by ID
-- List all roles
-- Update role permissions
-- Delete role
-- Prevent deletion of roles in use
-
-**Default Roles:**
-
-- **Admin** - Full system access
-- **Developer** - Configuration and code access
-- **Editor** - Content management
-
-#### Permission System (6 tests)
-
-- Check user has specific permission
-- Admin override (admins bypass checks)
-- Permission by action and type
-- Dynamic permission registration
-- Retrieve all permissions
-- Role permission validation
-
-**Permission Structure:**
-
-```typescript
-{
-  action: 'create' | 'read' | 'update' | 'delete',
-  type: 'content' | 'media' | 'users' | 'settings',
-  scope: 'own' | 'all' | 'tenant'
-}
-```
-
-#### Two-Factor Authentication (8 tests)
-
-- Generate TOTP secret
-- Verify valid TOTP code
-- Reject invalid TOTP code
-- Reject expired TOTP code
-- Generate backup codes
-- Consume backup code (one-time)
-- Enable 2FA for user
-- Disable 2FA for user
-
-**2FA Features:**
-
-- Time-based One-Time Passwords (TOTP)
-- QR code generation
-- Backup codes (10 per user)
-- Recovery flow
-
-#### Google OAuth (4 tests)
-
-- Validate Google OAuth token
-- Create user from Google profile
-- Link existing user to Google
-- Reject invalid OAuth token
-
-#### Multi-Tenant Support (5 tests)
-
-- Scope users by tenant ID
-- Scope sessions by tenant ID
-- Scope tokens by tenant ID
-- Prevent cross-tenant access
-- List users within tenant only
-
-**Tenant Isolation:**
-
-- All database queries include tenant filter
-- Tenant ID in JWT tokens
-- Cross-tenant prevention middleware
-- Tenant-specific configurations
-
-#### Session Cleanup (3 tests)
-
-- Automatic expired session cleanup
-- Cleanup rotated sessions
-- Scheduled cleanup jobs
-
-#### Security Best Practices (5 tests)
-
-- Secure cookie settings
-- Rate limiting for login attempts
-- Timing attack prevention
-- Cryptographically random tokens
-- Token hashing before storage
-
-**Running:**
-
-```bash
-bun test tests/bun/databases/auth-system.test.ts
-```
+    Runner->>Server: POST /api/testing (Action: reset, Header: index=X, secret=UUID)
+    Server->>DB: Delete/Recreate worker_X.db
+    Runner->>Server: POST /api/testing (Action: seed, Header: index=X)
+    Server->>DB: Initialize schema & Insert Admin
+    Note over Runner,DB: Execute Isolated Parallel Tests
+```text
 
 ---
 
-## Test Infrastructure Setup
+## Authentication System Tests
 
-### Prerequisites
+**File:** `tests/unit/auth/**/*.test.ts` & `tests/integration/api/user.test.ts`
 
-Before running database tests, you need:
+### Key Test Areas:
 
-1. **MongoDB Test Instance**
-   - Local MongoDB server
-   - MongoDB Docker container
-   - In-memory MongoDB (mongodb-memory-server)
+#### 1. Argon2id Password Security
 
-2. **Test Database Configuration**
-   - Separate test database
-   - Test environment variables
-   - Database seeding utilities
+- ✅ Quantum-resistant hashing verification.
+- ✅ Timing attack resistance (constant-time comparisons).
 
-3. **Test Helpers**
-   - Connection management
-   - Cleanup utilities
-   - Fixture data
+#### 2. Session & Rotation
 
-### Setting Up Test Database
+- ✅ Secure cookie handling.
+- ✅ Session rotation on privilege change.
+- ✅ Automatic cleanup of expired sessions.
 
-#### Option 1: Docker Container
+#### 3. Atomic Authentication
 
-```bash
-# Start MongoDB test container
-docker run -d \
-  --name sveltycms-test-db \
-  -p 27017:27017 \
-  -e MONGO_INITDB_ROOT_USERNAME=test \
-  -e MONGO_INITDB_ROOT_PASSWORD=test \
-  mongo:latest
-```
-
-#### Option 2: In-Memory MongoDB
-
-```bash
-# Install mongodb-memory-server
-bun add -D mongodb-memory-server
-
-# Will start/stop automatically in tests
-```
-
-#### Option 3: Local MongoDB
-
-```bash
-# Use existing local MongoDB
-# Configure different database name for tests
-```
-
-### Environment Variables
-
-Create `.env.test`:
-
-```env
-# Test Database
-MONGODB_URI=mongodb://test:test@localhost:27017/sveltycms-test
-DB_NAME=sveltycms-test
-
-# Auth Configuration
-JWT_SECRET=test-secret-key-do-not-use-in-production
-SESSION_SECRET=test-session-secret
-
-# Disable external services in tests
-DISABLE_EMAIL=true
-DISABLE_WEBHOOKS=true
-```
-
-### Test Helper Structure
-
-```typescript
-// tests/bun/helpers/database.ts
-import { MongoMemoryServer } from 'mongodb-memory-server';
-import { initializeDatabase } from '@/databases/db';
-
-let mongod: MongoMemoryServer;
-
-export async function setupTestDatabase() {
-	mongod = await MongoMemoryServer.create();
-	const uri = mongod.getUri();
-
-	process.env.MONGODB_URI = uri;
-	await initializeDatabase();
-}
-
-export async function teardownTestDatabase() {
-	await mongod.stop();
-}
-
-export async function clearDatabase() {
-	// Clear all collections
-}
-
-export async function seedDatabase(data: any) {
-	// Seed test data
-}
-```
-
-### Test Setup Example
-
-```typescript
-import { beforeAll, afterAll, beforeEach, describe, it, expect } from 'bun:test';
-import { setupTestDatabase, teardownTestDatabase, clearDatabase } from './helpers/database';
-
-describe('Database Tests', () => {
-	beforeAll(async () => {
-		await setupTestDatabase();
-	});
-
-	afterAll(async () => {
-		await teardownTestDatabase();
-	});
-
-	beforeEach(async () => {
-		await clearDatabase();
-	});
-
-	it('should connect to database', async () => {
-		// Test implementation
-	});
-});
-```
+- ✅ **Clean Slate**: Every test starts with `page.context().clearCookies()` and `localStorage.clear()` to prevent Admin -> Restricted role session bleed.
 
 ---
 
-## Running Tests
+## Running Database Tests
 
-### Run All Database Tests
+### 1. Standard Suite (SQLite, No Docker)
 
-```bash
-# All database and auth tests
-bun test tests/bun/databases/
-
-# With coverage
-bun test --coverage tests/bun/databases/
-```
-
-### Run Specific Test Suite
+SQLite is the fastest local path and uses `config/private.test.ts` plus test database names only:
 
 ```bash
-# Interface contract tests
-bun test tests/bun/databases/db-interface.test.ts
-
-# MongoDB adapter tests
-bun test tests/bun/databases/mongodb-adapter.test.ts
-
-# Authentication system tests
-bun test tests/bun/databases/auth-system.test.ts
+bun test --timeout 300000 tests/integration/
+bun test --timeout 300000 tests/integration/api/
+bun test --timeout 300000 tests/integration/databases/
 ```
 
-### Run Specific Test Case
+### 2. Docker-Backed Adapter Suites
+
+Start the matching profile from `tests/docker-compose.yml` before running a networked adapter:
 
 ```bash
-# Run single test by name
-bun test tests/bun/databases/auth-system.test.ts -t "should hash passwords with Argon2id"
+docker compose -f tests/docker-compose.yml --profile mongodb up -d
+docker compose -f tests/docker-compose.yml --profile postgresql up -d
+docker compose -f tests/docker-compose.yml --profile mariadb up -d
+docker compose -f tests/docker-compose.yml --profile redis up -d
 ```
 
-### Watch Mode
+| Adapter | Compose profile | Default test credentials |
+| :------ | :-------------- | :----------------------- |
+| MongoDB | `mongodb` | no auth on port `27017` (official image default) |
+| PostgreSQL | `postgresql` | `postgres` / `postgres` on port `5432` |
+| MariaDB | `mariadb` | `root` / `mariadb` on port `3306` |
+| Redis | `redis` | no password on port `6379`; benchmark cache variants only |
+
+Then run:
 
 ```bash
-# Re-run tests on file changes
-bun test --watch tests/bun/databases/
+DB_TYPE=mongodb bun test --timeout 300000 tests/integration/
+DB_TYPE=postgresql bun test --timeout 300000 tests/integration/
+DB_TYPE=mariadb bun test --timeout 300000 tests/integration/
 ```
 
----
+### 3. 4-DB Matrix (CI by default)
 
-## Current Status
+The **4-adapter integration + bench-core matrix runs in GitHub CI** (`ci.yml` `db-tests` / `bench-core`). Local pre-push does **not** run it by default (keeps the gate fast and avoids accidental live-config misuse).
 
-### Implementation Status
+```bash
+bun run gate                                           # local push gate (build + SQLite)
+# Multi-DB local matrix (Docker profiles required; CI is authoritative)
+DB_TYPE=postgresql bun test --timeout 300000 tests/integration/
+bun run test:doctor                                    # unit + SQLite integration + gate map
+```
 
-| Test File                 | Status        | Tests | Notes                   |
-| ------------------------- | ------------- | ----- | ----------------------- |
-| `db-interface.test.ts`    | 📝 Scaffolded | 0/50+ | Awaiting database setup |
-| `mongodb-adapter.test.ts` | 📝 Scaffolded | 0/40+ | Awaiting database setup |
-| `auth-system.test.ts`     | 📝 Scaffolded | 0/50+ | Awaiting database setup |
+Env blocks and credentials: `src/utils/test-db-credentials.ts` (`sveltycms_test` / `benchmark_shared` — never the live `sveltycms.db` from `private.ts`).
 
-### Next Steps
+### 4. Parallel E2E Testing
 
-1. **Set up test database infrastructure**
-   - Choose MongoDB test strategy (Docker, in-memory, or local)
-   - Create database helper utilities
-   - Configure test environment
+Playwright local runs use `playwright.config.ts`; it starts the ready server on `127.0.0.1:4173` and setup server on `127.0.0.1:4174` when `CI` is not set:
 
-2. **Implement placeholder tests**
-   - Replace `expect(true).toBe(true)` with real tests
-   - Add proper assertions
-   - Test error conditions
-
-3. **Add fixture data**
-   - Create test users
-   - Create test roles/permissions
-   - Create test content
-
-4. **Integration with CI/CD**
-   - Add database tests to GitHub Actions
-   - Configure test database in CI
-   - Add coverage reporting
-
----
-
-## Best Practices
-
-### Test Isolation
-
-✅ **Do:**
-
-- Clear database before each test
-- Use unique data for each test
-- Clean up after tests
-- Use transactions when possible
-
-❌ **Don't:**
-
-- Share state between tests
-- Rely on test execution order
-- Leave data in database
-- Use production database
-
-### Test Data
-
-✅ **Do:**
-
-- Use factory functions for test data
-- Make test data obvious and readable
-- Test edge cases
-- Use realistic data
-
-❌ **Don't:**
-
-- Use random data unnecessarily
-- Reuse same test user everywhere
-- Use production data
-- Create dependencies between tests
-
-### Performance
-
-✅ **Do:**
-
-- Use in-memory database for unit tests
-- Parallelize independent tests
-- Use database transactions
-- Clean up efficiently
-
-❌ **Don't:**
-
-- Make unnecessary database calls
-- Test same thing multiple times
-- Ignore slow tests
-- Skip cleanup
-
-### Security Testing
-
-✅ **Do:**
-
-- Test authentication failures
-- Test authorization boundaries
-- Test injection attacks
-- Test timing attacks
-
-❌ **Don't:**
-
-- Skip security tests
-- Use weak test credentials
-- Ignore edge cases
-- Test only happy paths
+```bash
+bun run build
+bun x playwright test --workers=4
+```
 
 ---
 
 ## Troubleshooting
 
-### Common Issues
+### "UNIQUE constraint failed: roles.\_id"
 
-#### Database Connection Timeout
+This usually happens if multiple workers share the same database file.
+**Fix**: Ensure your request includes the `x-test-worker-index` and `x-test-secret` headers.
 
+### "Database connection failed"
+
+Ensure `config/private.test.ts` has a test-scoped `DB_NAME` and credentials matching `tests/docker-compose.yml`. Prefer `127.0.0.1` in env overrides to avoid IPv6 resolution differences.
+
+---
+
+## Performance & Relational Integrity (Audit)
+
+We use the **Enterprise Benchmark Matrix** to validate database adapter performance under stress. The 2026 Audit update introduced:
+
+- **Unified Seeding Contract**: Implemented `ensureAuth()` and `ensureSystem()` across all adapters, ensuring roles and settings are consistent across SQLite, MariaDB, Postgres, and MongoDB.
+- **Relational Benchmarks**: Tests the overhead of JOINs and populations.
+- **Index Pressure**: Verified sub-millisecond lookups on **100,000+ entry** collections.
+- **Migration & Ingestion**: Verified stable ingestion at **6,625 entries/s**.
+- **Cross-Database Leaderboard**: Aggregated metrics in `docs/project/benchmarks/README.mdx` for side-by-side "Showdown" analysis.
+
+**Tools**: `scripts/benchmark-matrix/index.ts`, `tests/benchmarks/migration-scale.test.ts`, `tests/benchmarks/index-pressure.test.ts`
+
+---
+
+## Cross-Adapter Contract Tests (July 2026)
+
+To ensure identical behavior across all 4 database adapters, SveltyCMS now runs **95 contract tests** across 10 test suites. Every `IDBAdapter` method is validated for consistent return shapes, error handling, and data integrity:
+
+| Suite | Tests | Coverage |
+|---|---|---|
+| `adapter-parity.test.ts` | 15 | insert, findOne, findMany, update, delete, count, upsert |
+| `error-contract.test.ts` | 11 | Duplicate keys, missing records, invalid input, error shapes |
+| `cache-contract.test.ts` | 9 | L1 set/get/delete, TTL, tenant isolation, negative cache |
+| `transaction-contract.test.ts` | 5 | Commit, rollback, orphan prevention |
+| `bulk-operations-contract.test.ts` | 10 | insertMany, updateMany, deleteMany, upsertMany, atomicIncrement |
+| `advanced-crud-contract.test.ts` | 9 | streamMany, findByIds, aggregate, restore, exists |
+| `find-page-count-contract.test.ts` | 9 | **findPage** hasMore/total/**keyset cursor**, **count** modes, count cache |
+| `health-contract.test.ts` | 12 | Connection health, pool stats, queryBuilder, tenant policy |
+
+### Three-layer mapping: list / count product APIs
+
+Respect the pyramid in [Testing index](./index.mdx) — **do not** put adapter contracts in Playwright.
+
+| Layer | What | Files | Command |
+| :---- | :--- | :---- | :------ |
+| **Unit** (white-box) | Pure eligibility + page slicing + count-cache proxy (mocked L1) | `tests/unit/core/page-utils.test.ts`, `tests/unit/core/count-cache.test.ts` | `bun run test:unit` / pre-commit |
+| **Integration** (black-box adapter) | Real `ensureFullInitialization` + live CRUD on active `DB_TYPE` | `tests/integration/databases/find-page-count-contract.test.ts` | `bun run test:integration` / pre-push SQLite; CI multi-DB |
+| **E2E** | Only after UI/list routes **call** `findPage` (golden journey) | *none yet* — not an adapter-only concern | — |
+| **Benchmark** | Latency truth tables (not a gate substitute) | `tests/benchmarks/database-performance.test.ts` | `BENCHMARK_RECORD=1 bun test tests/benchmarks/database-performance.test.ts` |
+
+```bash
+# Unit only (pure helpers)
+bun test tests/unit/core/page-utils.test.ts tests/unit/core/count-cache.test.ts
+
+# Integration contract (SQLite local default)
+bun test --timeout 300000 tests/integration/databases/find-page-count-contract.test.ts
+
+# Same contract on a Docker engine
+DB_TYPE=postgresql bun test --timeout 300000 tests/integration/databases/find-page-count-contract.test.ts
 ```
-Error: Connection timeout after 5000ms
+
+**Run against a specific adapter**:
+```bash
+DB=sqlite      bun test tests/integration/databases/*-contract.test.ts
+DB=mongodb     bun test tests/integration/databases/*-contract.test.ts
+DB=postgresql  bun test tests/integration/databases/*-contract.test.ts
+DB=mariadb     bun test tests/integration/databases/*-contract.test.ts
 ```
 
-**Solution:**
+**Benchmark harness** (`benchmark-harness.test.ts`, 11 tests) validates the benchmark framework itself: warmup isolation, `assertSuccess()` on all CRUD operations, and >50% warmup failure guard. A pre-flight sanitizer (`benchmark-sanitizer.ts`) runs before every benchmark to verify collection cleanliness, seed integrity, and warmup isolation.
 
-- Check MongoDB is running
-- Verify connection string
-- Check firewall settings
-- Increase timeout in tests
+**Result validation** (`result-validator.ts`) enforces the `DatabaseResult<T>` contract at runtime across all integration and benchmark tests.
 
-#### Model Already Registered
+---
 
-```
-Error: Cannot overwrite 'User' model
-```
+## Benchmark Execution Strategy
 
-**Solution:**
+### Multi-Database Runner
 
-- Clear models between tests
-- Use separate database per test
-- Reset Mongoose connection
+Each benchmark test can now run across **all 8 database variants** (SQLite, SQLite+Redis, MariaDB, MariaDB+Redis, PostgreSQL, PostgreSQL+Redis, MongoDB, MongoDB+Redis) in a single `bun test` invocation.
 
-#### Validation Errors
+```typescript
+import { runOnAllDatabases } from "./modules/benchmark-utils";
 
-```
-Error: User validation failed: email is required
+test("my test", async () => {
+  await runOnAllDatabases(async (dbKey, baseUrl, dbType) => {
+    // Runs once per database variant
+    // Each variant gets its own fresh server
+  });
+}, 600000);
 ```
 
-**Solution:**
+This replaces the previous matrix approach where the orchestrator spawned 8 separate `bun test` subprocesses per test file. Benefits:
 
-- Check required fields
-- Verify test data structure
-- Review model schema
-- Use factory functions
+| Before | After |
+|--------|-------|
+| 464 total subprocess spawns (61 tests × 8 DBs) | 61 total subprocess spawns (1 per test file) |
+| 8 servers per test (each test started its own) | 8 servers per test (same, but one `bun test` process) |
+| Failure cascades across database variants | Each database is isolated — failure stops only that variant |
+| Redis connection accumulation across subprocesses | Redis connections cleaned up per variant |
 
-#### Permission Denied
+### Known-Incompatible Tests
 
+Some tests are incompatible with specific database engines. The `skipOn` field in `scripts/benchmark-matrix/benchmark-scripts.ts` prevents them from running on broken combinations:
+
+```typescript
+{
+  path: "tests/benchmarks/state-machine-transition.test.ts",
+  skipOn: ["mongodb"],  // MongoDB connection drops during 50-cycle reinitialize stress
+}
 ```
-Error: Insufficient permissions
-```
 
-**Solution:**
+| Test | Skipped On | Reason |
+|------|-----------|--------|
+| `state-machine-transition` | MongoDB | Connection drops during self-healing stress cycles |
+| `data-residency-failover` | MongoDB | `ConnectionRefused` after failover simulation |
+| `database-failover` | MongoDB | Connection doesn't recover cleanly enough for failover timing |
 
-- Check test user roles
-- Verify permission setup
-- Review tenant scoping
-- Check admin override
+### Bun Runtime Alignment
+
+All 4 database adapters now run natively under `bun test` — no vitest/Node.js special case for MongoDB:
+
+| Adapter | Driver | Previously | Now |
+|---------|--------|-----------|-----|
+| SQLite | `bun:sqlite` (native) | `bun test` | `bun test` |
+| MariaDB | `mysql2` (pure JS) | `bun test` | `bun test` |
+| PostgreSQL | `postgres` (pure JS) | `bun test` | `bun test` |
+| MongoDB | `mongoose` → `bson` | `vitest` (Node.js) | `bun test` ✅ |
+
+The `bson` package calls `v8.isBuildingSnapshot()` at module load time, which Bun (JavaScriptCore) doesn't implement. A shim in `src/utils/v8-shim.ts` patches `process.getBuiltinModule('v8')` to return a safe stub.
 
 ---
 
 ## Related Documentation
 
-- [Test Suite Status](./test-status.mdx) - Overall test status
-- [User API Tests](./user-api-tests.mdx) - API endpoint tests
-- [Testing Guide](./index.mdx) - General testing information
-- [Database Architecture](../architecture/database-methods.mdx) - Database system design
-- [Authentication System](../architecture/authentication-system.mdx) - Auth architecture
-
----
-
-## Contributing
-
-When adding database tests:
-
-1. Follow existing test structure
-2. Test both success and failure cases
-3. Include security tests
-4. Document test purpose
-5. Clean up test data
-6. Update this documentation
-
-See [Contributing Guide](../contributing/contributing-docs.mdx) for more information.
+- [Test Status Report](./test-status.mdx)
+- [Testing Index](./index.mdx)
+- [API Testing](./api-testing.mdx)
+- [Black-Box Testing Architecture](./black-box-testing.mdx)
+````

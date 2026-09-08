@@ -1,0 +1,133 @@
+<!--
+@file src/components/settings-menu.svelte
+@component
+**Settings Menu Sidebar**
+Sidebar navigation for System Settings
+-->
+
+<script lang="ts">
+	// Components
+	import GroupIcon from '@src/components/group-icon.svelte';
+	import Input from '@components/ui/input.svelte';
+	import SystemTooltip from '@src/components/system/system-tooltip.svelte';
+	import type { SettingGroup } from '@src/routes/(app)/config/system-settings/settings-groups';
+	import { getSettingGroupsByRole } from '@src/routes/(app)/config/system-settings/settings-groups';
+	import { isAdmin as checkIsAdmin } from '@src/databases/auth/constants';
+	// Stores
+	import { groupsNeedingConfig } from '@src/routes/(app)/config/system-settings/settings-state.svelte';
+	import { page } from '$app/state';
+	import {
+		settings_needs_configuration,
+		settings_no_results,
+		settings_search_aria,
+		settings_search_placeholder,
+		settings_search_short,
+	} from '@src/paraglide/messages';
+
+	// Props
+	let { isFullSidebar = true } = $props();
+
+	// State
+	let searchTerm = $state('');
+
+	// Derived
+	const user = $derived(page.data.user);
+	const isAdmin = $derived(checkIsAdmin(user));
+	const availableGroups: SettingGroup[] = $derived(getSettingGroupsByRole(isAdmin).sort((a, b) => a.name.localeCompare(b.name)));
+	const selectedGroupId = $derived(page.url.searchParams.get('group'));
+
+	// Filter logic
+	const filteredGroups = $derived.by(() => {
+		if (!searchTerm) {
+			return availableGroups;
+		}
+		const lowerCaseSearchTerm = searchTerm.toLowerCase();
+		return availableGroups.filter((group) => {
+			if (group.name.toLowerCase().includes(lowerCaseSearchTerm)) {
+				return true;
+			}
+			if (group.description?.toLowerCase().includes(lowerCaseSearchTerm)) {
+				return true;
+			}
+			if (
+				group.fields.some((field) => field.label.toLowerCase().includes(lowerCaseSearchTerm) || field.key.toLowerCase().includes(lowerCaseSearchTerm))
+			) {
+				return true;
+			}
+			return false;
+		});
+	});
+
+</script>
+
+<div class="mt-2 flex flex-col h-full bg-transparent">
+	<!-- Search -->
+	<div class="relative mb-2 {isFullSidebar ? 'w-full' : 'max-w-33.75'}">
+		<Input
+			aria-label={settings_search_aria()}
+			type="text"
+			bind:value={searchTerm}
+			placeholder={isFullSidebar ? settings_search_placeholder() : settings_search_short()}
+			class="w-full {isFullSidebar ? 'h-12 py-3' : 'h-10 py-2'}"
+		/>
+		<div class="absolute inset-e-0 top-0 flex h-full items-center pe-3 pointer-events-none text-surface-400">
+			<iconify-icon icon="ic:outline-search" width="20"></iconify-icon>
+		</div>
+	</div>
+
+	<!-- Groups List -->
+	<div class="flex-1 overflow-y-auto px-1 space-y-1 flex flex-col settings-list">
+		{#each filteredGroups as group (group.id)}
+			<SystemTooltip title={group.name} positioning={{ placement: 'right-end', gutter: 15 }} contentClass="!text-sm" triggerClass="block w-full">
+				<a
+					href={`/config/system-settings?group=${group.id}`}
+					data-sveltekit-preload-data="hover"
+					class="relative w-full cursor-pointer rounded p-2 transition-colors flex items-center {isFullSidebar
+						? 'justify-between text-start'
+						: 'justify-center text-center'} {selectedGroupId === group.id
+						? 'bg-tertiary-500 dark:bg-primary-500 text-white'
+						: 'hover:bg-surface-200 dark:hover:bg-surface-700'}"
+				>
+					<div class="flex items-center {isFullSidebar ? 'gap-3' : 'gap-2'} overflow-hidden">
+						<GroupIcon icon={group.icon} class="text-xl" />
+						<span class="text-sm font-medium truncate w-full text-start {isFullSidebar ? '' : 'hidden sm:block'}">{group.name}</span>
+					</div>
+
+					{#if isFullSidebar}
+						<div class="flex items-center gap-1">
+							{#if groupsNeedingConfig.has(group.id)}
+								<span class="text-lg text-warning-500" title={settings_needs_configuration()}>⚠️</span>
+							{/if}
+						</div>
+					{:else if groupsNeedingConfig.has(group.id)}
+						<!-- Dot for collapsed state -->
+						<div class="w-2 h-2 rounded-full bg-warning-500 absolute top-1 inset-e-1"></div>
+					{/if}
+				</a>
+			</SystemTooltip>
+		{/each}
+
+		{#if filteredGroups.length === 0}
+			<div class="p-4 text-center text-sm text-surface-500">
+				<p>{settings_no_results()}</p>
+			</div>
+		{/if}
+	</div>
+</div>
+
+<style>
+	.settings-list {
+		scrollbar-color: var(--color-surface-500) transparent;
+		scrollbar-width: thin;
+	}
+	.settings-list::-webkit-scrollbar {
+		width: 4px;
+	}
+	.settings-list::-webkit-scrollbar-track {
+		background: transparent;
+	}
+	.settings-list::-webkit-scrollbar-thumb {
+		background-color: var(--color-surface-500);
+		border-radius: 4px;
+	}
+</style>

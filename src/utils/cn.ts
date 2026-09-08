@@ -1,0 +1,80 @@
+/**
+ * @file src/utils/cn.ts
+ * @description Optimized class joining utility for Svelte 5.
+ *
+ * ### Hardening (audit 2026-07):
+ * - Array-join pattern: result.push() + join(" ") creates one string (not N intermediate)
+ * - Standard for-loops: Object.keys() + indexed loop (faster than for...in + hasOwnProperty)
+ * - Minimal truthy check: val[key] suffices since Object.keys() returns own properties
+ *
+ * High-performance, zero-dependency class joining utility optimized for Svelte 5.
+ */
+
+type ClassValue = ClassArray | Record<string, any> | string | number | null | boolean | undefined;
+type ClassArray = ClassValue[];
+
+/**
+ * Combines conditional class names into a single string.
+ * 🛡️ Hardened: Array-join pattern minimizes GC pressure vs string concatenation.
+ */
+export function cn(...inputs: ClassValue[]): string {
+  const len = inputs.length;
+  // 🚀 Fast-path: 1 argument (most common in Svelte 5 components)
+  if (len === 1) {
+    const a = inputs[0];
+    if (typeof a === "string") return a;
+    if (!a) return "";
+  }
+  // 🚀 Fast-path: 2 simple arguments
+  if (len === 2) {
+    const a = inputs[0];
+    const b = inputs[1];
+    if (typeof a === "string" && typeof b === "string") {
+      if (a && b) return `${a} ${b}`;
+      return a || b || "";
+    }
+  }
+  // 🚀 Fast-path: 3 simple arguments
+  if (len === 3) {
+    const a = inputs[0];
+    const b = inputs[1];
+    const c = inputs[2];
+    if (typeof a === "string" && typeof b === "string" && typeof c === "string") {
+      let res = "";
+      if (a) res += a;
+      if (b) res += res ? ` ${b}` : b;
+      if (c) res += res ? ` ${c}` : c;
+      return res;
+    }
+  }
+
+  const result: string[] = [];
+
+  function process(val: ClassValue) {
+    if (!val) return;
+
+    if (typeof val === "string") {
+      result.push(val);
+    } else if (typeof val === "number") {
+      result.push(String(val));
+    } else if (Array.isArray(val)) {
+      for (let i = 0; i < val.length; i++) {
+        process(val[i]);
+      }
+    } else if (typeof val === "object") {
+      const keys = Object.keys(val);
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
+        if (val[key]) {
+          result.push(key);
+        }
+      }
+    }
+  }
+
+  for (let i = 0; i < inputs.length; i++) {
+    process(inputs[i]);
+  }
+
+  return result.join(" ");
+}

@@ -1,0 +1,1412 @@
+/**
+ * @file src/databases/core/relational-system.ts
+ * @description Consolidated System module for all SQL-based database adapters.
+ * Merges preferences, jobs, tenants, themes, widgets, and virtual folders.
+ */
+
+import { isoDateStringToDate, nowISODateString } from "@src/utils/date";
+import { logger } from "@src/utils/logger";
+import { and, asc, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
+import type {
+  BaseQueryOptions,
+  DatabaseId,
+  DatabaseResult,
+  EntityCreate,
+  ISystemAdapter,
+  Job,
+  PaginationOption,
+  SystemVirtualFolder,
+  Theme,
+  Widget,
+  Tenant,
+  MediaItem,
+  ISqlAdapter,
+} from "../db-interface";
+import { hashCredentialSha256Hex } from "@src/utils/security/credential-hash";
+import { assertTenantContext } from "@src/utils/security/safe-query";
+import {
+  applyTenantFilter,
+  convertArrayDatesToISO,
+  convertDatesToISO,
+  convertISOToDates,
+  generateId,
+} from "./relational-utils";
+
+function looksJsonEncoded(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  return (
+    trimmed.startsWith("{") ||
+    trimmed.startsWith("[") ||
+    trimmed.startsWith('"') ||
+    trimmed === "null" ||
+    trimmed === "true" ||
+    trimmed === "false" ||
+    /^-?\d+(\.\d+)?$/.test(trimmed)
+  );
+}
+
+function decodePreferenceValue<T>(value: unknown): T {
+  let current = value;
+
+  for (let depth = 0; depth < 2; depth++) {
+    if (typeof current !== "string" || !looksJsonEncoded(current)) {
+      break;
+    }
+
+    try {
+      current = JSON.parse(current);
+    } catch {
+      break;
+    }
+  }
+
+  return current as T;
+}
+
+function encodePreferenceValue(adapterType: string, value: unknown): unknown {
+  const usesNativeJson =
+    adapterType === "mariadb" || adapterType === "mysql" || adapterType === "postgresql";
+
+  if (usesNativeJson) {
+    return value;
+  }
+
+  return value !== null && typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+export class RelationalSystemModule implements ISystemAdapter {
+  protected readonly adapter: ISqlAdapter;
+  protected readonly schema: any;
+
+  constructor(adapter: ISqlAdapter, schema: any) {
+    this.adapter = adapter;
+    this.schema = schema;
+  }
+
+  protected get db() {
+    // Centralized tenant helpers (getTenantCondition, applyTenantFilter, shouldBypassTenantCheck) now live in relational-utils.ts for the SQL family.
+    return (this.adapter as any).db;
+  }
+
+  protected getDb(options?: BaseQueryOptions) {
+    return options?.transaction?.db || this.db;
+  }
+
+  // ============================================================
+  // PREFERENCES
+  // ============================================================
+  /**
+   * "global" is the system-wide tenant marker (settings service default for
+   * single-tenant / null-tenant rows). Normalize it to null so scope queries
+   * hit rows stored with tenantId NULL — otherwise "global" filters miss
+   * every system setting in the DB.
+   */
+  private normalizeSystemTenant(rawTenant?: string | null): string | null {
+    if (
+      rawTenant === undefined ||
+      rawTenant === null ||
+      rawTenant === "" ||
+      rawTenant === "global"
+    ) {
+      return null;
+    }
+    return String(rawTenant);
+  }
+
+  public readonly preferences = {
+    get: async <T>(
+      key: string,
+      options?: {
+        scope?: "user" | "system";
+        userId?: DatabaseId;
+        tenantId?: DatabaseId | null;
+      },
+    ): Promise<DatabaseResult<T | null>> => {
+      const scope = options?.scope || "system";
+      const userId = options?.userId;
+      const tenantId = options?.tenantId;
+
+      return this.adapter.wrap(async () => {
+        const conditions: any[] = [eq(this.schema.systemPreferences.key, key)];
+        if (scope === "system") {
+          const tid = this.normalizeSystemTenant(tenantId);
+          if (tid) conditions.push(eq(this.schema.systemPreferences.tenantId, tid));
+          else conditions.push(isNull(this.schema.systemPreferences.tenantId));
+        } else if (userId) {
+          conditions.push(eq(this.schema.systemPreferences.userId, userId.toString()));
+        }
+
+        const [result] = await this.getDb(options as any)
+          .select(this.adapter.getPhysicalSelection(this.schema.systemPreferences))
+          .from(this.schema.systemPreferences)
+          .where(and(...conditions))
+          .limit(1);
+
+        if (!result) return null;
+        return decodePreferenceValue<T>(result.value);
+      }, "GET_PREFERENCE_FAILED");
+    },
+
+    getMany: async <T>(
+      keys: string[],
+      options?: {
+        scope?: "user" | "system";
+        userId?: DatabaseId;
+        tenantId?: DatabaseId | null;
+      },
+    ): Promise<DatabaseResult<Record<string, T>>> => {
+      const scope = options?.scope || "system";
+      const userId = options?.userId;
+      const tenantId = options?.tenantId;
+
+      return this.adapter.wrap(async () => {
+        if (!keys || keys.length === 0) return {};
+        const conditions: any[] = [inArray(this.schema.systemPreferences.key, keys)];
+        if (scope === "system") {
+          const tid = this.normalizeSystemTenant(tenantId);
+          if (tid) conditions.push(eq(this.schema.systemPreferences.tenantId, tid));
+          else conditions.push(isNull(this.schema.systemPreferences.tenantId));
+        } else if (userId) {
+          conditions.push(eq(this.schema.systemPreferences.userId, userId.toString()));
+        }
+
+        const results = await this.getDb(options as any)
+          .select(this.adapter.getPhysicalSelection(this.schema.systemPreferences))
+          .from(this.schema.systemPreferences)
+          .where(and(...conditions));
+
+        const prefs: Record<string, T> = {};
+        for (const result of results) {
+          prefs[result.key] = decodePreferenceValue<T>(result.value);
+        }
+        return prefs;
+      }, "GET_PREFERENCES_FAILED");
+    },
+
+    getByCategory: async <T>(
+      category: string,
+      options?: {
+        scope?: "user" | "system";
+        userId?: DatabaseId;
+        tenantId?: DatabaseId | null;
+      },
+    ): Promise<DatabaseResult<Record<string, T>>> => {
+      const scope = options?.scope || "system";
+      const userId = options?.userId;
+      const tenantId = options?.tenantId;
+
+      return this.adapter.wrap(async () => {
+        const conditions: any[] = [eq(this.schema.systemPreferences.visibility, category)];
+        if (scope === "system") {
+          const tid = this.normalizeSystemTenant(tenantId);
+          if (tid) conditions.push(eq(this.schema.systemPreferences.tenantId, tid));
+          else conditions.push(isNull(this.schema.systemPreferences.tenantId));
+        } else if (userId) {
+          conditions.push(eq(this.schema.systemPreferences.userId, userId.toString()));
+        }
+
+        const results = await this.getDb(options as any)
+          .select(this.adapter.getPhysicalSelection(this.schema.systemPreferences))
+          .from(this.schema.systemPreferences)
+          .where(and(...conditions));
+
+        const prefs: Record<string, T> = {};
+        for (const result of results) {
+          prefs[result.key] = decodePreferenceValue<T>(result.value);
+        }
+        return prefs;
+      }, "GET_BY_CATEGORY_FAILED");
+    },
+
+    set: async <T>(
+      key: string,
+      value: T,
+      options?: {
+        scope?: "user" | "system";
+        userId?: DatabaseId;
+        category?: string;
+        tenantId?: DatabaseId | null;
+      },
+    ): Promise<DatabaseResult<void>> => {
+      const scope = options?.scope || "system";
+      const userId = options?.userId;
+      const category = options?.category;
+      const tenantId = options?.tenantId;
+
+      return this.adapter.wrap(async () => {
+        const now = new Date();
+        const tid = scope === "system" ? this.normalizeSystemTenant(tenantId) : null;
+        const uid = scope === "user" ? (userId as string) || null : null;
+
+        // 🚀 HARDENING: Use primitives for all values to avoid driver binding errors
+        const data = {
+          key: String(key),
+          value: encodePreferenceValue(this.adapter.type, value),
+          scope: String(scope),
+          userId: uid ? String(uid) : null,
+          visibility: String(category || "private"),
+          tenantId: tid ? String(tid) : null,
+          updatedAt: now,
+        };
+
+        const conditions = [eq(this.schema.systemPreferences.key, String(key))];
+        if (tid) conditions.push(eq(this.schema.systemPreferences.tenantId, tid));
+        else conditions.push(isNull(this.schema.systemPreferences.tenantId));
+
+        const exists = await this.getDb(options as any)
+          .select({ _id: this.schema.systemPreferences._id })
+          .from(this.schema.systemPreferences)
+          .where(and(...conditions))
+          .limit(1);
+
+        if (exists[0]) {
+          await this.getDb(options as any)
+            .update(this.schema.systemPreferences)
+            .set({
+              value: data.value,
+              scope: data.scope,
+              userId: data.userId,
+              visibility: data.visibility,
+              updatedAt: now,
+            })
+            .where(eq(this.schema.systemPreferences._id, exists[0]._id));
+        } else {
+          await this.getDb(options as any)
+            .insert(this.schema.systemPreferences)
+            .values({
+              ...data,
+              _id: String(generateId()),
+              createdAt: now,
+            });
+        }
+      }, "SET_PREFERENCE_FAILED");
+    },
+
+    setMany: async <T>(
+      preferences: Array<{
+        key: string;
+        value: T;
+        scope?: "user" | "system";
+        userId?: DatabaseId;
+        category?: string;
+      }>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<void>> => {
+      return this.adapter.wrap(async () => {
+        if (preferences.length === 0) return;
+        const now = nowISODateString();
+        const db = this.getDb(options as any);
+        const tid = (options as any)?.tenantId ? String((options as any).tenantId) : null;
+        const rows = preferences.map((pref) => ({
+          _id: String(generateId()),
+          key: String(pref.key),
+          value: encodePreferenceValue(this.adapter.type, pref.value),
+          scope: String(pref.scope || "system"),
+          userId: pref.userId ? String(pref.userId) : null,
+          visibility: String(pref.category || "private"),
+          tenantId: tid,
+          createdAt: now,
+          updatedAt: now,
+        }));
+        await db
+          .insert(this.schema.systemPreferences)
+          .values(rows)
+          .onConflictDoUpdate({
+            target: [this.schema.systemPreferences.key, this.schema.systemPreferences.tenantId],
+            set: {
+              value: sql`excluded.value`,
+              scope: sql`excluded.scope`,
+              userId: sql`excluded.userId`,
+              visibility: sql`excluded.visibility`,
+              updatedAt: sql`excluded.updatedAt`,
+            },
+          });
+      }, "SET_PREFERENCES_FAILED");
+    },
+
+    delete: async (
+      key: string,
+      options?: {
+        scope?: "user" | "system";
+        userId?: DatabaseId;
+        tenantId?: DatabaseId | null;
+      },
+    ): Promise<DatabaseResult<void>> => {
+      const scope = options?.scope || "system";
+      const userId = options?.userId;
+      const tenantId = options?.tenantId;
+
+      return this.adapter.wrap(async () => {
+        const conditions: any[] = [eq(this.schema.systemPreferences.key, key)];
+        if (scope === "system") {
+          if (tenantId)
+            conditions.push(eq(this.schema.systemPreferences.tenantId, tenantId as string));
+          else conditions.push(isNull(this.schema.systemPreferences.tenantId));
+        } else if (userId) {
+          conditions.push(eq(this.schema.systemPreferences.userId, userId.toString()));
+        }
+        await this.getDb(options as any)
+          .delete(this.schema.systemPreferences)
+          .where(and(...conditions));
+      }, "DELETE_PREFERENCE_FAILED");
+    },
+
+    deleteMany: async (
+      keys: string[],
+      options?: {
+        scope?: "user" | "system";
+        userId?: DatabaseId;
+        tenantId?: DatabaseId | null;
+      },
+    ): Promise<DatabaseResult<void>> => {
+      const scope = options?.scope || "system";
+      const userId = options?.userId;
+      const tenantId = options?.tenantId;
+
+      return this.adapter.wrap(async () => {
+        if (!keys || keys.length === 0) return;
+        const conditions: any[] = [inArray(this.schema.systemPreferences.key, keys)];
+        if (scope === "system") {
+          if (tenantId)
+            conditions.push(eq(this.schema.systemPreferences.tenantId, tenantId as string));
+          else conditions.push(isNull(this.schema.systemPreferences.tenantId));
+        } else if (userId) {
+          conditions.push(eq(this.schema.systemPreferences.userId, userId.toString()));
+        }
+        await this.getDb(options as any)
+          .delete(this.schema.systemPreferences)
+          .where(and(...conditions));
+      }, "DELETE_PREFERENCES_FAILED");
+    },
+
+    clear: async (options?: {
+      scope?: "user" | "system";
+      userId?: DatabaseId;
+      tenantId?: DatabaseId | null;
+    }): Promise<DatabaseResult<void>> => {
+      const scope = options?.scope || "system";
+      const userId = options?.userId;
+      const tenantId = options?.tenantId;
+
+      return this.adapter.wrap(async () => {
+        const conditions: any[] = [];
+        if (scope === "system") {
+          if (tenantId)
+            conditions.push(eq(this.schema.systemPreferences.tenantId, tenantId as string));
+          else conditions.push(isNull(this.schema.systemPreferences.tenantId));
+        } else if (userId) {
+          conditions.push(eq(this.schema.systemPreferences.userId, userId.toString()));
+        }
+        await this.getDb(options as any)
+          .delete(this.schema.systemPreferences)
+          .where(and(...conditions));
+      }, "CLEAR_PREFERENCES_FAILED");
+    },
+  };
+
+  // ============================================================
+  // JOBS
+  // ============================================================
+  public readonly jobs = {
+    create: async (
+      job: EntityCreate<Job>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<Job>> => {
+      return this.adapter.wrap(
+        async () => {
+          const id = generateId();
+          const now = new Date();
+          const nextRunAt = job.nextRunAt
+            ? job.nextRunAt instanceof Date
+              ? new Date(job.nextRunAt.getTime())
+              : new Date(job.nextRunAt)
+            : now;
+          const values = (this.adapter as any).prepareValues(
+            this.schema.sveltyJobs,
+            {
+              ...(job as any),
+              nextRunAt,
+            },
+            id,
+            now,
+            { tenantId: job.tenantId },
+          );
+          const db = this.getDb(options);
+          await db.insert(this.schema.sveltyJobs).values(values as any);
+          const [result] = await db
+            .select(this.adapter.getPhysicalSelection(this.schema.sveltyJobs))
+            .from(this.schema.sveltyJobs)
+            .where(eq(this.schema.sveltyJobs._id, id));
+          return convertDatesToISO(result) as unknown as Job;
+        },
+        "JOB_CREATE_FAILED",
+        undefined,
+        { transaction: options?.transaction },
+      );
+    },
+
+    getById: async (
+      jobId: DatabaseId,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<Job | null>> => {
+      return this.adapter.wrap(
+        async () => {
+          const [result] = await this.getDb(options)
+            .select(this.adapter.getPhysicalSelection(this.schema.sveltyJobs))
+            .from(this.schema.sveltyJobs)
+            .where(eq(this.schema.sveltyJobs._id, jobId as string));
+          return (result as unknown as Job) || null;
+        },
+        "JOB_GET_FAILED",
+        undefined,
+        { transaction: options?.transaction },
+      );
+    },
+
+    getNextReady: async (
+      limit = 10,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<Job[]>> => {
+      return this.adapter.wrap(async () => {
+        // Fail-closed: scheduler must pass withSystemScope("scheduler") or tenantId.
+        assertTenantContext(options, "system.jobs.getNextReady");
+        const cleanNow = new Date();
+        const conditions = [
+          eq(this.schema.sveltyJobs.status, "pending"),
+          lte(this.schema.sveltyJobs.nextRunAt, cleanNow),
+        ];
+        applyTenantFilter(conditions, this.schema.sveltyJobs.tenantId, options);
+
+        const results = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.sveltyJobs))
+          .from(this.schema.sveltyJobs)
+          .where(and(...conditions))
+          .orderBy(this.schema.sveltyJobs.nextRunAt)
+          .limit(limit);
+        return results as unknown as Job[];
+      }, "JOB_FETCH_READY_FAILED");
+    },
+
+    list: async (
+      options?: PaginationOption & BaseQueryOptions & { status?: string; taskType?: string },
+    ): Promise<DatabaseResult<Job[]>> => {
+      return this.adapter.wrap(async () => {
+        // Fail-closed under MT: pass tenantId or withSystemScope("scheduler"|"bootstrap")
+        assertTenantContext(options, "system.jobs.list");
+        let q = this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.sveltyJobs))
+          .from(this.schema.sveltyJobs)
+          .$dynamic();
+        const conditions: any[] = [];
+        if (options?.status) conditions.push(eq(this.schema.sveltyJobs.status, options.status));
+        if (options?.taskType)
+          conditions.push(eq(this.schema.sveltyJobs.taskType, options.taskType));
+        applyTenantFilter(conditions, this.schema.sveltyJobs.tenantId, options);
+
+        if (conditions.length > 0) q = q.where(and(...conditions));
+        q = q.orderBy(desc(this.schema.sveltyJobs.createdAt));
+
+        if (options?.limit) q = q.limit(options.limit);
+        if (options?.offset) q = q.offset(options.offset);
+
+        const results = await q;
+        return results as unknown as Job[];
+      }, "JOB_LIST_FAILED");
+    },
+
+    count: async (filter?: Record<string, unknown>): Promise<DatabaseResult<number>> => {
+      return this.adapter.wrap(async () => {
+        let q = this.db
+          .select({ count: sql<number>`count(*)` })
+          .from(this.schema.sveltyJobs)
+          .$dynamic();
+        const conditions = [];
+        if (filter?.status)
+          conditions.push(eq(this.schema.sveltyJobs.status, filter.status as any));
+        if (filter?.taskType)
+          conditions.push(eq(this.schema.sveltyJobs.taskType, filter.taskType as any));
+
+        if (conditions.length > 0) q = q.where(and(...conditions));
+        const [result] = await q;
+        return Number(result?.count) || 0;
+      }, "JOB_COUNT_FAILED");
+    },
+
+    update: async (
+      jobId: DatabaseId,
+      data: Partial<EntityCreate<Job>>,
+      options?: BaseQueryOptions & { filter?: Record<string, unknown> },
+    ): Promise<DatabaseResult<Job>> => {
+      return this.adapter.wrap(async () => {
+        const now = new Date();
+        const nextRunAt = data.nextRunAt
+          ? data.nextRunAt instanceof Date
+            ? new Date(data.nextRunAt.getTime())
+            : new Date(data.nextRunAt)
+          : undefined;
+        const updateValues = (this.adapter as any).prepareValues(
+          this.schema.sveltyJobs,
+          {
+            ...(data as any),
+            nextRunAt,
+          },
+          undefined,
+          now,
+          { tenantId: data.tenantId },
+        );
+        delete updateValues._id;
+        delete updateValues.createdAt;
+        if (Object.keys(updateValues).length === 0) {
+          updateValues.updatedAt = now;
+        }
+        // Atomic claim: an optional `filter` (e.g. { status: "pending" }) makes the
+        // update conditional so two consumers/instances cannot double-claim a job.
+        const conditions = [eq(this.schema.sveltyJobs._id, jobId as string)];
+        if (options?.filter?.status) {
+          conditions.push(eq(this.schema.sveltyJobs.status, String(options.filter.status) as any));
+        }
+        await this.db
+          .update(this.schema.sveltyJobs)
+          .set(updateValues as any)
+          .where(and(...conditions));
+
+        const [result] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.sveltyJobs))
+          .from(this.schema.sveltyJobs)
+          .where(and(...conditions));
+        // No row matched the filter (already claimed by another consumer) → data
+        // is undefined; callers treat that as "not claimed".
+        return convertDatesToISO(result) as unknown as Job;
+      }, "JOB_UPDATE_FAILED");
+    },
+
+    delete: async (jobId: DatabaseId): Promise<DatabaseResult<void>> => {
+      return this.adapter.wrap(async () => {
+        await this.db
+          .delete(this.schema.sveltyJobs)
+          .where(eq(this.schema.sveltyJobs._id, jobId as string));
+      }, "JOB_DELETE_FAILED");
+    },
+
+    cleanup: async (olderThan: Date): Promise<DatabaseResult<number>> => {
+      return this.adapter.wrap(async () => {
+        const cleanOlder =
+          olderThan instanceof Date ? new Date(olderThan.getTime()) : new Date(olderThan);
+        const result = await this.db
+          .delete(this.schema.sveltyJobs)
+          .where(lte(this.schema.sveltyJobs.createdAt, cleanOlder));
+        return (result as any).changes || (result as any).count || 0;
+      }, "JOB_CLEANUP_FAILED");
+    },
+  };
+
+  // ============================================================
+  // TENANTS
+  // ============================================================
+  public readonly tenants = {
+    create: async (
+      tenant: EntityCreate<Tenant> & { _id?: DatabaseId },
+    ): Promise<DatabaseResult<Tenant>> => {
+      return this.adapter.wrap(async () => {
+        const id = tenant._id || generateId();
+        const now = isoDateStringToDate(nowISODateString());
+
+        const values = {
+          ...tenant,
+          _id: id,
+          createdAt: now,
+          updatedAt: now,
+        };
+        await this.db.insert(this.schema.tenants).values(convertISOToDates(values) as any);
+        const [created] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.tenants))
+          .from(this.schema.tenants)
+          .where(eq(this.schema.tenants._id, id));
+        return convertDatesToISO(created) as unknown as Tenant;
+      }, "CREATE_TENANT_FAILED");
+    },
+
+    getById: async (tenantId: DatabaseId): Promise<DatabaseResult<Tenant | null>> => {
+      return this.adapter.wrap(async () => {
+        const [tenant] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.tenants))
+          .from(this.schema.tenants)
+          .where(eq(this.schema.tenants._id, tenantId))
+          .limit(1);
+        return tenant ? (convertDatesToISO(tenant) as unknown as Tenant) : null;
+      }, "GET_TENANT_FAILED");
+    },
+
+    update: async (
+      tenantId: DatabaseId,
+      data: Partial<EntityCreate<Tenant>>,
+    ): Promise<DatabaseResult<Tenant>> => {
+      return this.adapter.wrap(async () => {
+        await this.db
+          .update(this.schema.tenants)
+          .set(
+            convertISOToDates({
+              ...data,
+              updatedAt: isoDateStringToDate(nowISODateString()),
+            }) as any,
+          )
+          .where(eq(this.schema.tenants._id, tenantId));
+        const [updated] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.tenants))
+          .from(this.schema.tenants)
+          .where(eq(this.schema.tenants._id, tenantId))
+          .limit(1);
+        return convertDatesToISO(updated) as unknown as Tenant;
+      }, "UPDATE_TENANT_FAILED");
+    },
+
+    delete: async (tenantId: DatabaseId): Promise<DatabaseResult<void>> => {
+      return this.adapter.wrap(async () => {
+        await this.db.delete(this.schema.tenants).where(eq(this.schema.tenants._id, tenantId));
+      }, "DELETE_TENANT_FAILED");
+    },
+
+    list: async (options: any = {}): Promise<DatabaseResult<Tenant[]>> => {
+      return this.adapter.wrap(async () => {
+        let q = this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.tenants))
+          .from(this.schema.tenants)
+          .$dynamic();
+        if (options.limit) q = q.limit(options.limit);
+        if (options.offset) q = q.offset(options.offset);
+
+        const results = await q;
+        return convertArrayDatesToISO(results) as unknown as Tenant[];
+      }, "LIST_TENANTS_FAILED");
+    },
+  };
+
+  // ============================================================
+  // THEMES
+  // ============================================================
+  public readonly themes = {
+    setupThemeModels: async (): Promise<void> => {
+      logger.debug("Theme models setup (no-op for SQL)");
+    },
+
+    getActive: async (options?: BaseQueryOptions): Promise<DatabaseResult<Theme | null>> => {
+      return this.adapter.wrap(async () => {
+        const conditions = [eq(this.schema.themes.isActive, true)];
+        applyTenantFilter(conditions, this.schema.themes.tenantId, options);
+        const [theme] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.themes))
+          .from(this.schema.themes)
+          .where(and(...conditions))
+          .limit(1);
+        return theme ? (convertDatesToISO(theme) as unknown as Theme) : null;
+      }, "GET_ACTIVE_THEME_FAILED");
+    },
+
+    setDefault: async (themeId: DatabaseId): Promise<DatabaseResult<void>> => {
+      return this.adapter.wrap(async () => {
+        await this.db.update(this.schema.themes).set({ isDefault: false });
+        await this.db
+          .update(this.schema.themes)
+          .set({ isDefault: true, isActive: true })
+          .where(eq(this.schema.themes._id, themeId));
+      }, "SET_DEFAULT_THEME_FAILED");
+    },
+
+    install: async (theme: EntityCreate<Theme>): Promise<DatabaseResult<Theme>> => {
+      return this.adapter.wrap(async () => {
+        const id = generateId();
+        const now = isoDateStringToDate(nowISODateString());
+        const values = {
+          ...theme,
+          _id: id,
+          createdAt: now,
+          updatedAt: now,
+        };
+        await this.db.insert(this.schema.themes).values(convertISOToDates(values) as any);
+        const [inserted] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.themes))
+          .from(this.schema.themes)
+          .where(eq(this.schema.themes._id, id));
+        return convertDatesToISO(inserted) as unknown as Theme;
+      }, "INSTALL_THEME_FAILED");
+    },
+
+    uninstall: async (themeId: DatabaseId): Promise<DatabaseResult<void>> => {
+      return this.adapter.wrap(async () => {
+        await this.db.delete(this.schema.themes).where(eq(this.schema.themes._id, themeId));
+      }, "UNINSTALL_THEME_FAILED");
+    },
+
+    update: async (
+      themeId: DatabaseId,
+      theme: Partial<EntityCreate<Theme>>,
+    ): Promise<DatabaseResult<Theme>> => {
+      return this.adapter.wrap(async () => {
+        await this.db
+          .update(this.schema.themes)
+          .set(
+            convertISOToDates({
+              ...theme,
+              updatedAt: isoDateStringToDate(nowISODateString()),
+            }) as any,
+          )
+          .where(eq(this.schema.themes._id, themeId));
+        const [updated] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.themes))
+          .from(this.schema.themes)
+          .where(eq(this.schema.themes._id, themeId));
+        return convertDatesToISO(updated) as unknown as Theme;
+      }, "UPDATE_THEME_FAILED");
+    },
+
+    getAllThemes: async (options?: BaseQueryOptions): Promise<Theme[]> => {
+      try {
+        const results = await this.getDb(options)
+          .select(this.adapter.getPhysicalSelection(this.schema.themes))
+          .from(this.schema.themes);
+        return convertArrayDatesToISO(results) as unknown as Theme[];
+      } catch {
+        return [];
+      }
+    },
+
+    storeThemes: async (themes: Theme[], options?: BaseQueryOptions): Promise<void> => {
+      const now = isoDateStringToDate(nowISODateString());
+      for (const theme of themes) {
+        const values = convertISOToDates({
+          ...theme,
+          updatedAt: now,
+        }) as any;
+
+        const tid = theme.tenantId || null;
+        const conditions = [eq(this.schema.themes.name, theme.name)];
+        if (tid) conditions.push(eq(this.schema.themes.tenantId, tid as string));
+        else conditions.push(isNull(this.schema.themes.tenantId));
+
+        const exists = await this.getDb(options as any)
+          .select({ _id: this.schema.themes._id })
+          .from(this.schema.themes)
+          .where(and(...conditions))
+          .limit(1);
+
+        if (exists[0]) {
+          await this.getDb(options as any)
+            .update(this.schema.themes)
+            .set(values)
+            .where(eq(this.schema.themes._id, exists[0]._id));
+        } else {
+          await this.getDb(options as any)
+            .insert(this.schema.themes)
+            .values({
+              ...values,
+              _id: theme._id || generateId(),
+              createdAt: now,
+            });
+        }
+      }
+    },
+
+    ensure: async (theme: EntityCreate<Theme>): Promise<Theme> => {
+      try {
+        const [existing] = await this.db
+          .select()
+          .from(this.schema.themes)
+          .where(eq(this.schema.themes.name, theme.name))
+          .limit(1);
+        if (existing) return convertDatesToISO(existing) as unknown as Theme;
+      } catch (err: any) {
+        logger.debug("[themes.ensure] Query failed, attempting install fallback:", err?.message);
+      }
+      const res = await this.themes.install(theme);
+      if (!res.success) throw res.error;
+      return res.data;
+    },
+
+    getDefaultTheme: async (options?: BaseQueryOptions): Promise<DatabaseResult<Theme | null>> => {
+      return this.adapter.wrap(async () => {
+        // Fail-closed: pass tenantId or withSystemScope("bootstrap"|"setup")
+        assertTenantContext(options, "system.themes.getDefaultTheme");
+        const conditions = [eq(this.schema.themes.isDefault, true)];
+        applyTenantFilter(conditions, this.schema.themes.tenantId, options);
+        const [theme] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.themes))
+          .from(this.schema.themes)
+          .where(and(...conditions))
+          .limit(1);
+        return theme ? (convertDatesToISO(theme) as unknown as Theme) : null;
+      }, "GET_DEFAULT_THEME_FAILED");
+    },
+  };
+
+  // ============================================================
+  // WIDGETS
+  // ============================================================
+  public readonly widgets = {
+    setupWidgetModels: async (): Promise<void> => {
+      logger.debug("Widget models setup (no-op for SQL)");
+    },
+
+    register: async (widget: EntityCreate<Widget>): Promise<DatabaseResult<Widget>> => {
+      return this.adapter.wrap(async () => {
+        const now = isoDateStringToDate(nowISODateString());
+        const values = convertISOToDates({
+          ...widget,
+          updatedAt: now,
+        }) as any;
+
+        const exists = await this.db
+          .select({ _id: this.schema.widgets._id })
+          .from(this.schema.widgets)
+          .where(eq(this.schema.widgets.name, widget.name))
+          .limit(1);
+
+        if (exists[0]) {
+          await this.db
+            .update(this.schema.widgets)
+            .set(values)
+            .where(eq(this.schema.widgets._id, exists[0]._id));
+        } else {
+          await this.db
+            .insert(this.schema.widgets)
+            .values({ ...values, _id: generateId(), createdAt: now });
+        }
+
+        const [result] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.widgets))
+          .from(this.schema.widgets)
+          .where(eq(this.schema.widgets.name, widget.name))
+          .limit(1);
+        return convertDatesToISO(result) as unknown as Widget;
+      }, "REGISTER_WIDGET_FAILED");
+    },
+
+    findAll: async (): Promise<DatabaseResult<Widget[]>> => {
+      return this.adapter.wrap(async () => {
+        const results = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.widgets))
+          .from(this.schema.widgets);
+        return convertArrayDatesToISO(results) as unknown as Widget[];
+      }, "FIND_ALL_WIDGETS_FAILED");
+    },
+
+    getActiveWidgets: async (): Promise<DatabaseResult<Widget[]>> => {
+      return this.adapter.wrap(async () => {
+        const results = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.widgets))
+          .from(this.schema.widgets)
+          .where(eq(this.schema.widgets.isActive, true));
+        return convertArrayDatesToISO(results) as unknown as Widget[];
+      }, "GET_ACTIVE_WIDGETS_FAILED");
+    },
+
+    activate: async (widgetId: DatabaseId): Promise<DatabaseResult<void>> => {
+      return this.adapter.wrap(async () => {
+        await this.db
+          .update(this.schema.widgets)
+          .set({
+            isActive: true,
+            updatedAt: isoDateStringToDate(nowISODateString()),
+          })
+          .where(eq(this.schema.widgets._id, widgetId));
+      }, "ACTIVATE_WIDGET_FAILED");
+    },
+
+    deactivate: async (widgetId: DatabaseId): Promise<DatabaseResult<void>> => {
+      return this.adapter.wrap(async () => {
+        await this.db
+          .update(this.schema.widgets)
+          .set({
+            isActive: false,
+            updatedAt: isoDateStringToDate(nowISODateString()),
+          })
+          .where(eq(this.schema.widgets._id, widgetId));
+      }, "DEACTIVATE_WIDGET_FAILED");
+    },
+
+    update: async (
+      widgetId: DatabaseId,
+      widget: Partial<EntityCreate<Widget>>,
+    ): Promise<DatabaseResult<Widget>> => {
+      return this.adapter.wrap(async () => {
+        await this.db
+          .update(this.schema.widgets)
+          .set(
+            convertISOToDates({
+              ...widget,
+              updatedAt: isoDateStringToDate(nowISODateString()),
+            }) as any,
+          )
+          .where(eq(this.schema.widgets._id, widgetId));
+        const [updated] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.widgets))
+          .from(this.schema.widgets)
+          .where(eq(this.schema.widgets._id, widgetId));
+        return convertDatesToISO(updated) as unknown as Widget;
+      }, "UPDATE_WIDGET_FAILED");
+    },
+
+    delete: async (widgetId: DatabaseId): Promise<DatabaseResult<void>> => {
+      return this.adapter.wrap(async () => {
+        await this.db.delete(this.schema.widgets).where(eq(this.schema.widgets._id, widgetId));
+      }, "DELETE_WIDGET_FAILED");
+    },
+  };
+
+  // ============================================================
+  // WEBSITE TOKENS
+  // ============================================================
+  public readonly websiteTokens = {
+    create: async (
+      token: Omit<import("../db-interface").WebsiteToken, "_id" | "createdAt">,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<import("../db-interface").WebsiteToken>> => {
+      const originalToken = token.token;
+      return this.adapter.wrap(async () => {
+        assertTenantContext(options, "system.websiteTokens.create");
+        const id = generateId();
+        const now = new Date();
+        const hashedTokenValue = await hashCredentialSha256Hex(originalToken);
+        const tenantId = options?.tenantId;
+        const values = {
+          ...token,
+          token: hashedTokenValue,
+          _id: id,
+          createdAt: now,
+          updatedAt: now,
+          ...(tenantId !== undefined && tenantId !== null ? { tenantId } : {}),
+        };
+        await this.db.insert(this.schema.websiteTokens).values(convertISOToDates(values) as any);
+        const [result] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.websiteTokens))
+          .from(this.schema.websiteTokens)
+          .where(eq(this.schema.websiteTokens._id, id));
+        const stored = convertDatesToISO(result, {
+          mariaDoubleParseJson: this.adapter.type === "mariadb",
+        }) as unknown as import("../db-interface").WebsiteToken;
+        return { ...stored, token: originalToken };
+      }, "CREATE_WEBSITE_TOKEN_FAILED");
+    },
+
+    getAll: async (
+      options?: BaseQueryOptions & {
+        limit?: number;
+        skip?: number;
+        sort?: string;
+        order?: string;
+      },
+    ): Promise<
+      DatabaseResult<{
+        data: import("../db-interface").WebsiteToken[];
+        total: number;
+      }>
+    > => {
+      return this.adapter.wrap(async () => {
+        assertTenantContext(options, "system.websiteTokens.getAll");
+        const opts = options ?? {};
+        const tenantConditions: any[] = [];
+        applyTenantFilter(tenantConditions, this.schema.websiteTokens.tenantId, opts);
+        const tenantWhere = tenantConditions.length > 0 ? and(...tenantConditions) : undefined;
+
+        // 🚀 Parallel list + count (count path uses short-TTL L1 when via crud;
+        // here we keep one-round-trip parallel SQL and limit+1 is not needed because
+        // admin UI requires exact total. Prefer findPage at API layer for hasMore-only UIs.
+        let q = this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.websiteTokens))
+          .from(this.schema.websiteTokens)
+          .$dynamic();
+        if (tenantWhere) q = q.where(tenantWhere);
+        if (opts.sort) {
+          const orderFn = opts.order === "desc" ? desc : asc;
+          const column = (this.schema.websiteTokens as any)[opts.sort];
+          if (column) q = q.orderBy(orderFn(column));
+        } else {
+          q = q.orderBy(desc(this.schema.websiteTokens.createdAt));
+        }
+        // Fetch limit+1 so callers can detect hasMore without a second page fetch
+        const pageLimit = opts.limit && opts.limit > 0 ? opts.limit : 100;
+        q = q.limit(pageLimit + 1);
+        if (opts.skip) q = q.offset(opts.skip);
+
+        let countQ = this.db
+          .select({ count: sql<number>`count(*)` })
+          .from(this.schema.websiteTokens)
+          .$dynamic();
+        if (tenantWhere) countQ = countQ.where(tenantWhere);
+
+        const [results, totalResultArr] = await Promise.all([q, countQ]);
+        const [totalResult] = totalResultArr;
+
+        const stored = convertArrayDatesToISO(results, {
+          mariaDoubleParseJson: this.adapter.type === "mariadb",
+        }) as unknown as import("../db-interface").WebsiteToken[];
+        // Trim limit+1 sentinel row (hasMore signal for internal use; API keeps exact total)
+        const pageRows = stored.length > pageLimit ? stored.slice(0, pageLimit) : stored;
+        // Scrub token hashes from list responses for security
+        const scrubbed = pageRows.map((t) => {
+          const { token: _, ...rest } = t as any;
+          return rest as import("../db-interface").WebsiteToken;
+        });
+        return {
+          data: scrubbed,
+          total: Number(totalResult?.count || 0),
+        };
+      }, "GET_WEBSITE_TOKENS_FAILED");
+    },
+
+    getByName: async (
+      name: string,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<import("../db-interface").WebsiteToken | null>> => {
+      return this.adapter.wrap(async () => {
+        assertTenantContext(options, "system.websiteTokens.getByName");
+        const conditions = [eq(this.schema.websiteTokens.name, name)];
+        applyTenantFilter(conditions, this.schema.websiteTokens.tenantId, options);
+        const [result] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.websiteTokens))
+          .from(this.schema.websiteTokens)
+          .where(and(...conditions))
+          .limit(1);
+        return result
+          ? (convertDatesToISO(result, {
+              mariaDoubleParseJson: this.adapter.type === "mariadb",
+            }) as unknown as import("../db-interface").WebsiteToken)
+          : null;
+      }, "GET_WEBSITE_TOKEN_BY_NAME_FAILED");
+    },
+
+    getByToken: async (
+      token: string,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<import("../db-interface").WebsiteToken | null>> => {
+      const hashedToken = await hashCredentialSha256Hex(token);
+      return this.websiteTokens.getByTokenHash(hashedToken, options);
+    },
+
+    getByTokenHash: async (
+      tokenHash: string,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<import("../db-interface").WebsiteToken | null>> => {
+      return this.adapter.wrap(async () => {
+        assertTenantContext(options, "system.websiteTokens.getByTokenHash");
+        const conditions = [eq(this.schema.websiteTokens.token, tokenHash)];
+        applyTenantFilter(conditions, this.schema.websiteTokens.tenantId, options);
+        const [result] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.websiteTokens))
+          .from(this.schema.websiteTokens)
+          .where(and(...conditions))
+          .limit(1);
+        return result
+          ? (convertDatesToISO(result, {
+              mariaDoubleParseJson: this.adapter.type === "mariadb",
+            }) as unknown as import("../db-interface").WebsiteToken)
+          : null;
+      }, "GET_WEBSITE_TOKEN_BY_TOKEN_FAILED");
+    },
+
+    getById: async (
+      tokenId: DatabaseId,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<import("../db-interface").WebsiteToken | null>> => {
+      return this.adapter.wrap(async () => {
+        assertTenantContext(options, "system.websiteTokens.getById");
+        const conditions = [eq(this.schema.websiteTokens._id, tokenId)];
+        applyTenantFilter(conditions, this.schema.websiteTokens.tenantId, options);
+        const [result] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.websiteTokens))
+          .from(this.schema.websiteTokens)
+          .where(and(...conditions))
+          .limit(1);
+        return result
+          ? (convertDatesToISO(result, {
+              mariaDoubleParseJson: this.adapter.type === "mariadb",
+            }) as unknown as import("../db-interface").WebsiteToken)
+          : null;
+      }, "GET_WEBSITE_TOKEN_BY_ID_FAILED");
+    },
+
+    delete: async (
+      tokenId: DatabaseId,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<void>> => {
+      return this.adapter.wrap(async () => {
+        assertTenantContext(options, "system.websiteTokens.delete");
+        const conditions = [eq(this.schema.websiteTokens._id, tokenId)];
+        applyTenantFilter(conditions, this.schema.websiteTokens.tenantId, options);
+        await this.db.delete(this.schema.websiteTokens).where(and(...conditions));
+      }, "DELETE_WEBSITE_TOKEN_FAILED");
+    },
+  };
+
+  // ============================================================
+  // VIRTUAL FOLDERS
+  // ============================================================
+  public readonly virtualFolder = {
+    create: async (
+      folder: EntityCreate<SystemVirtualFolder>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<SystemVirtualFolder>> => {
+      return this.adapter.wrap(async () => {
+        assertTenantContext(options, "system.virtualFolder.create");
+        const id = generateId();
+        const now = isoDateStringToDate(nowISODateString());
+        await this.db.insert(this.schema.systemVirtualFolders).values(
+          convertISOToDates({
+            ...folder,
+            _id: id,
+            tenantId: options?.tenantId ?? folder.tenantId ?? null,
+            createdAt: now,
+            updatedAt: now,
+          }) as any,
+        );
+        const [created] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.systemVirtualFolders))
+          .from(this.schema.systemVirtualFolders)
+          .where(eq(this.schema.systemVirtualFolders._id, id));
+        return convertDatesToISO(created) as unknown as SystemVirtualFolder;
+      }, "CREATE_VIRTUAL_FOLDER_FAILED");
+    },
+
+    getById: async (
+      folderId: DatabaseId,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<SystemVirtualFolder | null>> => {
+      return this.adapter.wrap(async () => {
+        assertTenantContext(options, "system.virtualFolder.getById");
+        const conditions = [eq(this.schema.systemVirtualFolders._id, folderId)];
+        applyTenantFilter(conditions, this.schema.systemVirtualFolders.tenantId, options);
+        const [folder] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.systemVirtualFolders))
+          .from(this.schema.systemVirtualFolders)
+          .where(and(...conditions))
+          .limit(1);
+        return folder ? (convertDatesToISO(folder) as unknown as SystemVirtualFolder) : null;
+      }, "GET_VIRTUAL_FOLDER_FAILED");
+    },
+
+    getByParentId: async (
+      parentId: DatabaseId | null,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<SystemVirtualFolder[]>> => {
+      return this.adapter.wrap(async () => {
+        assertTenantContext(options, "system.virtualFolder.getByParentId");
+        const conditions = parentId
+          ? [eq(this.schema.systemVirtualFolders.parentId, parentId as string)]
+          : [isNull(this.schema.systemVirtualFolders.parentId)];
+        applyTenantFilter(conditions, this.schema.systemVirtualFolders.tenantId, options);
+        const results = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.systemVirtualFolders))
+          .from(this.schema.systemVirtualFolders)
+          .where(and(...conditions));
+        return convertArrayDatesToISO(results) as unknown as SystemVirtualFolder[];
+      }, "GET_VIRTUAL_FOLDERS_BY_PARENT_FAILED");
+    },
+
+    getAll: async (options?: BaseQueryOptions): Promise<DatabaseResult<SystemVirtualFolder[]>> => {
+      return this.adapter.wrap(async () => {
+        assertTenantContext(options, "system.virtualFolder.getAll");
+        let q = this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.systemVirtualFolders))
+          .from(this.schema.systemVirtualFolders)
+          .$dynamic();
+        const conditions: any[] = [];
+        applyTenantFilter(conditions, this.schema.systemVirtualFolders.tenantId, options);
+        if (conditions.length) q = q.where(and(...conditions));
+        const results = await q;
+        return convertArrayDatesToISO(results) as unknown as SystemVirtualFolder[];
+      }, "GET_ALL_VIRTUAL_FOLDERS_FAILED");
+    },
+
+    update: async (
+      folderId: DatabaseId,
+      updateData: Partial<SystemVirtualFolder>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<SystemVirtualFolder>> => {
+      return this.adapter.wrap(async () => {
+        assertTenantContext(options, "system.virtualFolder.update");
+        const conditions = [eq(this.schema.systemVirtualFolders._id, folderId)];
+        applyTenantFilter(conditions, this.schema.systemVirtualFolders.tenantId, options);
+        await this.db
+          .update(this.schema.systemVirtualFolders)
+          .set(
+            convertISOToDates({
+              ...updateData,
+              updatedAt: isoDateStringToDate(nowISODateString()),
+            }) as any,
+          )
+          .where(and(...conditions));
+        const [updated] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.systemVirtualFolders))
+          .from(this.schema.systemVirtualFolders)
+          .where(eq(this.schema.systemVirtualFolders._id, folderId as string));
+        return convertDatesToISO(updated) as unknown as SystemVirtualFolder;
+      }, "UPDATE_VIRTUAL_FOLDER_FAILED");
+    },
+
+    delete: async (
+      folderId: DatabaseId,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<void>> => {
+      return this.adapter.wrap(async () => {
+        assertTenantContext(options, "system.virtualFolder.delete");
+        const conditions = [eq(this.schema.systemVirtualFolders._id, folderId)];
+        applyTenantFilter(conditions, this.schema.systemVirtualFolders.tenantId, options);
+        await this.db.delete(this.schema.systemVirtualFolders).where(and(...conditions));
+      }, "DELETE_VIRTUAL_FOLDER_FAILED");
+    },
+
+    exists: async (path: string, options?: BaseQueryOptions): Promise<DatabaseResult<boolean>> => {
+      return this.adapter.wrap(async () => {
+        assertTenantContext(options, "system.virtualFolder.exists");
+        const conditions = [eq(this.schema.systemVirtualFolders.path, path)];
+        applyTenantFilter(conditions, this.schema.systemVirtualFolders.tenantId, options);
+        const [folder] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.systemVirtualFolders))
+          .from(this.schema.systemVirtualFolders)
+          .where(and(...conditions))
+          .limit(1);
+        return !!folder;
+      }, "CHECK_VIRTUAL_FOLDER_EXISTS_FAILED");
+    },
+
+    getContents: async (
+      folderPath: string,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<{ folders: SystemVirtualFolder[]; files: MediaItem[] }>> => {
+      return this.adapter.wrap(async () => {
+        assertTenantContext(options, "system.virtualFolder.getContents");
+        const conditions = [eq(this.schema.systemVirtualFolders.path, folderPath)];
+        applyTenantFilter(conditions, this.schema.systemVirtualFolders.tenantId, options);
+        const [folder] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.systemVirtualFolders))
+          .from(this.schema.systemVirtualFolders)
+          .where(and(...conditions))
+          .limit(1);
+        if (!folder) throw new Error("Folder not found");
+
+        const subConditions = [eq(this.schema.systemVirtualFolders.parentId, folder._id)];
+        applyTenantFilter(subConditions, this.schema.systemVirtualFolders.tenantId, options);
+        const fileConditions = [eq(this.schema.mediaItems.folderId, folder._id)];
+        applyTenantFilter(fileConditions, this.schema.mediaItems.tenantId, options);
+
+        const subQuery = this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.systemVirtualFolders))
+          .from(this.schema.systemVirtualFolders)
+          .where(and(...subConditions));
+        const fileQuery = this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.mediaItems))
+          .from(this.schema.mediaItems)
+          .where(and(...fileConditions));
+        const [subfolders, files] = await Promise.all([subQuery, fileQuery]);
+        return {
+          folders: convertArrayDatesToISO(subfolders) as unknown as SystemVirtualFolder[],
+          files: convertArrayDatesToISO(files) as unknown as MediaItem[],
+        };
+      }, "GET_VIRTUAL_FOLDER_CONTENTS_FAILED");
+    },
+
+    addToFolder: async (
+      contentId: DatabaseId,
+      folderPath: string,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<void>> => {
+      return this.adapter.wrap(async () => {
+        assertTenantContext(options, "system.virtualFolder.addToFolder");
+
+        // Step 1: Find the folder by path.
+        const folderConditions = [eq(this.schema.systemVirtualFolders.path, folderPath)];
+        applyTenantFilter(folderConditions, this.schema.systemVirtualFolders.tenantId, options);
+        const [folder] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.systemVirtualFolders))
+          .from(this.schema.systemVirtualFolders)
+          .where(and(...folderConditions))
+          .limit(1);
+        if (!folder) throw new Error("Target folder not found");
+        const foundFolderId = folder._id; // Store the ID immediately
+
+        // --- TOCTOU Mitigation ---
+        // Re-check folder existence just before updating the media item to
+        // reduce the TOCTOU window (mirrors the MongoDB implementation). If
+        // the folder was deleted between the lookup and this check, the
+        // update would otherwise use a stale folderId.
+        const folderCheckResult = await this.virtualFolder.getById(foundFolderId, options);
+        if (!folderCheckResult.success || !folderCheckResult.data) {
+          throw new Error("Target folder was deleted after lookup.");
+        }
+        // --- End TOCTOU Mitigation ---
+
+        // Update the media item with the confirmed folder ID. `.returning()` is
+        // unsupported on MariaDB — fall back to affected-rows/changes detection
+        // (same pattern as relational-auth consumeToken).
+        const itemConditions = [eq(this.schema.mediaItems._id, contentId as string)];
+        applyTenantFilter(itemConditions, this.schema.mediaItems.tenantId, options);
+        let updatedRows = 0;
+        try {
+          const results = await this.db
+            .update(this.schema.mediaItems)
+            .set(
+              convertISOToDates({
+                folderId: foundFolderId as any,
+                updatedAt: nowISODateString(),
+              }) as any,
+            )
+            .where(and(...itemConditions))
+            .returning();
+          updatedRows = Array.isArray(results) ? results.length : 0;
+        } catch {
+          // MariaDB: no RETURNING clause — use the raw affected-rows count.
+          // Literal table/column names only (scanner-safe); values are bound.
+          const raw = await this.adapter.raw.execute(
+            "UPDATE `media_items` SET `folderId` = ?, `updatedAt` = ? WHERE `_id` = ?",
+            [foundFolderId, new Date(), contentId],
+          );
+          updatedRows =
+            (raw as { changes?: number })?.changes ??
+            (raw as { affectedRows?: number })?.affectedRows ??
+            (raw as { rowCount?: number })?.rowCount ??
+            0;
+        }
+
+        // Check if the media item itself was found and updated.
+        if (updatedRows === 0) throw new Error("Media item not found or access denied");
+
+        return undefined;
+      }, "ADD_TO_FOLDER_FAILED");
+    },
+
+    ensure: async (
+      folder: EntityCreate<SystemVirtualFolder>,
+      options?: BaseQueryOptions,
+    ): Promise<DatabaseResult<SystemVirtualFolder>> => {
+      assertTenantContext(options, "system.virtualFolder.ensure");
+      const res = await this.virtualFolder.exists(folder.path, options);
+      if (res.success && res.data) {
+        const conditions = [eq(this.schema.systemVirtualFolders.path, folder.path)];
+        applyTenantFilter(conditions, this.schema.systemVirtualFolders.tenantId, options);
+        const [f] = await this.db
+          .select(this.adapter.getPhysicalSelection(this.schema.systemVirtualFolders))
+          .from(this.schema.systemVirtualFolders)
+          .where(and(...conditions))
+          .limit(1);
+        return {
+          success: true,
+          data: convertDatesToISO(f) as unknown as SystemVirtualFolder,
+        };
+      }
+      return this.virtualFolder.create(folder, options);
+    },
+  };
+
+  public readonly health = {
+    getUpdateStatus: async (): Promise<
+      DatabaseResult<{ updateAvailable: boolean; latestVersion?: string }>
+    > => {
+      return {
+        success: true,
+        data: {
+          updateAvailable: false,
+        },
+      };
+    },
+  };
+}

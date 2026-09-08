@@ -1,127 +1,141 @@
 /**
  * @file src/app.d.ts
  * @description This file defines the types for the app.
- *
- * See https://kit.svelte.dev/docs/types#app
- * for information about these interfaces
- * and what to do when importing types
  */
 
-import type { Role, Token, User } from '@src/databases/auth/types'; // Import the actual types
-import type { DatabaseAdapter, Theme } from '@src/databases/dbInterface'; // Ensure correct import path
+import type { Role, Token, User } from "@src/databases/auth/types";
+import type { DatabaseAdapter, Theme, DatabaseId } from "@src/databases/db-interface";
 
 declare global {
-	/// <reference path="./types/**/*.d.ts" />
+  namespace App {
+    interface Error {
+      message: string;
+      code?: string;
+    }
+    interface Locals {
+      // Setup hook caching
+      __setupConfigExists?: boolean;
+      __setupLogged?: boolean;
+      __setupLoginRedirectLogged?: boolean;
+      __setupRedirectLogged?: boolean;
+      // Per-request handoff: the API dispatcher already wrote the L1 turbo entry
+      // (with tags) for a stashed-body GET, so handle-api-requests skips its
+      // duplicate write unless a super-admin `?tenantId=` override re-scoped it.
+      __dispatcherTurboWrite?: boolean;
+      allTokens: Token[];
+      allUsers: User[];
+      collections?: unknown;
 
-	// Vite global variables
-	const __FRESH_INSTALL__: boolean;
+      // High-performance Local API (Payload style)
+      cms?: {
+        auth: any;
+        collections: {
+          list: (options?: any) => Promise<any[]>;
+          search: (query: string, options?: any) => Promise<any>;
+          find: (
+            collection: string,
+            options?: any,
+          ) => Promise<import("@src/databases/db-interface").DatabaseResult<any[]>>;
+          findById: (
+            collection: string,
+            id: string,
+            options?: any,
+          ) => Promise<import("@src/databases/db-interface").DatabaseResult<any | null>>;
+          getNodeChildren: (parentId: string, tenantId?: any) => Promise<any>;
+          create: (
+            collection: string,
+            data: any,
+            options?: any,
+          ) => Promise<import("@src/databases/db-interface").DatabaseResult<any>>;
+          getRevisions: (collection: string, id: string, tenantId?: any) => Promise<any>;
+          update: (
+            collection: string,
+            id: string,
+            data: any,
+            options?: any,
+          ) => Promise<import("@src/databases/db-interface").DatabaseResult<any>>;
+          delete: (
+            collection: string,
+            id: string,
+            options?: any,
+          ) => Promise<import("@src/databases/db-interface").DatabaseResult<any>>;
+          bulkCreate: (collection: string, data: any[], options?: any) => Promise<any>;
+          bulkUpdate: (collection: string, updates: any[], options?: any) => Promise<any>;
+          bulkDelete: (collection: string, ids: string[], options?: any) => Promise<any>;
+          queryBuilder: (collection: string, options?: any) => any;
+          modifyRequest: (params: any) => Promise<any>;
+          refresh: (tId?: string) => Promise<any>;
+          reorderContentNodes: (items: any[], tId?: string) => Promise<any>;
+        };
+        media: any;
+        widgets: any;
+        system: any;
+        websiteTokens: any;
+        db: import("@src/databases/db-interface").IDBAdapter;
+        [key: string]: any;
+      };
 
-	declare type Item = import('svelte-dnd-action').Item;
-	declare type DndEvent<ItemType = Item> = import('svelte-dnd-action').DndEvent<ItemType>;
-	declare namespace svelteHTML {
-		interface HTMLAttributes<T> {
-			'on:consider'?: (event: CustomEvent<DndEvent<ItemType>> & { target: EventTarget & T }) => void;
-			'on:finalize'?: (event: CustomEvent<DndEvent<ItemType>> & { target: EventTarget & T }) => void;
-		}
-	}
+      cspNonce?: string;
+      customCss: string;
+      darkMode: boolean;
+      /** Request-scoped SSR language (set by handleUserPreferences). */
+      systemLanguage?: string;
+      /** Request-scoped SSR content language (set by handleUserPreferences). */
+      contentLanguage?: string;
+      /** Tenant-scoped adapter when MULTI_TENANT + tenantId (use for request DB work). */
+      dbAdapter?: DatabaseAdapter | null;
+      /** Raw adapter without tenant injection (scheduler, migrations, cross-tenant admin). */
+      dbAdapterUnscoped?: DatabaseAdapter | null;
+      degradedServices?: string[];
+      getSession: () => Promise<import("@auth/core/types").Session | null>;
+      hasManageUsersPermission: boolean;
+      hasAdminPermission: boolean;
+      isAdmin: boolean;
+      isFirstUser: boolean;
+      language: string;
+      permissions: string[];
+      roles: Role[];
+      session_id?: DatabaseId;
+      /** Authentication Method References for the current session (e.g. ["pwd","mfa"]). */
+      sessionAmr?: string[];
+      /** ISO timestamp when MFA was verified for this session. */
+      mfaVerifiedAt?: string;
+      tenantId?: DatabaseId | null;
+      theme: Theme | null;
+      user: User | null;
+      // Set by handle-authentication when a session cookie was present but invalid/expired:
+      // the browser has signed in before, so the login page can default to the Sign In form.
+      returningUser?: boolean;
 
-	namespace App {
-		// interface Error {}
-		// interface PageData {}
-		// interface Platform {}
-		interface Locals {
-			user: User | null;
-			collections?: unknown; // Replace with your actual Collections type if available
-			permissions: string[]; // Array of user permissions
-			session_id?: string;
-			// Authorization flags
-			isFirstUser: boolean; // True when no users exist in database (setup flow)
-			isAdmin: boolean; // True when user's role has admin privileges
-			hasManageUsersPermission: boolean; // True when user is admin OR has "manage user" permission
-			// Data loaded by authorization hook
-			roles: Role[]; // Using imported Role type
-			allUsers: User[]; // Using imported User type
-			allTokens: Token[]; // Using imported Token type
-			theme: Theme | null; // Ensure 'theme' is correctly typed
-			customCss: string; // The active theme's custom CSS
-			tenantId?: string; // Added for multi-tenancy support
-			darkMode: boolean; // Dark mode preference from cookies
-			dbAdapter?: DatabaseAdapter | null; // Database adapter for adapter-agnostic operations
-			cspNonce?: string; // CSP nonce for this request (managed by SvelteKit)
-			// Setup hook caching - prevents duplicate checks/logs per request
-			__setupConfigExists?: boolean; // Caches isSetupComplete() result per request
-			__setupLogged?: boolean; // Prevents duplicate "config missing" warnings
-			__setupRedirectLogged?: boolean; // Prevents duplicate setup redirect logs
-			__setupLoginRedirectLogged?: boolean; // Prevents duplicate login redirect logs
-			degradedServices?: string[]; // List of unhealthy services (populated by handleSystemState in DEGRADED state)
-		}
-	}
+      // Tracing and Metrics
+      requestStart: number;
+      requestId: string;
+      /** Classified by routeResourceStateMachine in hooks.server.ts. */
+      routeSpec?: import("@src/services/core/route-resource-state-machine").RouteResourceSpec;
+    }
+  }
 
-	type tokenTypes = 'register' | 'resetPassword' | 'emailVerification';
+  // Common interfaces
+  interface Result {
+    data: unknown;
+    errors: string[];
+    message: string;
+    success: boolean;
+  }
 
-	// Defines the Result type, which represents an object with errors, success, message, and data properties.
-	type Result = {
-		errors: string[];
-		success: boolean;
-		message: string;
-		data: unknown;
-	};
-
-	type AggregationFilterStage = Record<string, unknown>;
-	type AggregationSortStage = Record<string, unknown>;
-
-	// Defines the DISPLAY type, which represents a function that takes an object with data, collection, field, entry, and contentLanguage properties and returns a promise of any.
-	type DISPLAY = (({ data: unknown, collection: unknown, field: unknown, entry: unknown, contentLanguage: string }) => Promise<unknown>) & {
-		default?: boolean;
-	};
-
-	// Defines a type for the GraphqlSchema function, which takes an object with field, label, collection, and optional collectionNameMapping properties and returns an object with typeID, graphql, and optional resolver properties.
-	type GraphqlSchema = ({
-		field,
-		label,
-		collection,
-		collectionNameMapping
-	}: {
-		field: unknown;
-		label: string;
-		collection: unknown;
-		collectionNameMapping?: Map<string, string>;
-	}) => {
-		typeID: string | null;
-		graphql: string;
-		resolver?: { [key: string]: unknown };
-	};
-
-	/**
-	 * Defines the Aggregations type, which represents an object with optional methods for performing transformations, filters, and sorts on data.
-	 * The filters method takes a field, content language, and filter, and returns a promise of an array of aggregation stages.
-	 * The sorts method takes a field, content language, and sort value, and returns a promise of an aggregation stage object.
-	 */
-	type Aggregations = {
-		filters?: ({ field, contentLanguage, filter }: { field: unknown; contentLanguage: string; filter: string }) => Promise<AggregationFilterStage[]>;
-		sorts?: ({
-			field,
-			contentLanguage,
-			sort,
-			sortDirection
-		}: {
-			field: unknown;
-			contentLanguage: string;
-			sort?: number;
-			sortDirection?: 1 | -1 | 'asc' | 'desc';
-		}) => Promise<AggregationSortStage | AggregationSortStage[]>;
-	};
-
-	// Defines the File type, which represents an object with an optional path property.
-	interface File {
-		path?: string;
-	}
-
-	interface RegExpConstructor {
-		escape(str: string): string;
-	}
+  // Bun runtime global (used in typeof Bun !== "undefined" guards)
+  var Bun: {
+    version: string;
+    gc(expose?: boolean): void;
+    [key: string]: any;
+  };
 }
 
-// THIS IS IMPORTANT!!!
-// Export an empty object to ensure this file is treated as a module
-export {};
+declare module "bun:sqlite" {
+  export class Database {
+    constructor(path: string, options?: { create?: boolean; readonly?: boolean });
+    query(sql: string): any;
+    run(sql: string, ...params: any[]): any;
+    close(): void;
+  }
+}

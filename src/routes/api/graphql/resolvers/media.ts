@@ -1,44 +1,29 @@
 /**
  * @file src/routes/api/graphql/resolvers/media.ts
  * @description Dynamic GraphQL schema and resolver generation for media.
- *
- * This module provides functionality to:
- * - Dynamically register media schemas based on the CMS configuration
- * - Generate GraphQL type definitions and resolvers for each media type
- * - Handle complex field types and nested structures
- * - Integrate with Redis for caching (if enabled)
- *
- * Features:
- * - Dynamic schema generation based on widget configurations
- * - Support for extracted fields and nested structures
- * - Integration with custom widget schemas
- * - Redis caching for improved performance
- * - Error handling and logging
- *
- * Usage:
- * - Used by the main GraphQL setup to generate media-specific schemas and resolvers
- * - Provides the foundation for querying media data through the GraphQL API
  */
 
-import { getPrivateSettingSync } from '@src/services/settingsService';
-import type { DatabaseAdapter, BaseEntity } from '@src/databases/dbInterface';
-
-// System Logs
-import { logger } from '@utils/logger.server';
-
-// Permissions
-
-// Types
-import type { User } from '@src/databases/auth/types';
+import type { User } from "@src/databases/auth/types";
+import type { DatabaseAdapter } from "@src/databases/db-interface";
+import { isMultiTenantEnabled } from "@utils/tenant";
+import { logger } from "@utils/logger";
+import { hasPermissionWithRoles } from "@src/databases/auth/permissions";
+import type { PublicationFilter } from "@src/utils/security/publication-policy";
 
 // Registers media schemas dynamically.
 export function mediaTypeDefs() {
-	return `
+  return `
         type MediaImage {
             _id: String
             url: String
             createdAt: String
             updatedAt: String
+        }
+
+        type MediaFolder {
+            _id: String
+            name: String
+            path: String
         }
 
         type MediaDocument {
@@ -71,89 +56,93 @@ export function mediaTypeDefs() {
     `;
 }
 
-// GraphQL Types
 interface PaginationArgs {
-	pagination: {
-		page: number;
-		limit: number;
-	};
+  pagination: {
+    page: number;
+    limit: number;
+  };
 }
 
-// GraphQL context type
 interface GraphQLContext {
-	user?: User;
-	tenantId?: string;
+  tenantId?: string | null;
+  user?: User;
+  /** Publication visibility of the request (resolved in +server.ts context). */
+  publicationFilter?: PublicationFilter;
 }
 
-// GraphQL parent type for media resolvers
 type MediaResolverParent = unknown;
-
-// Media entity type with tenantId support
-interface MediaEntity extends BaseEntity {
-	url?: string;
-	tenantId?: string;
-}
 
 // Builds resolvers for querying media data with pagination support.
 export function mediaResolvers(dbAdapter: DatabaseAdapter) {
-	if (!dbAdapter) {
-		logger.error('Database adapter is not initialized');
-		throw new Error('Database adapter is not initialized');
-	}
-	const fetchWithPagination = async (contentTypes: string, pagination: { page: number; limit: number }, context: GraphQLContext) => {
-		// Check media permissions
-		if (!context.user) {
-			logger.warn(`GraphQL: No user in context for media type ${contentTypes}`);
-			throw new Error('Authentication required');
-		}
+  if (!dbAdapter) {
+    throw new Error("Database adapter is not initialized");
+  }
 
-		// Authentication is handled by hooks.server.ts - user presence confirms access
+  const fetchMediaByType = async (
+    mimeTypeFilter: Record<string, unknown> | null,
+    pagination: { page?: number; limit?: number } | undefined,
+    context: GraphQLContext,
+  ) => {
+    if (!context.user) {
+      throw new Error("Authentication required");
+    }
 
-		if (getPrivateSettingSync('MULTI_TENANT') && !context.tenantId) {
-			logger.error('GraphQL: Tenant ID is missing from context in a multi-tenant setup.');
-			throw new Error('Internal Server Error: Tenant context is missing.');
-		}
+    // 🛡️ HARDENING: RBAC parity with REST — media routes require `media:read`.
+    // GraphQL previously exposed the media library to ANY logged-in user
+    // because it only checked `context.user` presence.
+    if (!hasPermissionWithRoles(context.user, "media:read")) {
+      throw new Error("Forbidden: insufficient permissions");
+    }
 
-		const { page = 1, limit = 50 } = pagination || {};
+    const { page = 1, limit = 50 } = pagination || {};
 
-		try {
-			// --- MULTI-TENANCY: Scope the query by tenantId ---
-			const query: Partial<MediaEntity> = {};
-			if (getPrivateSettingSync('MULTI_TENANT')) {
-				query.tenantId = context.tenantId;
-			}
+    try {
+      // Build filter for multi-tenant and media type
+      const filter: Record<string, unknown> = {};
+      if (isMultiTenantEnabled() && context.tenantId) {
+        filter.tenantId = context.tenantId;
+      }
 
-			// Use query builder pattern consistent with REST API
-			const queryBuilder = dbAdapter
-				.queryBuilder<MediaEntity>(contentTypes)
-				.where(query)
-				.sort('createdAt', 'desc')
-				.paginate({ page, pageSize: limit });
+      // Push MIME type filter to DB — avoids loading non-matching rows into memory
+      if (mimeTypeFilter) {
+        Object.assign(filter, mimeTypeFilter);
+      }
 
-			const result = await queryBuilder.execute();
+      // Use crud.findMany to query media collection with server-side filtering
+      const result = await dbAdapter.crud.findMany("media", filter, {
+        limit,
+        offset: (page - 1) * limit,
+        sort: { createdAt: "desc" },
+      });
 
-			if (!result.success) {
-				throw new Error(`Database query failed: ${result.error?.message || 'Unknown error'}`);
-			}
+      if (!result.success) {
+        throw new Error(result.error?.message || "Query failed");
+      }
 
-			logger.info(`Fetched ${contentTypes}`, { count: result.data.length, tenantId: context.tenantId });
-			return result.data;
-		} catch (error) {
-			logger.error(`Error fetching data for ${contentTypes}:`, { error, tenantId: context.tenantId });
-			throw Error(`Failed to fetch data for ${contentTypes}`);
-		}
-	};
+      return result.data || [];
+    } catch (error) {
+      logger.error("Error fetching media:", {
+        error: error instanceof Error ? error.message : String(error),
+        tenantId: context.tenantId,
+      });
+      throw new Error("Failed to fetch media");
+    }
+  };
 
-	return {
-		mediaImages: async (_: MediaResolverParent, args: PaginationArgs, context: GraphQLContext) =>
-			await fetchWithPagination('media_images', args.pagination, context),
-		mediaDocuments: async (_: MediaResolverParent, args: PaginationArgs, context: GraphQLContext) =>
-			await fetchWithPagination('media_documents', args.pagination, context),
-		mediaAudio: async (_: MediaResolverParent, args: PaginationArgs, context: GraphQLContext) =>
-			await fetchWithPagination('media_audio', args.pagination, context),
-		mediaVideos: async (_: MediaResolverParent, args: PaginationArgs, context: GraphQLContext) =>
-			await fetchWithPagination('media_videos', args.pagination, context),
-		mediaRemote: async (_: MediaResolverParent, args: PaginationArgs, context: GraphQLContext) =>
-			await fetchWithPagination('media_remote', args.pagination, context)
-	};
+  return {
+    mediaImages: async (_: MediaResolverParent, args: PaginationArgs, context: GraphQLContext) =>
+      await fetchMediaByType({ mimeType: { $regex: "^image/" } }, args.pagination, context),
+    mediaDocuments: async (_: MediaResolverParent, args: PaginationArgs, context: GraphQLContext) =>
+      await fetchMediaByType(
+        { mimeType: { $regex: "^(application|text)/" } },
+        args.pagination,
+        context,
+      ),
+    mediaAudio: async (_: MediaResolverParent, args: PaginationArgs, context: GraphQLContext) =>
+      await fetchMediaByType({ mimeType: { $regex: "^audio/" } }, args.pagination, context),
+    mediaVideos: async (_: MediaResolverParent, args: PaginationArgs, context: GraphQLContext) =>
+      await fetchMediaByType({ mimeType: { $regex: "^video/" } }, args.pagination, context),
+    mediaRemote: async (_: MediaResolverParent, args: PaginationArgs, context: GraphQLContext) =>
+      await fetchMediaByType(null, args.pagination, context),
+  };
 }

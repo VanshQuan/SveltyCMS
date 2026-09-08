@@ -1,41 +1,195 @@
 /**
  * @file src/routes/+layout.server.ts
  * @description Root server-side layout handler.
+ *
+ * ### Features
+ * - Settings Loading
+ * - User Management
+ * - Theme Management
+ * - Content Versioning
+ *
+ * ### Security
+ * - Settings Loading is cached
+ * - User Management is cached
+ * - Theme Management is cached
+ * - Content Versioning is cached
  */
-import { version } from '../../package.json';
-// Use server-side settings service with setup-safe fallbacks
-import { getPrivateSettingSync } from '@src/services/settingsService';
-import { publicEnv } from '@src/stores/globalSettings.svelte';
-import type { LayoutServerLoad } from './$types';
-import type { Locale } from '@src/paraglide/runtime';
 
-export const load: LayoutServerLoad = async ({ cookies, locals }) => {
-	// Load settings from configuration service - settings should be loaded from DB during initialization
-	const siteName = publicEnv.SITE_NAME;
-	const baseLocale = publicEnv.BASE_LOCALE;
-	const defaultContentLanguage = publicEnv.DEFAULT_CONTENT_LANGUAGE;
-	const isMultiTenant = getPrivateSettingSync('MULTI_TENANT');
+import { logger } from "@utils/logger";
+import type { NavigationNode } from "@src/content";
+import { contentSystem, contentStore } from "@src/content/index.server";
+import { cacheService } from "@src/databases/cache/cache-service";
+import { CacheCategory } from "@src/databases/cache/types";
+import {
+  recordCollectionAccess,
+  recordEntryAccess,
+} from "@src/services/intelligence/behavioral-learner";
+import type { Locale } from "@src/paraglide/runtime";
+import { isMultiTenantEnabled } from "@utils/tenant";
+import { loadSettingsCache } from "@src/services/core/settings-service";
+import { dev } from "$app/env";
+import { version } from "../../package.json";
+import type { LayoutServerLoad } from "./$types";
 
-	// Determine the system language from cookies or fall back to the database default.
-	const systemLanguage = (cookies.get('systemLanguage') as Locale) ?? baseLocale;
-	const contentLanguage = (cookies.get('contentLanguage') as Locale) ?? defaultContentLanguage;
+export const load: LayoutServerLoad = async ({ cookies, locals, url }) => {
+  // Use cached setup status from hooks instead of re-checking
+  // The handleSetup hook already sets locals.__setupConfigExists
+  const setupMode = locals.__setupConfigExists === false || url.pathname.startsWith("/setup");
 
-	return {
-		systemLanguage,
-		contentLanguage,
-		// During setup, hooks may skip auth; keep these tolerant
-		user: locals.user ?? null,
-		isAdmin: locals.isAdmin ?? false,
-		isMultiTenant,
-		// CSP nonce for secure inline scripts/styles
-		cspNonce: locals.cspNonce,
-		tenantId: locals.tenantId ?? null,
-		darkMode: locals.darkMode, // <-- THIS LINE IS REQUIRED
-		settings: {
-			SITE_NAME: siteName,
-			BASE_LOCALE: baseLocale,
-			DEFAULT_CONTENT_LANGUAGE: defaultContentLanguage,
-			PKG_VERSION: version
-		}
-	};
+  // Fast-path for setup mode - skip ALL CMS initialization
+  if (setupMode) {
+    return {
+      systemLanguage:
+        (locals.systemLanguage as Locale) ?? (cookies.get("systemLanguage") as Locale) ?? "en",
+      contentLanguage:
+        (locals.contentLanguage as Locale) ?? (cookies.get("contentLanguage") as Locale) ?? "en",
+      user: null,
+      isAdmin: false,
+      isMultiTenant: false,
+      cspNonce: locals.cspNonce,
+      tenantId: null,
+      darkMode: locals.darkMode ?? false,
+      navigationStructure: [],
+      contentNodes: [],
+      contentVersion: 0,
+      settings: {
+        PKG_VERSION: version,
+        siteName: "SveltyCMS Setup",
+      },
+    };
+  }
+
+  // Wrap settings loading in try-catch for preview mode resilience
+  let publicSettings: any;
+  try {
+    const settingsResult = await loadSettingsCache();
+    publicSettings = settingsResult.public;
+  } catch (error) {
+    logger.error("[Layout] Settings load failed (preview mode?):", error);
+    // Return minimal valid data structure
+    return {
+      systemLanguage: "en" as Locale,
+      contentLanguage: "en" as Locale,
+      user: null,
+      isAdmin: false,
+      isMultiTenant: false,
+      cspNonce: locals.cspNonce,
+      tenantId: null,
+      darkMode: locals.darkMode ?? false,
+      navigationStructure: [],
+      contentNodes: [],
+      contentVersion: 0,
+      settings: {
+        PKG_VERSION: version,
+        siteName: "SveltyCMS",
+      },
+    };
+  }
+
+  // Extract values for server-side logic
+  const baseLocale = publicSettings.BASE_LOCALE;
+  const defaultContentLanguage = publicSettings.DEFAULT_CONTENT_LANGUAGE;
+
+  // Private settings only accessible server-side
+  const isMultiTenant = isMultiTenantEnabled();
+
+  // Request-scoped language from handleUserPreferences (validated, no global
+  // store mutation), falling back to the cookie for setups where the hook did
+  // not run (e.g. preview mode resilience).
+  const systemLanguage =
+    (locals.systemLanguage as Locale) ?? (cookies.get("systemLanguage") as Locale) ?? baseLocale;
+  const contentLanguage =
+    (locals.contentLanguage as Locale) ??
+    (cookies.get("contentLanguage") as Locale) ??
+    defaultContentLanguage;
+
+  // Content System Hydration with error handling for preview mode
+  let navigationStructure: NavigationNode[] = [];
+  let contentVersion = 0;
+  let firstCollectionRedirectUrl = "";
+
+  try {
+    // Ensure content-manager is initialized before use to guarantee sidebar population.
+    // This is critical for the first load after setup.
+    await contentSystem.initialize(locals.tenantId);
+
+    contentVersion = contentSystem.getContentVersion();
+    const tid = locals.tenantId ? String(locals.tenantId) : "global";
+    // 🚀 Version-keyed cache for the progressive nav tree: contentStore is
+    // epoch-consistent (every content mutation bumps contentVersion), so the
+    // tree only changes when the version changes. Mirror the existing
+    // `navigation:tree:*` caching used by getNavigationStructure instead of
+    // rebuilding the tree on every SSR request.
+    const navCacheKey = `navigation:tree:progressive:${tid}:${contentVersion}`;
+    const cachedNav = await cacheService
+      .get<NavigationNode[]>(navCacheKey, locals.tenantId)
+      .catch(() => null);
+    if (cachedNav) {
+      navigationStructure = cachedNav;
+    } else {
+      navigationStructure = contentSystem.getNavigationStructureProgressive({
+        maxDepth: 1,
+        tenantId: locals.tenantId,
+      });
+      void cacheService
+        .set(navCacheKey, navigationStructure, 300, locals.tenantId, CacheCategory.CONTENT, [
+          "navigation",
+          "navigation:tree",
+          `navigation:tree:${tid}`,
+        ])
+        .catch(() => {});
+    }
+
+    // Get the redirect URL for the first collection
+    firstCollectionRedirectUrl =
+      (await contentSystem.getFirstCollectionRedirectUrl(
+        contentLanguage as string,
+        locals.tenantId,
+      )) || "";
+  } catch (error) {
+    logger.error("[Layout]ContentSystem error (preview mode?):", error);
+    // Continue with empty navigation - don't block page load
+  }
+
+  // 🧠 Behavioral learning: track access patterns (fire-and-forget)
+  try {
+    const pathParts = url.pathname.split("/").filter(Boolean);
+    if (pathParts.length >= 2) {
+      const collectionId = pathParts[1];
+      recordCollectionAccess(locals.tenantId || "global", collectionId);
+      if (pathParts.length >= 3) {
+        recordEntryAccess(locals.tenantId || "global", collectionId, pathParts[2]);
+      }
+    }
+  } catch {
+    /* non-critical */
+  }
+
+  return {
+    systemLanguage,
+    contentLanguage,
+    user: locals.user ?? null,
+    isAdmin: locals.isAdmin ?? false,
+    isMultiTenant,
+    cspNonce: locals.cspNonce,
+    tenantId: locals.tenantId ?? null,
+    darkMode: locals.darkMode ?? false,
+    navigationStructure,
+    // Pre-sanitized client nodes (cached in contentStore until next store mutation)
+    contentNodes: contentStore.getClientNodes(locals.tenantId),
+    contentVersion,
+    // Pass CSRF token for state-changing API calls
+    csrfToken:
+      cookies.get(
+        url.protocol === "https:" || (url.hostname !== "localhost" && !dev)
+          ? "__Host-csrf_token"
+          : "csrf_token",
+      ) ?? null,
+    // Pass public settings to client for store initialization
+    settings: {
+      ...publicSettings,
+      PKG_VERSION: version,
+      FIRST_COLLECTION_REDIRECT_URL: firstCollectionRedirectUrl,
+    },
+  };
 };

@@ -1,1649 +1,472 @@
 ---
-path: 'docs/tests/test-status.mdx'
-title: 'Test Suite Status Report'
-description: 'Comprehensive status report of all SveltyCMS tests including unit, integration, and E2E tests with current pass rates and known issues.'
+path: "docs/tests/test-status.mdx"
+title: "Test Status"
+description: "Single live testing dashboard: health by layer, hot areas, open gaps, and what to run. GitHub Actions is the source of truth for pass/fail counts."
 order: 2
-icon: 'mdi:chart-box'
-author: 'admin'
-created: '2025-11-08'
-updated: '2025-01-20'
+icon: "mdi:chart-box"
+author: "SveltyCMS Team"
+created: "2025-11-08"
+updated: "2026-08-22"
 tags:
-  - 'testing'
-  - 'status'
-  - 'coverage'
-  - 'bun'
-  - 'playwright'
+  - "testing"
+  - "status"
+  - "dashboard"
+  - "coverage"
+  - "content-sync"
+  - "lane-router"
 ---
 
-# SveltyCMS Test Suite Status
+# Test Status
 
-**Last Updated:** January 20, 2025  
-**Branch:** next  
-**Test Frameworks:** Bun Test v1.3.1 + Playwright
+> [!IMPORTANT]
+> **Live pass/fail counts = GitHub Actions** on this branch or PR. Numbers in docs drift; CI does not.  
+> This page is the **only** test-status dashboard — route maps, inventories, and deep strategy live in the linked docs below (no separate archive).
 
-## Executive Summary
-
-✅ **460+ passing tests** across 30+ test files  
-� **~85% API endpoint coverage** (85 of 99 endpoints tested)  
-�📝 **140+ placeholder tests** (database/auth tests awaiting setup)  
-⚠️ **Integration tests require dev server running on port 5173**
-
-### Test Coverage by Category
-
-| Category                | Status        | Pass Rate | Tests |
-| ----------------------- | ------------- | --------- | ----- |
-| **Server Hooks**        | ✅ Excellent  | 100%      | 53/53 |
-| **API - User**          | ✅ Complete   | 100%      | 47/47 |
-| **API - GraphQL**       | ✅ Complete   | 100%      | 21/21 |
-| **API - Token**         | ✅ Complete   | 100%      | 12/12 |
-| **API - Setup**         | ✅ Complete   | 100%      | 45/45 |
-| **API - Collections**   | ✅ Complete   | 100%      | 19/19 |
-| **API - Dashboard**     | ✅ Created    | Pending   | 48/48 |
-| **API - 2FA**           | ✅ Created    | Pending   | 28/28 |
-| **API - Security**      | ✅ Created    | Pending   | 33/33 |
-| **API - Widgets**       | ✅ Created    | Pending   | 30/30 |
-| **API - Settings**      | ✅ Created    | Pending   | 31/31 |
-| **API - Import/Export** | ✅ Created    | Pending   | 29/29 |
-| **API - Theme**         | ✅ Created    | Pending   | 24/24 |
-| **API - Miscellaneous** | ✅ Created    | Pending   | 36/36 |
-| **Security Utils**      | ✅ Excellent  | 100%      | 8/8   |
-| **Widget Validation**   | ✅ Excellent  | 100%      | 8/8   |
-| **Cache System**        | ✅ Excellent  | 100%      | 17/17 |
-| **UI Components**       | ✅ Excellent  | 100%      | 5/5   |
-| **Content Utils**       | ✅ Excellent  | 100%      | 6/6   |
-| **Database Interface**  | 📝 Scaffolded | 0%        | 0/50+ |
-| **MongoDB Adapter**     | 📝 Scaffolded | 0%        | 0/40+ |
-| **Auth System**         | 📝 Scaffolded | 0%        | 0/50+ |
-| **Collection Builder**  | ⚠️ Partial    | 57%       | 4/7   |
+**Dashboard updated:** 2026-09-04 — **Transformer v6 + schema-loader lean pass**. Unit suite **473 files / 4066 tests** green; `bun run check` clean. Compilation: composite transformer now descends after schema `_id`/`tenantId` injection and injects deterministic widget-call `uuid`s on the first-argument object literal — widget calls under exported `schema.fields` are rewritten to `globalThis.widgets.*` (regression suite drives the real `compile()` against a checked-in fixture; byte-deterministic). Schema loader: widgets proxy installed once (not per file), confinement roots + case-insensitive widget map precomputed, worker-pool dummy timeout removed, single-pass schema hash. Boot-path probe: 150 compiled schemas in 42 ms. Benchmark tooling now reports CMS throughput as **% of raw HTTP floor** (the honest HTTP yardstick); 2026-09-04 SQLite baselines recorded (cold 3049 RPS · TURBO-HIT 5478 RPS @8c).
 
 ---
 
-## ✅ Passing Tests (295+)
+## 1. Snapshot
 
-### 1. Server Hooks Middleware (53/53) 🔒
+| Question                          | Answer                                                                                                                                                                                                                              |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Are the gates healthy?**        | Design A++: pre-commit (unit + `risk:audit`) → pre-push (build 4 adapters + tenant + SQLite integration) → CI multi-DB + E2E                                                                                                        |
+| **Where to look first when red?** | Failing CI job name → matching **hot area** below or [route control map](./e2e-coverage-matrix.mdx)                                                                                                                                 |
+| **Biggest recent win**            | **Field write guards + real-time truth-pass** (schema-level `writeRoles` enforced with 403 + audit; WS sessions share the HTTP resolution pipeline; SSE+Yjs collaboration actually round-trips; svelte-realtime dead layer removed) |
+| **Biggest open risk (product)**   | Multi-tenant browser isolation (`MULTI_TENANT=true` env gate; E2E spec exists, needs dedicated CI job); E2E still CI-only (not pre-commit)                                                                                          |
 
-**Files:**
+> [!TIP]
+> **Headless-first:** adapters + session + RBAC are P0. Admin E2E is golden-only. Full tier table: **[Headless-First Test Inventory](./headless-test-inventory.mdx)**.
 
-- `tests/bun/hooks/system-state.test.ts` (26 tests)
-- `tests/bun/hooks/firewall.test.ts` (27 tests)
+---
 
-**System State Hook Tests:**
+## 2. Health by layer
 
-- ✅ READY state: allows all routes
-- ✅ DEGRADED state: allows routes with service warnings
-- ✅ IDLE state: allows setup/health checks, blocks normal routes
-- ✅ INITIALIZING state: blocks non-essential routes
-- ✅ FAILED state: blocks all except health checks
-- ✅ Route pattern matching for special paths (/static, /assets, /\_app)
-- ✅ Degraded services tracking in event.locals
+| Layer                       | Confidence    | What it proves                                                                                                                                        | How to run                                                              |
+| --------------------------- | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| **Unit** (Vitest 5)         | **A++**       | 473 files / **4066 tests** — auth, lanes/turbo cache, CacheService, page gates, widgets, security, field write guards, compilation v6 + schema loader | `bun run test:unit` · coverage: `test:unit:coverage`                    |
+| **Security regression**     | **A++**       | Hooks + RBAC defense-in-depth + full `risk:audit` (security-risk, secrets, slop, OSV) on pre-commit                                                   | `bun run test:security` · `bun run risk:audit`                          |
+| **Integration** (black-box) | **A++**       | ~65 files / **~617 tests** SQLite local; multi-adapter matrix in CI; lane headers + session page-load canaries                                        | `bun run test:integration` (SQLite) · `bun run test:matrix` (all 4 DBs) |
+| **E2E** (Playwright)        | **A++**       | ~44 specs — browser goldens / P0 journeys; hooks-lane smoke; CI-parity preview :4173                                                                  | `bun run test:e2e` (not Vite). Dev-only: `test:e2e:dev`                 |
+| **Benchmarks**              | **Selective** | Perf matrix + lane-router attribution; full suite is long — not every PR                                                                              | See [benchmarks](../project/benchmarks/index.mdx)                       |
 
-**Firewall Hook Tests:**
+## 3. Testing tiers
 
-- ✅ Suspicious parameter detection (password, token, secret in URLs)
-- ✅ Bulk operation abuse detection
-- ✅ Administrative endpoint enumeration protection
-- ✅ Advanced bot detection (HeadlessChrome, Selenium, Puppeteer, Playwright)
-- ✅ Legitimate bot allowlist (Googlebot, facebookexternalhit, Twitterbot)
-- ✅ Normal traffic allowance
-- ✅ Script injection pattern detection (note: limited by URL encoding in tests)
-- ✅ Template/command injection pattern detection
+| Tier               | Command               | Time     | Coverage (approx., drifts — trust CI)                                   |
+| ------------------ | --------------------- | -------- | ----------------------------------------------------------------------- |
+| **Pre-commit**     | git commit / hooks    | ~40–60s  | Unit (4066) + `risk:audit` + format/lint + SBOM when lock changes       |
+| **Pre-push**       | `bun run gate`        | ~5–8min  | Build 4 adapters + backdoor/bundle gates + tenant + SQLite integ (~617) |
+| **Pre-CI** (local) | `bun run test:matrix` | ~8–15min | All 4 DBs via Docker profiles                                           |
+| **CI**             | GitHub Actions        | ~30min   | Whitebox + build + db-tests matrix + E2E + benchmarks                   |
 
-**Testing Strategy:**
+**Gates (local → CI)** — source of truth: `.githooks/pre-commit`, `.githooks/pre-push`, `.github/workflows/ci.yml`
 
-- **Direct Tests (2 hooks):** `handleSystemState`, `handleFirewall` - Complex state machines and security logic requiring dedicated tests
-- **Indirect Tests (9 hooks):** Other hooks tested via integration tests
-  - `handleAuthentication`: Tested via user API tests (47 tests with authentication)
-  - `handleAuthorization`: Tested via collections API (19 tests with role checks)
-  - `handleRateLimit`: Tested via setup API stress tests
-  - `handleSetup`: Tested via setup API tests (20 tests)
-  - `handleLocale`, `handleTheme`: Tested via UI rendering tests
-  - `handleStaticAssetCaching`, `addSecurityHeaders`, `handleApiRequests`: Simple middleware, tested in integration
+| When       | What runs (summary)                                                                                                                                       |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pre-commit | 1. DB safety 2. Format + lint (`check`) 3. Lint-staged 4. **`risk:audit`** 5. **Unit** 6. SBOM sync (if lock/package changed)                             |
+| Pre-push   | 1. Build (`COMPILE_ALL_ADAPTERS=true`) 2. Backdoor verify (bench) 3. Bundle size 4. `check` 5. Secret scan 6. **`test:tenant`** 7. **SQLite integration** |
+| Manual     | `bun run test:doctor` · `bun run test:security` · `bun run test:e2e`                                                                                      |
+| CI         | Whitebox (format/lint/check/unit/tenant/secrets/probe) → build → db-tests (4 DBs) → E2E prep + groups → benchmarks                                        |
 
-**Commands:**
+**CI smart reporting** (job Summary tab + annotations):
+
+| Job                           | Reporter                                                                                         |
+| ----------------------------- | ------------------------------------------------------------------------------------------------ |
+| E2E prep / E2E shards         | `scripts/ci-report-playwright.ts` — pass/fail counts, first error, fix hints, `preview.log` tail |
+| `bun test tests/integration/` | bun test native output — per-file ✓/×, summary, no custom JSON                                   |
+| All Green                     | `scripts/ci-report-all-green.ts` — job matrix + fix order                                        |
+
+Details: [git-workflow.mdx](./git-workflow.mdx)
+
+---
+
+## 3. Hot areas (recent)
+
+### Compilation transformer v6 + schema-loader lean pass (2026-09-04)
+
+|            |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Status** | **Shipped** — `fix(compilation): rewrite widgets under schemas` (0d860c2f6): the composite transformer returned after schema `_id`/`tenantId` injection without visiting children, so widget calls under exported `schema.fields` kept bare `widgets` identifiers and never received deterministic `uuid`s. v6 descends after injection and injects uuids on the first-argument object literal (bare + pre-written `globalThis.widgets.*`, nested group/repeater shapes included). `TRANSFORMER_VERSION` bumped 5→6 (fingerprint forces clean recompile).                                                            |
+| **Tests**  | New checked-in fixture `tests/unit/compilation/fixtures/collections/{posts,helpers}.ts` + `tests/unit/compilation/widget-collection-regression.test.ts` (4 tests) drive the **real `compile()`**: rewrite assertions, 3/3 deterministic uuids incl. nested, byte-identical fresh compiles, loader-parity `import()` with `globalThis.widgets`. Composite unit coverage extended in `tests/unit/utils/transformers.test.ts` (6 new cases). `tests/unit/content/loader-utils.test.ts` (10 tests): path confinement, hash determinism/sensitivity, native load of a real compiled schema, single-install widgets proxy. |
+| **Perf**   | Schema loader lean pass (`perf(content)`): widgets proxy installed once instead of per-file await + global write; confinement roots + case-insensitive widget map precomputed; per-task dummy no-op timeout removed from the worker pool; `generateSchemaHash` single-pass without per-field objects/JSON.stringify. Boot-path probe: 150 compiled schemas load in 42 ms (0.28 ms each), hash ≈2 µs/call. Widget definitions now declare `version` explicitly (28 files) — registry import no longer warns at boot.                                                                                                  |
+| **Bench**  | `raw-db-ceiling.ts` measures the bare-HTTP floor **before** printing the ceiling table and reports CMS rows as **% of raw HTTP floor** (honest HTTP yardstick; driver-ceil % remains the fallback for SDK/DB-layer records). 2026-09-04 SQLite baselines recorded via `BENCHMARK_RECORD=1`: api-latency cold **3049 RPS / 2.396 ms**, TURBO-HIT **5478 RPS / 1.368 ms** @8c; middleware flamegraph per-stage costs.                                                                                                                                                                                                  |
+| **Docs**   | [compilation-pipeline](../reference/architecture/compilation-pipeline.mdx) · [benchmark_sqlite](../project/benchmarks/benchmark_sqlite.mdx) · [test-to-docs-map](./test-to-docs-map.mdx) · [Achievements Log](../project/achievements-2026.mdx)                                                                                                                                                                                                                                                                                                                                                                      |
+| **Open**   | Worker-pool schema loader (production path) still lacks an integration test that drives a widget-call collection through `loadSchemaPooled` — unit coverage exercises the native path only.                                                                                                                                                                                                                                                                                                                                                                                                                          |
+
+### Honest 4-DB benchmark matrix + hardware-adaptive tuning (2026-08-23)
+
+|             |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Status**  | **Shipped** — full 4-DB matrix **200/200** on the hardware-profile build (run 3: SQLite 50/0 · MariaDB 50/0 · Postgres 50/0 · Mongo 50/0). Run 2 (pre-profile) was 199/200 — the lone `dev-dependency-load` failure was the DX toolchain flagging unformatted auto-generated benchmark MDX; the reporter now runs oxfmt on every written report, so `bun run check` stays green after runs. Benchmark-cheating bypass removed in Aug 12/14 commits kept all numbers honest (production-mode servers, real auth/rate-limit/WAF).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| **Product** | **Hardware-adaptive profile** (`@utils/hardware-profile`): ONE detection at process start published to the shared global registry — every module/chunk/worker reads the same object. Workload-prioritized CPU allocation (media > compile > workers > jobs > DB fan-out) under a global `HARDWARE_CPU_BUDGET` (default 0.75 all-in-one VPS, `1` for dedicated app servers) + per-knob env overrides (`SHARP_CONCURRENCY`, `DB_POOL_SIZE`, `MODULE_WORKER_POOL_SIZE`, `COMPILE_CONCURRENCY`, `JOB_CONCURRENCY`, `MONGO_MIN_POOL_SIZE`, `UV_THREADPOOL_SIZE`). Wired into hooks (sharp/threadpool), all 4 DB adapters (pools), module-loader workers, compile, job queue, compression (weak boxes cap gzip/brotli), setup wizard + dashboard (`/api/dashboard/system-info` exposes the profile). **Media**: preset (width,format) dedup (20→12 jobs) + deferred responsive-variant generation → SDK **210→116 ms (−45%)**, HTTP **208→105 ms (−50%)**, still emitting all variant records. **CacheService**: flat-key pattern invalidation now buckets under the namespace key → **26→4.5 ms**.                                                                                                                                                                                                                                                                                                                   |
+| **Bench**   | Matrix run 3 (2026-08-23, profile build): SQLite 50/0 · MariaDB 50/0 · Postgres 50/0 · Mongo 50/0 (**200/200**). Run 2 vs run 3 (pre-profile vs profile): **no systematic regression** — the feared GQL-100c pool regression from smaller DB pools did NOT materialize (GQL 100c flat-to-better: SQLite −4%, PG ±0%, MariaDB avg flat); media SDK −3%; notable Postgres gains (widget pipeline −44%, Yjs −37%, mixed workload −25%, SEO −17–27%) and Mongo gains (collection search −29%, uploads −17–20%). Remaining "degraded" flags are sub-5 ms run-to-run noise (cache pattern-invalidation, Yjs CRDT, small payloads). **Restart overhead cut ~20%**: post-destructive restarts are now data-driven — only `graphql-stress` (→ relational-performance) and `large-payload-streaming` (→ migration-scale) restart unconditionally (verified breakers); the other 5 destructive tests skip the ~12–16s boot, saving ~4 min of the ~22 min run. Cross-DB ledger vs Aug baseline: Full Journey @1c **−89%/−65%/−67%/−82%**, State Transition **−64%/−36%/−72%**, Bulk Migration 10k **−46%/−64%**, Cache Miss Cold **−80%**, Argon2id **−48%** (SQLite). MongoDB stress flakes fixed via pre-stress full readiness wait + bounded crash-retry in the matrix harness. New provisioning: `bench_index_pressure` + `bench_migration_large` collections seeded (kills the 100k-row `SQLITE_ERROR no such table`). |
+| **Unit**    | Full suite **416 files / 3667 tests** green; `bun run check` clean. Added `statistics-accuracy.test.ts` (raw-sample tail percentiles, t-distribution CI, IQR-trimmed mean) + cache pattern-invalidation case.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| **Docs**    | [benchmark-matrix](./benchmark-matrix.mdx) · [benchmark_sqlite](../project/benchmarks/benchmark_sqlite.mdx) · [performance-architecture](../reference/database/performance-architecture.mdx) · [Achievements Log](../project/achievements-2026.mdx) · [roadmap](../project/roadmap-2026.mdx)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| **Open**    | Redis matrix variant (`USE_REDIS=true`, `_redis` reports) still to run. GPU: sharp/libvips has no GPU backend — media parallelism is CPU-tier capped by design.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+
+### Cold-start write-path engine + WCAG-AA palette + media-tree click fix (2026-08-22)
+
+|                 |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Status**      | **Shipped** — cold-start/write-path optimizations verified green across gates; E2E contrast + media move regressions fixed (both were real product bugs, not test-only)                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| **Product**     | Widget registry registers pre-scanned widgets synchronously in the constructor; `prewarmCollectionSchemas()` pre-fills the SDK schema cache + adapter registries at READY; `_provisionedTables` fast-path skips repeated DDL on all 4 adapters (Postgres does a single `information_schema.columns` read + ALTER/backfill only missing columns — kills the 25k-row cold-start UPDATE); self-healing `getModel` reconstructs the wrapped model from the cached table def without request-thread DDL; lazy write-path modules pre-warmed at READY; cache-warming L1 re-warm every 4 min (before `collection:` TTL) |
+| **E2E**         | `mediagallery/move-remote.spec.ts` — nested treeitem clicks bubbled to the root node whose `onClick` re-navigated to `/mediagallery`, cancelling the folder `goto()`; fixed with `e.stopPropagation()` in `tree-view.svelte` (**5/5 pass**). `login/accessibility.spec.ts` — `primary/tertiary/success/warning-500` + `preset-filled-surface-500` darkened to WCAG AA (was 1.94–3.74:1), login floating-label `surface-500→surface-700`, axe audit waits for the sign-in `transition:fade` to finish (opacity <1 blends colors → phantom 1:1 violations) (**3/3 pass**)                                          |
+| **Unit**        | Full suite **399 files / 3576 tests** green; `bun run check` (format + lint + dead-classes + design-token checker + lockfile-sync) clean                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **Integration** | SQLite adapter-level `tests/integration/databases/` **161/161 pass**; server-bound API suites require a `TEST_MODE=true` harness build (plain `bun run build` deploy-strips `/api/testing` → `API_ENDPOINT_NOT_AVAILABLE` on every seed/reset) — use `scripts/run-integration.ts` or build with `TEST_MODE=true`                                                                                                                                                                                                                                                                                                 |
+| **Docs**        | [performance-architecture](../reference/database/performance-architecture.mdx) · [style-guide-gui](../contributing/style-guide-gui.mdx) · [accessibility-audit](./accessibility-audit.mdx)                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| **Open**        | Full E2E chromium sweep + 4-DB integration matrix still CI-only; verify no visual-regression drift from the darkened palette (env-gated)                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+### Multi-DB batching/caching engine + turbo-cache tenant isolation (2026-08-21)
+
+|                 |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Status**      | **Shipped** — zero-allocation tenant clauses, memoized table-name/route classification, 4-DB parity on multi-row batch inserts; fixed **mid-glob L1 cache invalidation** and **test-tenant header honoring** in turbo GET + turbo-auth fast paths; 4 previously-red integration files now green (webhooks, automations, token, tenant-isolation)                                                                                                                                                 |
+| **Product**     | `EMPTY_TENANT_CLAUSE` + ASCII-first JSON sniff in `relational-utils`; bounded memoization in `collection-name` / `drizzle-sql-helpers` / `route-resource-state-machine`; O(1) pointer-based BFS in `content-utils`; `rawInsertManyReturning` multi-row batches on MariaDB/PG/SQLite; `clearLocalL1ByPattern` glob support (`res:*webhooks*` now purges); `handleTurboGet` + `handleAuthentication` fast paths prefer `x-test-tenant-id` over cached session tenant (no cross-tenant turbo leaks) |
+| **Unit**        | `tests/unit/core/count-cache.test.ts` (arg-count contract assertions) · `tests/unit/plugins/commerce.test.ts` (cart row hardening: NaN/currency-mismatch 500s) · GraphQL resolver context types now declare `publicationFilter` (4 files) · `collections-namespace` cast hygiene                                                                                                                                                                                                                 |
+| **Integration** | `tests/integration/api/webhooks.test.ts` · `api/automations.test.ts` · `api/token.test.ts` · `databases/tenant-isolation.test.ts` — **39/39 pass** (previously 4 failing across all DB adapters)                                                                                                                                                                                                                                                                                                 |
+| **Docs**        | [cache-system](../reference/architecture/cache-system.mdx) · [performance-architecture](../reference/database/performance-architecture.mdx) · [multi-tenancy](../reference/architecture/multi-tenancy.mdx)                                                                                                                                                                                                                                                                                       |
+| **Open**        | Full multi-DB integration matrix + E2E shards still CI-only (SQLite local green); Redis L2 multi-node still not part of the local gate                                                                                                                                                                                                                                                                                                                                                           |
+
+### Hooks hardening — field write guards, session dedup, real-time (2026-08-10)
+
+|                 |                                                                                                                                                                                                                                                                                                                                                                                                           |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Status**      | **Shipped** — field-level write guards wired into the mutation path; WS session resolution deduped onto the HTTP pipeline; 18-hook READY pipeline; real-time stack is SSE + Yjs; full unit suite green (**366 files / 3302 tests**)                                                                                                                                                                       |
+| **Product**     | `assertWriteAllowed` / `hasGuardedFields` / `getCollectionFields` (30s schema memo) in `handle-api-requests` — 403 + `UNAUTHORIZED_ACCESS` audit for guarded-field writes; `resolveSessionForWebSocket` shares the HTTP session pipeline (LRU→store→Redis→DB, negative cache, single-flight); `yjs:sync` SSE bridge makes multi-editor updates round-trip; `/ws` upgrades session-validated (fail-closed) |
+| **Unit**        | `tests/unit/services/field-write-guard.test.ts` (15) · `field-permission-service.test.ts` (19) · `tests/unit/live/client-import-boundary.test.ts` (2) · hooks/auth/security suites (615)                                                                                                                                                                                                                  |
+| **Integration** | `tests/integration/api/rtc.test.ts` (SSE `/api/events` happy + 401)                                                                                                                                                                                                                                                                                                                                       |
+| **Bench**       | `tests/benchmarks/hooks-performance.test.ts` — full auth pipeline **0.612 ± 0.010 ms** (3-run mean, ~1,363 RPS) vs 0.856 ms July baseline (~29% faster); post-tweak re-run within noise                                                                                                                                                                                                                   |
+| **Docs**        | [field-level-access-control](../reference/security/field-level-access-control.mdx) · [collaborative-editing](../reference/architecture/collaborative-editing.mdx) · [real-time updates](../reference/api/graphql-subscriptions.mdx) · [server-hooks](../reference/architecture/server-hooks.mdx)                                                                                                          |
+| **Open**        | GraphQL mutations bypass the field write-guard (documented boundary)                                                                                                                                                                                                                                                                                                                                      |
+
+### Request Lane Router + response cache (2026-08-06)
+
+|                 |                                                                                                                                                                                                                                  |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Status**      | **Shipped** — O(1) `classifyRequest` in `hooks.server.ts`; `x-svelty-lane` on responses; turbo GET + GraphQL/REST user-scoped `responseCache`; fixed session cookie name (`auth_sessions`, not `svelty_session`) for HYPER_TURBO |
+| **Product**     | Lanes: FAST_STATIC, HEALTH, HYPER_TURBO, API_READ/WRITE, APP_SSR, BOOTSTRAP, FILES, PUBLIC_SITE; health/static fast-paths; `handleTurboGet` TURBO-HIT when warm turbo-auth + L1 body                                             |
+| **Unit**        | `tests/unit/core/request-classifier-and-response-cache.test.ts` · `tests/unit/hooks/handle-turbo-get-lane.test.ts`                                                                                                               |
+| **Integration** | `tests/integration/api/request-lane-headers.test.ts` (`x-svelty-lane`, health JSON, dashboard `__data.json`) · session-page-load still P0 for auth→SSR                                                                           |
+| **E2E**         | `tests/e2e/routes/system/hooks-lane-smoke.spec.ts` — admin session shell + `/health`                                                                                                                                             |
+| **Bench**       | `tests/benchmarks/lane-router-attribution.test.ts`                                                                                                                                                                               |
+| **Docs**        | [performance-architecture](../reference/database/performance-architecture.mdx) (operator guide + lane table)                                                                                                                     |
+| **Open**        | Optional: assert TURBO-HIT under live integration with seeded turbo-auth warm path; multi-node Redis L2 load tests                                                                                                               |
+
+### List / count product layer (2026-08-04)
+
+|                 |                                                                                                                                                                                |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Status**      | **Shipped adapter + service wiring** — not “full UI polish”; E2E only after more list surfaces adopt `findPage`                                                                |
+| **Product**     | `findPage` (hasMore + keyset), `CountMode`, L1 count cache; CollectionService limit+1 + cached count; media `getByFolder`; users `listUsers` findPage; facets via `crud.count` |
+| **Unit**        | `tests/unit/core/page-utils.test.ts`, `count-cache.test.ts`                                                                                                                    |
+| **Integration** | `tests/integration/databases/find-page-count-contract.test.ts` (SQLite local; multi-DB in CI matrix)                                                                           |
+| **Bench**       | `tests/benchmarks/database-performance.test.ts` (FIND PAGE / LIST+COUNT / COUNT ESTIMATE / CACHED / keyset)                                                                    |
+| **Docs**        | [performance-architecture](../reference/database/performance-architecture.mdx) · [database-tests](./database-tests.mdx) · [roadmap](../project/roadmap-2026.mdx)               |
+| **Open**        | Saved views on users/media; marketplace install pipeline; OIDC PKCE + login UI; published DB packages                                                                          |
+
+### Marketplace + OIDC (2026-08-04)
+
+|              |                                                                                        |
+| ------------ | -------------------------------------------------------------------------------------- |
+| **Status**   | **Partial product** — in-app catalog tab + OIDC login/callback + JWKS verify           |
+| **Product**  | Extensions **Marketplace** tab; `GET /api/marketplace`; `oidc-login` / `oidc-callback` |
+| **Unit/E2E** | No dedicated E2E yet — add seed-backed golden when install + IdP UI ship               |
+| **Docs**     | [roadmap-2026](../project/roadmap-2026.mdx)                                            |
+
+### Session & RBAC hardening (2026-08-04)
+
+|                 |                                                                                                                                                                                                                                                                                                                                |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Status**      | **Shipped** — three hardening rounds; full unit suite green (3073)                                                                                                                                                                                                                                                             |
+| **Product**     | Device policy (`single-per-device` / `single-per-user` / `allow-multiple`), `SESSION_TTL_HOURS`, `SESSION_IDLE_HOURS`, block propagation purge, credential-free session snapshots, log-only IP/UA anomaly detection, `SESSION_MAX_PER_USER` LRU cap, step-up re-auth for cross-session revoke, admin session console API       |
+| **Unit**        | `tests/unit/auth/auth-lockout.test.ts` (device policy, TTL, max sessions) · `tests/unit/auth/sessions/session-user.test.ts` (snapshot stripping, store hygiene, anomaly evaluation) · `tests/unit/hooks/authentication.test.ts` (stripping, warm-cache, anomaly) · `tests/unit/api/user.test.ts` (reauth proof, admin console) |
+| **Integration** | Covered by existing auth integration suites (session create/revoke/rotate)                                                                                                                                                                                                                                                     |
+| **Bench**       | `tests/benchmarks/hooks-performance.test.ts` — full auth pipeline **0.612 ± 0.010 ms** (3-run mean, ~1,363 RPS) vs 0.856 ms July baseline (~29% faster)                                                                                                                                                                        |
+| **Docs**        | [login-security](../reference/security/login-security.mdx) · [cache-system](../reference/architecture/cache-system.mdx) · [hook-test-coverage](./hook-test-coverage.mdx) · [roadmap](../project/roadmap-2026.mdx)                                                                                                              |
+| **Open**        | Admin session console **UI** (Access Management); browser golden for revoke flow; anomaly → alerting integration                                                                                                                                                                                                               |
+
+### ContentSync / compilation / Collection Builder (2026-07-31)
+
+|             |                                                                                                                                                                                                                                   |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Status**  | **Unified coordinator** — IDE edit + GUI save + boot share one path; soft HMR; surgical client patch when possible                                                                                                                |
+| **Product** | `syncContentState` reasons: `boot` · `watcher` · `collection-save` · `gui-save` · `sidebar-reorder`; GUI compile lock; atomic `.js`; hash-backed drift; tenant paths via `tenant.server`                                          |
+| **Unit**    | `sync-content-state` (13+), `collection-save-sync` (2), `schema-contract` (6+ Valibot), `compile-manifest` (atomic/`noOp`/`changedJsPaths`), `collection-store-reactive` (`patchActiveSchema`)                                    |
+| **E2E**     | `collection-builder/builder.spec.ts` — shell + **soft-refresh** + **structure** (category create survives reload) + golden schema→entry→API                                                                                       |
+| **Docs**    | [compilation-pipeline](../reference/architecture/compilation-pipeline.mdx) · [content-system](../reference/architecture/content-system.mdx) · [collection-builder](../reference/architecture/collection-builder-architecture.mdx) |
+
+### `/user` — profile & management (2026-07-19)
+
+|             |                                                                                                                                |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **Status**  | **100% control map** — product + unit + integration + E2E                                                                      |
+| **E2E**     | 7 specs: smoke, profile, management, invite, complete-coverage, `p0-journeys`, **`coverage-100`**                              |
+| **Product** | Profile update: `command` remote + email fallback when session `user_id` stale after re-seed; plain-text toasts for assertions |
+| **Docs**    | [routes/user.mdx](./routes/user.mdx) · [e2e-coverage-matrix §3](./e2e-coverage-matrix.mdx)                                     |
+
+### `/dashboard` — shell + licensing (2026-08-04)
+
+|                 |                                                                                                          |
+| --------------- | -------------------------------------------------------------------------------------------------------- |
+| **Status**      | **Shell 100%** (widget catalog is install-specific — never fixed list) + **server-side license gates**   |
+| **E2E**         | `dashboard.spec.ts` — empty/grid, add/search/reset, **pointer + keyboard reorder**, toolbar, plugin slot |
+| **Unit**        | page.server permissions, `widget-defaults` categories, **`dashboard-license-gate` (map + 403 paths)**    |
+| **Integration** | `dashboard.test.ts` health/metrics/logs/… APIs widgets consume (premium endpoints pass during trial)     |
+| **Docs**        | [routes/dashboard.mdx](./routes/dashboard.mdx)                                                           |
+
+### `/mediagallery` (2026-07-18)
+
+|            |                                                                                     |
+| ---------- | ----------------------------------------------------------------------------------- |
+| **Status** | Shell + upload/delete + editor save + folders + bulk + **move** + **remote upload** |
+| **E2E**    | `mediagallery`, `image-editor`, `folders-bulk`, **`move-remote`**                   |
+| **Unit**   | `mediagallery-page-server.test.ts`                                                  |
+| **Docs**   | [routes/mediagallery.mdx](./routes/mediagallery.mdx)                                |
+
+### `/config/access-management` (2026-07-19)
+
+|             |                                                                                                                                                                                                            |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Status**  | Tabs + create role + save/reset + admin/tokens; sticky action `.first()`; tokens panel testids; permission-matrix toggle                                                                                   |
+| **E2E**     | `config/access-management.spec.ts` — create-role outcome, tokens panel (`website-tokens-panel`); `system/permissions.spec.ts` — matrix toggle + persistence; `system/language.spec.ts` — language selector |
+| **Product** | Role modal `response` as 3rd `trigger` arg; website-tokens `$effect` loop fixed (density/columns sync + untracked fetch); `fetchPageData` must select the **page** `__data.json` node (not the layout's)   |
+| **Unit**    | `access-management-page-server.test.ts` admin gate                                                                                                                                                         |
+| **Docs**    | [routes/access-management.mdx](./routes/access-management.mdx)                                                                                                                                             |
+
+### `/config/system-settings` (2026-07-18)
+
+|                 |                                                                                         |
+| --------------- | --------------------------------------------------------------------------------------- |
+| **Status**      | Group nav/search, edit→save/discard, **save+reload happy path**, export/import, MT/GDPR |
+| **E2E**         | `system/settings.spec.ts` (shell + edit/discard + persistence)                          |
+| **Unit**        | page.server gate + settings-groups + settings-utils                                     |
+| **Integration** | `settings.test.ts` export/import                                                        |
+| **Docs**        | [routes/system-settings.mdx](./routes/system-settings.mdx)                              |
+
+### `/config/redirects` (2026-07-19)
+
+|             |                                                                                                                                     |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| **Status**  | Admin gate + golden create→search→delete; **primary store = `redirectsMV`** (aligned with middleware)                               |
+| **E2E**     | `config/redirects.spec.ts` golden (MV list/search/delete)                                                                           |
+| **Unit**    | `redirects.server` (MV insert/update/delete + `normalizeRedirectRow`) + redirects-utils + page load                                 |
+| **Product** | `source`/`target` on MV; content collection mirror best-effort; compound index `idx_redirects_mv_lookup` (tenantId, source, active) |
+| **Docs**    | [routes/redirects.mdx](./routes/redirects.mdx)                                                                                      |
+
+### `/config/queue` + `/config/monitor` (2026-07-18)
+
+|            |                                                                              |
+| ---------- | ---------------------------------------------------------------------------- |
+| **Status** | Admin gates, testids, queue filter URL + showConfirm; monitor resilient load |
+| **E2E**    | `config/operations.spec.ts`                                                  |
+| **Unit**   | `queue-page-server` + `monitor-page-server`                                  |
+| **Docs**   | [queue](./routes/queue.mdx), [monitor](./routes/monitor.mdx)                 |
+
+### `/config/webhooks` — Testing 2026 reference (2026-07-18)
+
+|                 |                                                                                              |
+| --------------- | -------------------------------------------------------------------------------------------- |
+| **Status**      | **ADR reference** — full three layers: unit + **HTTP integration** + golden E2E              |
+| **E2E**         | `config/webhooks.spec.ts` (shell guard + golden journey only)                                |
+| **Unit**        | page.server + webhooks-utils + **webhooks-api** + fetchApi CSRF                              |
+| **Integration** | **`tests/integration/api/webhooks.test.ts`** — list/create/delete + 401 unauth + editor deny |
+| **ADR**         | [adr-testing-2026.mdx](./adr-testing-2026.mdx)                                               |
+| **Docs**        | [routes/webhooks.mdx](./routes/webhooks.mdx)                                                 |
+
+### `/config/extensions` (2026-07-18)
+
+|            |                                                              |
+| ---------- | ------------------------------------------------------------ |
+| **Status** | Admin via isAdmin, tabs + plugins testids, toggle CSRF/toast |
+| **E2E**    | `config/extensions.spec.ts`                                  |
+| **Unit**   | `extensions-page-server.test.ts`                             |
+| **Docs**   | [routes/extensions.mdx](./routes/extensions.mdx)             |
+
+### `/config/automations` (2026-07-19)
+
+|            |                                                                                             |
+| ---------- | ------------------------------------------------------------------------------------------- |
+| **Status** | **`automations-api` + fetchApi CSRF**; golden builder create→list→edit→delete; seed-search  |
+| **E2E**    | `config/automations.spec.ts` — open editor via card `link` (not bare text / checkbox label) |
+| **Unit**   | page.server + **automations-api**                                                           |
+| **Docs**   | [routes/automations.mdx](./routes/automations.mdx) · [ADR](./adr-testing-2026.mdx)          |
+
+### `/config/workflows` (2026-07-19)
+
+|             |                                                                                              |
+| ----------- | -------------------------------------------------------------------------------------------- |
+| **Status**  | Shell + **seed-workflow** golden; `name` NOT NULL safe; states JSON normalized on read       |
+| **E2E**     | `config/workflows.spec.ts` (toolbar/canvas + seed→GET by collectionId)                       |
+| **Product** | `workflow-service.saveWorkflow` default name; testing API passes `name`; builder name fields |
+| **Docs**    | [routes/workflows.mdx](./routes/workflows.mdx)                                               |
+
+### `/config/sync` + `/config/trash` (2026-07-18)
+
+|            |                                                                            |
+| ---------- | -------------------------------------------------------------------------- |
+| **Status** | Admin gates, sync tabs/status testids, trash empty/table + restore confirm |
+| **E2E**    | `config/data-ops.spec.ts`                                                  |
+| **Unit**   | `sync-trash-page-server.test.ts`                                           |
+| **Docs**   | [routes/sync-trash.mdx](./routes/sync-trash.mdx)                           |
+
+### Ultra-smart auth & client safety (2026-07-18)
+
+|                 |                                                                                                                                                                          |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Status**      | **P0 hardened** — loopback cookies, testing dual-write, **exhaustive** import-boundary, session→**18** admin pages                                                       |
+| **Unit**        | `session-cookies`, `client-import-boundary` (full client-root walk), login-cookie contract, `page-guards`, builder page.server, `totp-encryption`, `registry-auth-hooks` |
+| **Integration** | session-page-load · webhooks · automations · config-admin-surface · collection-structure · security-negative config matrix                                               |
+| **Docs**        | [headless-test-inventory.mdx](./headless-test-inventory.mdx) · [auth.mdx](../reference/api/auth.mdx)                                                                     |
+
+### 2FA Hardening & Plugin Auth Hooks (2026-07-30)
+
+|             |                                                                                                                                                                                                                                             |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Status**  | **35 new unit tests** — AES-256-GCM TOTP encryption (round-trip, tamper detection, legacy compat), trusted device tokens (gen/verify/reject), `afterAuthenticate` hook (deny/requires2FA/fail-open/skip disabled), configurable TOTP window |
+| **Unit**    | `tests/unit/auth/totp/totp-encryption.test.ts` (20 tests), `tests/unit/plugins/registry-auth-hooks.test.ts` (15 tests)                                                                                                                      |
+| **Product** | TOTP secrets encrypted at rest; pending setup state (resumable enrollment); `__Host-2fa-trusted-device` cookie; plugin auth hooks in `signInInternal`                                                                                       |
+| **Docs**    | [auth.mdx](../reference/api/auth.mdx) · [authentication-system.mdx](../reference/security/authentication-system.mdx) · [plugin architecture](../development/plugins/architecture.mdx)                                                       |
+
+### Databases whitebox + enterprise storage (2026-07-20)
+
+|                |                                                                                                                                                                                                                                                   |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Status**     | **`tests/unit/databases/` green** (0 skip for soft-delete under Bun; magic-link + CacheService fixed). Real proofs — not mock-only theater for Auth lockout, credential cache, boot helpers                                                       |
+| **Unit**       | `cache-service` (always-tenant keys, pattern clear), `credential-auth-cache` (real L1), `auth-lockout` (real `Auth`), `soft-delete` (mongoose stub), `database-resilience` / `CORRUPT_CONFIG`, magic-link privacy                                 |
+| **Product**    | CacheService `set`/`get` tenant default alignment; `clearByPattern` wildcard tenant; fail-fast `CORRUPT_CONFIG` → `MISSING_CONFIG`                                                                                                                |
+| **Enterprise** | Transactional **outbox**, **plugin storage**, **schema lifecycle hooks** (`beforeValidate`/`afterValidate`), media **jsonPath** — unit + integration seeds                                                                                        |
+| **Manifest**   | `tests/critical-test-paths.ts` (replaces p0-manifest/registry) · runners: `scripts/run-integration.ts`, `run-e2e.ts`, `test-doctor.ts`                                                                                                            |
+| **Docs**       | [database-tests.mdx](./database-tests.mdx) · [plugin-storage](../reference/architecture/plugin-storage.mdx) · [outbox](../reference/architecture/transactional-outbox.mdx) · [schema hooks](../reference/architecture/schema-lifecycle-hooks.mdx) |
+
+### Other solid areas (summary)
+
+| Area                   | Notes                                                                                                                                |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Auth & users API       | Strong integration (login, batch, avatar, sessions, 2FA) + **page-load session**                                                     |
+| Security hooks         | Dedicated regression suite in pre-commit/push                                                                                        |
+| Collection builder     | **E2E = shell + soft-refresh + golden** (`builder.spec.ts`); structure/utils unit+integ; ContentSync unit suite                      |
+| Content / compile      | ContentSync coordinator + schema contract + compile manifest; see hot area above                                                     |
+| Site starter / preview | Smoke E2E + unit; deep iframe edit still open                                                                                        |
+| Data operations        | Strong **unit**; thin browser E2E                                                                                                    |
+| Multi-tenant           | Unit/guard coverage; E2E isolation spec exists, gated behind `MULTI_TENANT=true`                                                     |
+| Stores unit            | `tests/unit/stores/` (reactivity, `patchActiveSchema`, structure fingerprint, `floating-nav-store` 22)                               |
+| Admin chrome           | `command-palette` (18) + `floating-nav-store` (22) + `logger` (7) + `widget-naming` (12) unit tests; hotkeys `Mod+K`/`Alt+G` unified |
+
+Deeper inventories: [headless-test-inventory](./headless-test-inventory.mdx) · [e2e-coverage-matrix](./e2e-coverage-matrix.mdx) · [three-layer-completeness](./three-layer-completeness.mdx).
+
+---
+
+## 4. Open gaps (actionable only)
+
+Only **open** product/test risks. Closed items stay in route docs / ADR changelog — not duplicated here.
+
+| Gap                                           | Priority  | Why it matters                                                                                                                                                                                                                                  |
+| --------------------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Multi-DB contract without asterisks**       | 🟠 High   | Headless ship gate — all adapters must match contract suite                                                                                                                                                                                     |
+| **Lane TURBO-HIT live warm path**             | 🟢 Lower  | Unit covers TURBO-HIT; full HTTP warm turbo-auth seed in integration optional                                                                                                                                                                   |
+| **Multi-tenant browser isolation**            | 🟡 Medium | E2E spec exists (`isolation.spec.ts`), gated behind `MULTI_TENANT=true` env                                                                                                                                                                     |
+| **Session vs DB identity after wizard reset** | 🟡 Medium | Phase-1 wizard can race firstuser; profile has email fallback — harden setup order                                                                                                                                                              |
+| **Redirects/queue remotes (no REST)**         | ✅ Closed | Remote admin + **redirectsMV primary** + unit; queue-actions                                                                                                                                                                                    |
+| **Config residual goldens (access/auto/wf)**  | ✅ Closed | Local focused chromium 16/16 (2026-07-19) after product fixes                                                                                                                                                                                   |
+| **Data operations deep E2E**                  | 🟢 Lower  | Sync/trash shells covered; migration wizard still plugin-gated                                                                                                                                                                                  |
+| **Worker-pool schema load (prod)**            | 🟢 Lower  | Widget-call collections covered by unit only (real `compile()` + native `loadSchemaNative`); `loadSchemaPooled`/worker chunk untested in integration                                                                                            |
+| **Cache L2 (Redis) integration**              | ✅ Closed | **L2 contract suite** (`cache-service-l2-contract.test.ts`) — FakeRedis always-on + real Redis via `TEST_REDIS_URL`; fixed untagged delete propagation to remote L1                                                                             |
+| **GraphQL browser E2E**                       | ❌ Skip   | Integration only — do not add browser GraphQL as a gate                                                                                                                                                                                         |
+| **SSO/OAuth real IdP**                        | 🟡 Medium | OIDC login/JWKS code landed; still mock/no live IdP in CI; PKCE + login UI open                                                                                                                                                                 |
+| **List UI full findPage adoption**            | 🟡 Medium | Service/adapters ready; users/media saved views + more goldens still thin                                                                                                                                                                       |
+| **Marketplace install path**                  | 🟢 Lower  | Browse/catalog in-app; one-click install still incomplete                                                                                                                                                                                       |
+| **Session revoke browser golden**             | 🟢 Lower  | Re-auth proof + admin console API unit-covered; E2E golden when Access Mgmt UI ships                                                                                                                                                            |
+| **`/ws` collaboration auth**                  | ✅ Closed | `/ws` upgrades session-validated via `ws-auth-registry` → `hooks.ws upgrade()` (same pipeline as HTTP); fail-closed 401; session-authoritative tenant keying                                                                                    |
+| **Awareness over SSE**                        | ✅ Closed | Awareness POSTs to `/api/collaboration/yjs` (`awareness: true`) → `yjsService` applies + broadcasts `yjs:awareness` over SSE; client applies remote state with `origin: "server"` (no echo loop); `yjs-awareness.test.ts` covers the round-trip |
+| **Builder E2E sprawl**                        | ✅ Closed | Consolidated to shell + golden; 8 specs removed                                                                                                                                                                                                 |
+| Plugin deep E2E, breadcrumb media drag-move   | 🟢 Low    | Optional polish                                                                                                                                                                                                                                 |
+
+---
+
+## 5. What to run locally
 
 ```bash
-bun test tests/bun/hooks/system-state.test.ts  # 26 tests
-bun test tests/bun/hooks/firewall.test.ts      # 27 tests
-bun test tests/bun/hooks/                      # All hook tests
+# Pre-commit parity (format + risk + unit)
+bun run check
+bun run risk:audit
+bun run test:unit
+
+# Before push (mirrors .githooks/pre-push)
+bun run gate
+
+# Unit only
+bun run test:unit
+
+# Lane router + turbo cache (2026-08-06)
+bun run test:unit -- tests/unit/core/request-classifier-and-response-cache.test.ts tests/unit/hooks/handle-turbo-get-lane.test.ts
+# After build: lane HTTP headers
+bun run scripts/run-integration.ts --no-build tests/integration/api/request-lane-headers.test.ts
+
+# Turbo-cache tenant isolation + cache glob invalidation (2026-08-21)
+bun run scripts/run-integration.ts --no-build tests/integration/api/webhooks.test.ts tests/integration/api/automations.test.ts tests/integration/api/token.test.ts tests/integration/databases/tenant-isolation.test.ts
+
+# Field write guards + field permissions (2026-08-10)
+bun run test:unit -- tests/unit/services/field-write-guard.test.ts tests/unit/services/field-permission-service.test.ts
+
+# Ultra-smart unit slice (auth, boundary, queue/redirects remotes)
+bun run test:unit -- tests/unit/auth/sessions/session-cookies.test.ts tests/unit/live/client-import-boundary.test.ts tests/unit/api/testing-login-cookie-contract.test.ts tests/unit/utils/page-guards.test.ts tests/unit/routes/collectionbuilder-page-server.test.ts tests/unit/routes/queue-remote-admin.test.ts tests/unit/routes/queue-actions.server.test.ts tests/unit/routes/redirects-remote-admin.test.ts tests/unit/api/namespace-ownership.test.ts
+
+# Databases whitebox + Auth lockout (real CacheService / Auth / boot)
+bun test tests/unit/databases/ tests/unit/auth/auth-lockout.test.ts
+
+# List/count product layer (pure + SQLite integration contract)
+bun test tests/unit/core/page-utils.test.ts tests/unit/core/count-cache.test.ts
+bun test --timeout 300000 tests/integration/databases/find-page-count-contract.test.ts
+
+# 2FA encryption + trusted devices + plugin auth hooks (35 tests)
+bun test tests/unit/auth/totp/totp-encryption.test.ts tests/unit/plugins/registry-auth-hooks.test.ts
+
+# ContentSync / compile / schema contract / builder soft-HMR slice
+bun run test:unit -- tests/unit/content/sync-content-state.test.ts tests/unit/content/collection-save-sync.test.ts tests/unit/content/schema-contract.test.ts tests/unit/compilation/compile-manifest.test.ts tests/unit/stores/collection-store-reactive.test.ts tests/unit/collectionbuilder/
+
+# Integration (SQLite) — session-page-load, lane headers, webhooks, security-negative
+bun run test:integration
+# reuse build: bun run scripts/run-integration.ts --no-build
+
+# E2E CI-parity (preview :4173 — not Vite)
+bun run test:e2e
+# Hooks/lane smoke (needs auth-setup admin.json):
+# bun run test:e2e:quick -- tests/e2e/routes/system/hooks-lane-smoke.spec.ts
+
+# Collection Builder shell + soft-refresh + golden
+bun run test:e2e --project=chromium tests/e2e/routes/collection-builder/builder.spec.ts
+
+# Focused residual config/user goldens (example)
+bun run test:e2e --project=chromium "--grep=redirects|Edit User Details|website tokens|automations|workflows|webhooks|Dashboard shell|create role"
+
+# Smart test selector (auto-detects from git diff)
+bun run test:smart
 ```
 
----
-
-### 2. Dashboard API Integration Tests (48/48) 📊
-
-**File:** `tests/bun/api/dashboard.test.ts`
-
-**Status:** ✅ Created (awaiting server execution)
-
-**Coverage:** All 9 dashboard API endpoints that serve widget data
-
-**Test Breakdown by Endpoint:**
-
-**1. GET /api/dashboard/health (3 tests):**
-
-- ✅ Returns READY status for healthy system
-- ✅ Returns 200 for READY/DEGRADED, 503 for other states
-- ✅ Includes component health details
-
-**2. GET /api/dashboard/metrics (3 tests):**
-
-- ✅ Returns basic metrics (requests, auth, cache, sessions)
-- ✅ Returns detailed metrics with system info (detailed=true)
-- ✅ Validates response structure
-
-**3. GET /api/dashboard/systemInfo (6 tests):**
-
-- ✅ Returns all system info (CPU, memory, disk, network, OS, process)
-- ✅ Filters by type (cpu, memory, disk)
-- ✅ Returns CPU info with load and history
-- ✅ Returns memory info with swap
-- ✅ Returns disk info with mounts
-- ✅ Requires authentication
-
-**4. GET /api/dashboard/logs (5 tests):**
-
-- ✅ Returns paginated logs
-- ✅ Filters by level (error, warn, info)
-- ✅ Searches log messages
-- ✅ Converts ANSI colors to HTML
-- ✅ Validates pagination structure
-
-**5. GET /api/dashboard/last5Content (4 tests):**
-
-- ✅ Returns recent content from collections
-- ✅ Validates content structure (id, title, collection, createdAt)
-- ✅ Respects limit parameter (max 20)
-- ✅ Requires authentication
-
-**6. GET /api/dashboard/last5media (3 tests):**
-
-- ✅ Returns recent media files
-- ✅ Validates media structure (name, size, modified, type, url)
-- ✅ Returns empty array when no media
-
-**7. GET /api/dashboard/online_user (4 tests):**
-
-- ✅ Returns online users list
-- ✅ Validates user structure (id, name, avatarUrl, onlineTime)
-- ✅ Includes current user in list
-- ✅ Sorts by longest online time
-
-**8. GET /api/dashboard/systemMessages (4 tests):**
-
-- ✅ Returns system messages from logs
-- ✅ Validates message structure (id, title, message, level, timestamp)
-- ✅ Respects limit parameter (max 50)
-- ✅ Returns default message when logs empty
-
-**9. GET /api/dashboard/cache-metrics (6 tests):**
-
-- ✅ Returns cache metrics (hits, misses, hit rate)
-- ✅ Validates metrics structure (overall, byCategory, byTenant)
-- ✅ Includes category breakdown
-- ✅ Tracks recent cache misses
-- ✅ Calculates hit rate percentage
-- ✅ Requires authentication
-
-**Features Tested:**
-
-- Session-based authentication for all endpoints (except /health)
-- Multi-tenancy support (tenant-scoped queries)
-- Query parameter handling (type, level, search, limit, detailed)
-- Response structure validation
-- Error handling (401 unauthorized)
-- Pagination support (logs endpoint)
-- ANSI color conversion (logs endpoint)
-- Caching behavior (1s TTL for systemInfo)
-
-**Commands:**
-
-```bash
-# Requires running development server
-npm run dev  # Terminal 1
-
-# Run dashboard API tests
-bun test tests/bun/api/dashboard.test.ts  # Terminal 2
-
-# Run individual endpoint tests
-bun test tests/bun/api/dashboard.test.ts -t "health"
-bun test tests/bun/api/dashboard.test.ts -t "systemInfo"
-```
-
-**Note:** These are integration tests that require:
-
-- Development server running on port 5173
-- Valid session cookie from login
-- Database connection active
-- All dashboard endpoints operational
-
-**Documentation:** See [Dashboard System Architecture](/docs/architecture/dashboard-system.mdx) for complete API reference and endpoint details.
+Safety: tests must never point at production DBs — see test-config safety guards in [git-workflow.mdx](./git-workflow.mdx).
 
 ---
 
-### 3. 2FA Authentication API Tests (28/28) 🔐
+## 6. Where to dig deeper
 
-**File:** `tests/bun/api/auth-2fa.test.ts`
-
-**Status:** ✅ Created (awaiting server execution)
-
-**Coverage:** All 5 2FA authentication endpoints
-
-**Test Breakdown by Endpoint:**
-
-**1. POST /api/auth/2fa/setup (7 tests):**
-
-- ✅ Initialize 2FA for user
-- ✅ Generate TOTP secret
-- ✅ Return QR code for authenticator apps
-- ✅ Generate backup codes
-- ✅ Require authentication
-- ✅ Prevent duplicate 2FA setup
-- ✅ Validate setup data structure
-
-**2. POST /api/auth/2fa/verify-setup (5 tests):**
-
-- ✅ Verify initial TOTP code
-- ✅ Complete 2FA setup
-- ✅ Require valid TOTP code
-- ✅ Reject invalid codes
-- ✅ Require authentication
-
-**3. POST /api/auth/2fa/verify (6 tests):**
-
-- ✅ Verify 2FA code during login
-- ✅ Accept valid TOTP codes
-- ✅ Accept backup codes
-- ✅ Reject invalid codes
-- ✅ Consume backup codes (one-time use)
-- ✅ Rate limit verification attempts
-
-**4. POST /api/auth/2fa/backup-codes (5 tests):**
-
-- ✅ Generate new backup codes
-- ✅ Regenerate codes (invalidate old)
-- ✅ Return 10 backup codes
-- ✅ Require authentication
-- ✅ Require 2FA to be enabled
-
-**5. POST /api/auth/2fa/disable (5 tests):**
-
-- ✅ Disable 2FA for user
-- ✅ Require password confirmation
-- ✅ Remove TOTP secret
-- ✅ Invalidate backup codes
-- ✅ Require authentication
-
-**Security Features Tested:**
-
-- TOTP (Time-based One-Time Password) generation and validation
-- QR code generation for authenticator apps
-- Backup code generation and one-time usage
-- Rate limiting on verification attempts
-- Password confirmation for sensitive operations
-- Quantum-resistant cryptography compatibility
+| Need                                       | Doc                                                                                                                                           |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Headless-first tiers & route↔layer map** | [headless-test-inventory.mdx](./headless-test-inventory.mdx)                                                                                  |
+| Strategy & three-layer goal                | [testing-strategy.mdx](./testing-strategy.mdx) · [three-layer-completeness.mdx](./three-layer-completeness.mdx)                               |
+| ADR (pyramid, soft-skip ban, goldens)      | [adr-testing-2026.mdx](./adr-testing-2026.mdx)                                                                                                |
+| Route E2E matrices                         | [e2e-coverage-matrix.mdx](./e2e-coverage-matrix.mdx) · [routes/webhooks.mdx](./routes/webhooks.mdx)                                           |
+| Collection Builder / ContentSync           | [routes/collection-builder.mdx](./routes/collection-builder.mdx) · [compilation-pipeline](../reference/architecture/compilation-pipeline.mdx) |
+| `/user` control map                        | [routes/user.mdx](./routes/user.mdx)                                                                                                          |
+| Security testing                           | [security-testing.mdx](./security-testing.mdx)                                                                                                |
+| Benchmarks                                 | [docs/project/benchmarks](../project/benchmarks/index.mdx)                                                                                    |
+| API coverage                               | [api-testing.mdx](./api-testing.mdx) · [api-test-coverage.mdx](./api-test-coverage.mdx)                                                       |
 
 ---
 
-### 4. Security Management API Tests (33/33) 🛡️
+## 7. How to keep this page honest
 
-**File:** `tests/bun/api/security.test.ts`
+When you ship a meaningful test or stability change:
 
-**Status:** ✅ Created (awaiting server execution)
-
-**Coverage:** All 5 security management endpoints
-
-**Test Breakdown by Endpoint:**
-
-**1. GET /api/security/stats (7 tests):**
-
-- ✅ Get security statistics
-- ✅ Include blocked IPs count
-- ✅ Include incident counts
-- ✅ Include threat level assessment
-- ✅ Track login attempts
-- ✅ Require admin authentication
-- ✅ Return real-time metrics
-
-**2. GET /api/security/incidents (8 tests):**
-
-- ✅ List security incidents
-- ✅ Support pagination
-- ✅ Filter by severity (low, medium, high, critical)
-- ✅ Filter by status (open, investigating, resolved)
-- ✅ Sort by timestamp
-- ✅ Include incident details
-- ✅ Require admin authentication
-- ✅ Return incident metadata
-
-**3. POST /api/security/incidents/[id]/resolve (6 tests):**
-
-- ✅ Resolve security incident
-- ✅ Update incident status
-- ✅ Add resolution notes
-- ✅ Log resolution in audit trail
-- ✅ Require admin authentication
-- ✅ Validate incident ID
-
-**4. POST /api/security/unblock (7 tests):**
-
-- ✅ Unblock IP address
-- ✅ Support IPv4 addresses
-- ✅ Support IPv6 addresses
-- ✅ Validate IP format
-- ✅ Log unblock action
-- ✅ Require admin authentication
-- ✅ Handle non-existent IPs
-
-**5. POST /api/security/csp-report (5 tests):**
-
-- ✅ Report CSP violations
-- ✅ Accept browser CSP reports
-- ✅ No authentication required (public endpoint)
-- ✅ Rate limit CSP reports
-- ✅ Validate CSP report structure
-
-**Integration Tests:**
-
-- ✅ Real-time security monitoring
-- ✅ Incident correlation with IPs
-- ✅ Threat level calculation
-
----
-
-### 5. Widget Management API Tests (30/30) 🧩
-
-**File:** `tests/bun/api/widgets.test.ts`
-
-**Status:** ✅ Created (awaiting server execution)
-
-**Coverage:** All 9 widget management endpoints
-
-**Test Breakdown by Endpoint:**
-
-**1. GET /api/widgets (5 tests):**
-
-- ✅ List all widgets
-- ✅ Filter by status (active/inactive)
-- ✅ Filter by type
-- ✅ Include widget metadata
-- ✅ Require authentication
-
-**2. GET /api/widgets/[id] (4 tests):**
-
-- ✅ Get widget details
-- ✅ Include widget schema
-- ✅ Include configuration
-- ✅ Require authentication
-
-**3. POST /api/widgets (6 tests):**
-
-- ✅ Create new widget
-- ✅ Validate widget schema
-- ✅ Set default configuration
-- ✅ Prevent duplicate widgets
-- ✅ Require admin authentication
-- ✅ Return created widget details
-
-**4. PATCH /api/widgets/[id] (4 tests):**
-
-- ✅ Update widget configuration
-- ✅ Validate configuration changes
-- ✅ Preserve widget ID
-- ✅ Require admin authentication
-
-**5. DELETE /api/widgets/[id] (4 tests):**
-
-- ✅ Delete widget
-- ✅ Prevent deletion if in use
-- ✅ Clean up widget data
-- ✅ Require admin authentication
-
-**6. POST /api/widgets/activate (2 tests):**
-
-- ✅ Activate widget
-- ✅ Require admin authentication
-
-**7. POST /api/widgets/deactivate (2 tests):**
-
-- ✅ Deactivate widget
-- ✅ Require admin authentication
-
-**8. GET /api/widgets/dependencies (3 tests):**
-
-- ✅ Check widget dependencies
-- ✅ Detect circular dependencies
-- ✅ Return dependency tree
-
----
-
-### 6. Settings & Configuration API Tests (31/31) ⚙️
-
-**File:** `tests/bun/api/settings.test.ts`
-
-**Status:** ✅ Created (awaiting server execution)
-
-**Coverage:** All 8 settings management endpoints
-
-**Test Breakdown by Endpoint:**
-
-**1. GET /api/settings/[group] (6 tests):**
-
-- ✅ Get settings by group (general, email, theme)
-- ✅ Include all settings in group
-- ✅ Require authentication
-- ✅ Return 404 for non-existent groups
-
-**2. PUT /api/settings/[group] (4 tests):**
-
-- ✅ Update settings group
-- ✅ Validate setting values
-- ✅ Preserve existing settings
-- ✅ Require admin authentication
-
-**3. GET /api/settings/public (4 tests):**
-
-- ✅ Return public settings without auth
-- ✅ Exclude sensitive settings
-- ✅ Include theme settings
-- ✅ Cache appropriately
-
-**4. GET /api/settings/public/stream (2 tests):**
-
-- ✅ Support Server-Sent Events (SSE)
-- ✅ Stream public settings updates
-
-**5. POST /api/systemsetting/export (4 tests):**
-
-- ✅ Export all system settings
-- ✅ Include all setting groups
-- ✅ Sanitize sensitive data
-- ✅ Require admin authentication
-
-**6. POST /api/systemsetting/import (4 tests):**
-
-- ✅ Import system settings
-- ✅ Validate import structure
-- ✅ Merge with existing settings
-- ✅ Require admin authentication
-
-**7. GET /api/systemPreferences (4 tests):**
-
-- ✅ Get user preferences
-- ✅ Isolate preferences per user
-- ✅ Require authentication
-
-**8. PUT /api/systemPreferences (4 tests):**
-
-- ✅ Update user preferences
-- ✅ Validate preferences
-- ✅ Require authentication
-
-**Multi-Tenant Features:**
-
-- ✅ Scope settings to tenant
-- ✅ Prevent cross-tenant access
-
----
-
-### 7. Import/Export API Tests (29/29) 📦
-
-**File:** `tests/bun/api/import-export.test.ts`
-
-**Status:** ✅ Created (awaiting server execution)
-
-**Coverage:** All 4 import/export endpoints
-
-**Test Breakdown by Endpoint:**
-
-**1. POST /api/exportData (7 tests):**
-
-- ✅ Export collection data
-- ✅ Require collection name
-- ✅ Support format options (JSON, CSV)
-- ✅ Include metadata
-- ✅ Support filtered exports
-- ✅ Require authentication
-- ✅ Handle non-existent collections
-
-**2. POST /api/importData (7 tests):**
-
-- ✅ Import collection data
-- ✅ Validate import structure
-- ✅ Support replace vs merge modes
-- ✅ Return import statistics
-- ✅ Handle validation errors
-- ✅ Support duplicate strategies
-- ✅ Require authentication
-
-**3. POST /api/export (4 tests):**
-
-- ✅ General export endpoint
-- ✅ Support multiple export types
-- ✅ Return downloadable file
-- ✅ Require admin authentication
-
-**4. POST /api/import/full (6 tests):**
-
-- ✅ Full system import
-- ✅ Validate full import structure
-- ✅ Support incremental vs full replace
-- ✅ Return comprehensive results
-- ✅ Handle partial failures
-- ✅ Require admin authentication
-
-**Data Integrity Tests:**
-
-- ✅ Preserve relationships in export/import
-- ✅ Handle large datasets efficiently
-- ✅ Validate data integrity after import
-
----
-
-### 8. Theme Management API Tests (24/24) 🎨
-
-**File:** `tests/bun/api/theme.test.ts`
-
-**Status:** ✅ Created (awaiting server execution)
-
-**Coverage:** All 6 theme management endpoints
-
-**Test Breakdown by Endpoint:**
-
-**1. GET /api/theme (4 tests):**
-
-- ✅ List all themes
-- ✅ Include theme metadata
-- ✅ Identify active theme
-- ✅ Require authentication
-
-**2. GET /api/theme/[id] (4 tests):**
-
-- ✅ Get theme details
-- ✅ Include theme configuration
-- ✅ Return 404 for non-existent themes
-- ✅ Require authentication
-
-**3. POST /api/theme (4 tests):**
-
-- ✅ Create new theme
-- ✅ Validate theme data
-- ✅ Prevent duplicate names
-- ✅ Require admin authentication
-
-**4. PATCH /api/theme/[id] (3 tests):**
-
-- ✅ Update theme configuration
-- ✅ Validate theme updates
-- ✅ Require admin authentication
-
-**5. DELETE /api/theme/[id] (3 tests):**
-
-- ✅ Delete theme
-- ✅ Prevent deleting active theme
-- ✅ Require admin authentication
-
-**6. POST /api/theme/[id]/activate (4 tests):**
-
-- ✅ Activate theme
-- ✅ Deactivate previous theme
-- ✅ Return 404 for non-existent themes
-- ✅ Require admin authentication
-
----
-
-### 9. Miscellaneous Utility API Tests (36/36) 🔧
-
-**File:** `tests/bun/api/miscellaneous.test.ts`
-
-**Status:** ✅ Created (awaiting server execution)
-
-**Coverage:** 9 utility endpoints
-
-**Test Breakdown by Endpoint:**
-
-**1. GET /api/search (6 tests):**
-
-- ✅ Global search across collections
-- ✅ Require search query
-- ✅ Filter by collection type
-- ✅ Support pagination
-- ✅ Return relevant results
-- ✅ Require authentication
-
-**2. POST /api/sendMail (5 tests):**
-
-- ✅ Send email
-- ✅ Validate email parameters
-- ✅ Validate email addresses
-- ✅ Support HTML email
-- ✅ Require authentication
-
-**3. POST /api/cache/clear (4 tests):**
-
-- ✅ Clear cache
-- ✅ Support selective clearing
-- ✅ Return clear results
-- ✅ Require admin authentication
-
-**4. GET /api/metrics (4 tests):**
-
-- ✅ Get performance metrics
-- ✅ Include system metrics
-- ✅ Support metric filtering
-- ✅ Require authentication
-
-**5. POST /api/permission/update (3 tests):**
-
-- ✅ Update user permissions
-- ✅ Validate permission data
-- ✅ Require admin authentication
-
-**6. GET /api/version-check (3 tests):**
-
-- ✅ Get version information
-- ✅ Check for updates
-- ✅ Include current version
-
-**7. GET /api/marketplace (4 tests):**
-
-- ✅ List marketplace widgets
-- ✅ Search marketplace
-- ✅ Filter by category
-- ✅ Require authentication
-
-**8. GET /api/config_sync (2 tests):**
-
-- ✅ Sync configuration
-- ✅ Require admin authentication
-
-**9. GET /api/debug (3 tests):**
-
-- ✅ Get debug information
-- ✅ Include system information
-- ✅ Require admin authentication
-
----
-
-### 10. Security Response Service (8/8) 🛡️
-
-**File:** `tests/bun/services/SecurityResponseService.test.ts`
-
-**Tests:**
-
-- ✅ XSS detection: simple script tags
-- ✅ XSS detection: script tags with attributes
-- ✅ XSS detection: malformed closing tags (whitespace)
-- ✅ XSS detection: newlines in closing tags
-- ✅ XSS detection: invalid characters in closing tags
-- ✅ XSS detection: javascript: protocol
-- ✅ XSS detection: event handler attributes (onload)
-- ✅ No false positives on regular text
-
-**Security Implementation:**
-
-- Enhanced regex patterns to catch malformed script tags
-- Loop-based sanitization (prevents bypass attacks)
-- Detection for `</script >` with whitespace
-- Detection for `</script\n>` with newlines
-- Standalone `<script>` tag detection
-- Data URI and embed/object tag detection
-
-**Command:**
-
-```bash
-bun test tests/bun/services/SecurityResponseService.test.ts
-```
-
----
-
-### 3. RichText Widget Validation (8/8) 📝
-
-**File:** `tests/bun/widgets/richText.test.ts`
-
-**Tests:**
-
-- ✅ Required content validation
-- ✅ Empty HTML tag detection
-- ✅ XSS prevention (script tag rejection)
-- ✅ Malformed script tag rejection
-- ✅ Case-insensitive script detection
-- ✅ Optional field handling
-- ✅ Whitespace-only content rejection
-- ✅ Nested tag handling
-
-**Security Features:**
-
-- Loop-based script tag removal
-- Robust HTML sanitization
-- Empty content validation
-- XSS attack prevention
-
-**Command:**
-
-```bash
-bun test tests/bun/widgets/richText.test.ts
-```
-
----
-
-### 4. Cache Integration Tests (17/17) 💾
-
-**File:** `tests/bun/databases/cache-integration.test.ts`
-
-**Basic Operations (4 tests):**
-
-- ✅ Store and retrieve values
-- ✅ Handle non-existent keys
-- ✅ Delete cached values
-- ✅ TTL expiration handling
-
-**Pattern Operations (2 tests):**
-
-- ✅ Clear entries by pattern
-- ✅ Handle complex patterns
-
-**Multi-Tenant (2 tests):**
-
-- ✅ Track metrics per tenant
-- ✅ Isolate tenant data
-
-**Metrics (5 tests):**
-
-- ✅ Calculate hit rate
-- ✅ Track by category
-- ✅ Track operation types
-- ✅ Reset metrics
-- ✅ Prometheus format export
-
-**Performance (2 tests):**
-
-- ✅ High-volume operations (10,000+ entries)
-- ✅ Concurrent operations
-
-**Error Handling (2 tests):**
-
-- ✅ Invalid keys handling
-- ✅ Complex data types
-
-**Command:**
-
-```bash
-bun test tests/bun/databases/cache-integration.test.ts
-```
-
----
-
-### 5. UI Store Tests (3/3) 🎨
-
-**File:** `tests/bun/UIStore.test.ts`
-
-**Tests:**
-
-- ✅ Toggle UI element visibility
-- ✅ Screen size change handling
-- ✅ Initialization methods
-
-**Command:**
-
-```bash
-bun test tests/bun/UIStore.test.ts
-```
-
----
-
-### 6. Content Utilities (6/6) 🔧
-
-**File:** `tests/bun/content/normalizeId.test.ts`
-
-**Tests:**
-
-- ✅ String handling
-- ✅ Null/undefined handling
-- ✅ Object `_id` extraction
-- ✅ Object `id` extraction
-- ✅ ObjectId-like instances
-- ✅ Plain objects without identifiers
-
-**Command:**
-
-```bash
-bun test tests/bun/content/normalizeId.test.ts
-```
-
----
-
-### 7. Image Editor (2/2) 🖼️
-
-**File:** `tests/bun/ImageEditor.test.ts`
-
-**Tests:**
-
-- ✅ Basic assertions
-- ✅ Math operations
-
-**Command:**
-
-```bash
-bun test tests/bun/ImageEditor.test.ts
-```
-
----
-
-### 8. User API Tests (47/47) 👤
-
-**File:** `tests/bun/api/user.test.ts`
-
-See [User API Tests](./user-api-tests.mdx) for complete documentation.
-
-**Coverage:**
-
-- ✅ User creation (4 tests)
-- ✅ Authentication (2 tests)
-- ✅ Profile updates (4 tests)
-- ✅ Batch operations (2 tests)
-- ✅ Avatar management (11 tests)
-- ✅ User invitations (6 tests)
-- ✅ Error handling (8 tests)
-- ✅ Session management (3 tests)
-- ✅ API availability (3 tests)
-
-**Command:**
-
-```bash
-bun test tests/bun/api/user.test.ts
-```
-
----
-
-### 9. GraphQL API Tests (21/21) 🔷
-
-**File:** `tests/bun/api/graphql.test.ts`
-
-**Coverage:**
-
-- ✅ Authentication & Authorization (2 tests)
-  - Reject unauthenticated requests
-  - Accept authenticated requests with session cookie
-
-- ✅ User Queries (3 tests)
-  - Fetch users list with proper fields
-  - Pagination support
-  - Sensitive field protection (password never exposed)
-
-- ✅ Media Queries (5 tests)
-  - Fetch media images, documents, audio, video, remote
-  - Pagination support for media queries
-  - Media type isolation
-
-- ✅ Schema Introspection (2 tests)
-  - Support introspection queries
-  - List available query fields
-
-- ✅ Error Handling (3 tests)
-  - Invalid queries return errors
-  - Malformed queries handled gracefully
-  - Missing required fields validation
-
-- ✅ Complex Queries (3 tests)
-  - Multiple queries in one request
-  - Query aliases support
-  - Fragment support
-
-- ✅ Multi-Tenant Support (1 test)
-  - Queries scoped to tenant context
-
-- ✅ Performance & Caching (2 tests)
-  - Large pagination requests (up to 100 items)
-  - Query execution time (<5 seconds)
-
-**Features Tested:**
-
-- Dynamic schema generation from collections
-- Type-safe queries with pagination
-- Real-time subscriptions readiness
-- Redis caching integration
-- Permission-based access control
-- Multi-tenant data isolation
-
-**Command:**
-
-```bash
-bun test tests/bun/api/graphql.test.ts
-```
-
-**Documentation:** See [GraphQL API](/docs/api/GraphQL_API.mdx) for complete API reference
-
----
-
-### 10. Token API Tests (12/12) 🔑
-
-**File:** `tests/bun/api/token.test.ts`
-
-**Coverage:**
-
-- ✅ Token creation (3 tests)
-  - Create with valid authentication
-  - Reject without authentication
-  - Validate email format
-
-- ✅ Token validation & deletion (2 tests)
-  - Validate existing tokens
-  - Delete tokens with admin auth
-
-- ✅ Token listing (3 tests)
-  - List all tokens for tenant
-  - Authentication required
-  - Handle empty token list
-
-- ✅ Additional token operations (4 tests)
-  - Get tokens provided info
-  - Batch operations
-  - Token expiration handling
-  - Multi-tenant isolation
-
-**Features Tested:**
-
-- Invitation token lifecycle
-- Email sending (SMTP, dev mode)
-- Multi-tenant token isolation
-- Token expiration
-- Permission-based access
-
-**Command:**
-
-```bash
-bun test tests/bun/api/token.test.ts
-```
-
-**Documentation:** See [Token API](/docs/api/Token_API_Endpoints.mdx) for complete API reference
-
----
-
-### 11. Setup API Tests (20/20) 🚀
-
-**File:** `tests/bun/api/setup.test.ts`
-
-**Coverage:** Initial setup wizard endpoints for fresh CMS installation
-
-**Test Suites:**
-
-**Database Connection (6 tests):**
-
-- ✅ Successful MongoDB connection with valid credentials
-- ✅ Detailed error for invalid credentials
-- ✅ Connection refused handling (invalid host/port)
-- ✅ Required field validation
-- ✅ MongoDB Atlas SRV detection
-- ✅ Database statistics retrieval
-
-**Driver Installation (3 tests):**
-
-- ✅ Check if MongoDB driver installed
-- ✅ Reject invalid database types
-- ✅ Validate request body structure
-
-**Database Seeding (3 tests):**
-
-- ✅ Write private.ts configuration file
-- ✅ Seed default settings and themes
-- ✅ Handle connection errors gracefully
-
-**Note:** Database seeding tests also provide **indirect coverage** for `collectionScanner.ts`, which is used to scan and load collection schemas from the filesystem during the setup process.
-
-**SMTP Configuration (4 tests):**
-
-- ✅ Test SMTP connection successfully
-- ✅ Validate SMTP configuration fields
-- ✅ Require testEmail field
-- ✅ Optionally save to database
-
-**Complete Setup (4 tests):**
-
-- ✅ Create admin user and initialize system
-- ✅ Validate admin user data
-- ✅ Enforce password requirements
-- ✅ Redirect to first collection
-
-**Command:**
-
-```bash
-bun test tests/bun/api/setup.test.ts
-```
-
-**Documentation:** See [Setup API](/docs/api/Setup_API.mdx) for complete API reference
-
----
-
-### 12. Setup Utility Tests (25/25) 🔧
-
-**File:** `tests/bun/api/setup-utils.test.ts`
-
-**Coverage:** Utility functions for setup process
-
-**Test Suites:**
-
-**Connection String Builder (5 tests):**
-
-- ✅ Build standard MongoDB connection string
-- ✅ Build MongoDB Atlas SRV connection string
-- ✅ Handle connections without credentials
-- ✅ Encode special characters in credentials
-- ✅ Handle IPv6 addresses
-
-**Error Classifier - MongoDB (10 tests):**
-
-- ✅ Classify authentication failed errors
-- ✅ Classify connection refused errors
-- ✅ Classify DNS/hostname errors
-- ✅ Classify timeout errors
-- ✅ Detect MongoDB Atlas specific errors
-- ✅ Classify network unreachable errors
-- ✅ Classify TLS/SSL certificate errors
-- ✅ Classify database not found errors
-- ✅ Handle permission/authorization errors
-- ✅ Provide raw error message in all cases
-
-**Error Classifier - Edge Cases (3 tests):**
-
-- ✅ Handle non-Error objects
-- ✅ Handle errors without message property
-- ✅ Handle null or undefined errors
-
-**User-Friendly Messages (3 tests):**
-
-- ✅ Actionable suggestions for auth errors
-- ✅ Context-specific help for Atlas errors
-- ✅ Troubleshooting steps for connection errors
-
-**Security & Validation (4 tests):**
-
-- ✅ Password sanitization in logs
-- ✅ Valid MongoDB connection strings
-- ✅ Valid MongoDB SRV connection strings
-- ✅ Connection string format validation
-
-**Command:**
-
-```bash
-bun test tests/bun/api/setup-utils.test.ts
-```
-
-**Features Tested:**
-
-- Connection string generation for MongoDB/Atlas
-- Error classification with user-friendly messages
-- Security (password sanitization)
-- Input validation and edge cases
-
----
-
-### 13. Collection API Tests (19/19) 📚
-
-**File:** `tests/bun/api/collections.test.ts`
-
-**Coverage:** Collection and content management API endpoints
-
-**Test Suites:**
-
-**Authentication Tests (6 tests):**
-
-- ✅ GET /api/collections requires authentication
-- ✅ GET /api/collections succeeds with admin token
-- ✅ GET /api/content-structure requires authentication
-- ✅ GET /api/content-structure succeeds with admin token
-- ✅ GET /api/exportData requires authentication
-- ✅ GET /api/exportData succeeds with admin token
-
-**Search Functionality (3 tests):**
-
-- ✅ POST /api/search with valid query
-- ✅ POST /api/search requires authentication
-- ✅ POST /api/search handles empty query
-
-**CRUD Operations (4 tests):**
-
-- ✅ Create new collection entry
-- ✅ Get collection entries with pagination
-- ✅ Reject unauthenticated CRUD operations
-- ✅ Return 404 for invalid collection ID
-
-**Content Structure (3 tests):**
-
-- ✅ Recompile collections with admin auth
-- ✅ Recompile requires authentication
-- ✅ Verify recompile success message
-
-**Data Export (3 tests):**
-
-- ✅ Export collection data
-- ✅ Export with authentication
-- ✅ Handle export errors
-
-**Command:**
-
-```bash
-bun test tests/bun/api/collections.test.ts
-```
-
-**Note:** Some tests may timeout during initial database setup. This is expected behavior for integration tests that require server initialization.
-
-**Documentation:** See [Collection API](/docs/api/Collection_API.mdx) for complete API reference and testing guide
-
----
-
-### 14. Collection Builder (4/7) 📦
-
-**File:** `tests/bun/collection-builder.test.ts`
-
-**Passing (4 tests):**
-
-- ✅ Widget filtering by status
-- ✅ Widget search functionality
-- ✅ GUI schema access
-- ✅ Widget activation/deactivation
-
-**Failing (3 tests):**
-
-- ❌ Field instance creation (widget factory issue)
-- ❌ Complete workflow
-- ❌ Configuration validation
-
-**Fix Needed:** Update widget factory mock to return proper callable functions.
-
-**Command:**
-
-```bash
-bun test tests/bun/collection-builder.test.ts
-```
-
----
-
-## 📝 Scaffolded Tests (140+)
-
-### Database Interface Contract Tests (50+ tests)
-
-**File:** `tests/bun/databases/db-interface.test.ts`
-
-**Status:** ⏳ Scaffolded (awaiting database setup)
-
-**Test Suites:**
-
-- Connection Management (5 tests)
-  - connect(), disconnect(), isConnected()
-  - Error handling, reconnection
-- CRUD Operations (8 tests)
-  - findOne, findMany, create, update, delete
-  - Batch operations, query filters
-- Authentication Interface (12 tests)
-  - User management methods
-  - Session management methods
-  - Token management methods
-  - Role and permission methods
-- Query Builder (6 tests)
-  - Filter, sort, pagination
-  - Join operations
-- Content Management (7 tests)
-  - Content CRUD, versioning
-  - Publishing, metadata
-- Media Management (5 tests)
-  - Upload, retrieval, deletion
-  - Metadata, transformations
-- Theme & Widget Systems (4 tests)
-  - Theme/widget CRUD
-  - Configuration management
-- Utility Methods (3 tests)
-  - DatabaseResult validation
-  - Helper functions
-
-**Purpose:** Validate that any database adapter (MongoDB, SQL, etc.) properly implements the IDBAdapter interface contract.
-
-**Command:**
-
-```bash
-bun test tests/bun/databases/db-interface.test.ts
-```
-
----
-
-### MongoDB Adapter Tests (40+ tests)
-
-**File:** `tests/bun/databases/mongodb-adapter.test.ts`
-
-**Status:** ⏳ Scaffolded (awaiting database setup)
-
-**Test Suites:**
-
-- Model Registration (4 tests)
-  - Idempotent model registration
-  - User, Session, Token models
-- Connection Management (5 tests)
-  - Exponential backoff retry
-  - Connection pooling
-  - Disconnect handling
-- CRUD Operations (7 tests)
-  - Create with validation
-  - Read with projections
-  - Update operations
-  - Delete operations
-- Batch Operations (4 tests)
-  - Parallel batch processing
-  - Transaction support
-- Query Builder (6 tests)
-  - Complex filters
-  - Aggregation pipelines
-  - Population (joins)
-- Transaction Support (3 tests)
-  - Atomic operations
-  - Rollback on error
-- MongoDB-Specific Features (5 tests)
-  - Indexes, text search
-  - Geospatial queries
-- Error Handling (3 tests)
-  - Network errors
-  - Validation errors
-- Performance (3 tests)
-  - Query optimization
-  - Connection pooling
-
-**Purpose:** Test MongoDB-specific implementation details and optimizations.
-
-**Command:**
-
-```bash
-bun test tests/bun/databases/mongodb-adapter.test.ts
-```
-
----
-
-### Authentication System Tests (50+ tests)
-
-**File:** `tests/bun/databases/auth-system.test.ts`
-
-**Status:** ⏳ Scaffolded (awaiting database setup)
-
-**Test Suites:**
-
-- Password Security (5 tests)
-  - Argon2id hashing (quantum-resistant)
-  - Password verification
-  - Salt uniqueness
-  - Minimum length enforcement
-- User Management (9 tests)
-  - Create, read, update, delete
-  - Email uniqueness
-  - Block/unblock users
-  - Pagination
-- Session Management (9 tests)
-  - Create, validate, expire
-  - Logout, invalidate all
-  - Cleanup expired
-  - Session rotation
-  - Fixation attack prevention
-- Token Management (8 tests)
-  - Create, validate, expire
-  - One-time use (consume)
-  - Token blocking
-  - Cleanup expired
-- Role Management (6 tests)
-  - Create, read, update, delete
-  - Permission assignment
-  - Prevent deletion of roles in use
-- Permission System (6 tests)
-  - Permission checking
-  - Admin override
-  - Dynamic registration
-  - Role validation
-- Two-Factor Authentication (8 tests)
-  - TOTP secret generation
-  - Code verification
-  - Backup codes
-  - Enable/disable 2FA
-- Google OAuth (4 tests)
-  - Token validation
-  - User creation from profile
-  - Account linking
-- Multi-Tenant Support (5 tests)
-  - Tenant scoping (users, sessions, tokens)
-  - Cross-tenant prevention
-- Session Cleanup (3 tests)
-  - Automatic cleanup
-  - Scheduled cleanup
-- Security Best Practices (5 tests)
-  - Secure cookies
-  - Rate limiting
-  - Timing attack prevention
-  - Cryptographic randomness
-  - Token hashing
-- Default Roles (5 tests)
-  - Admin, developer, editor roles
-  - Core permissions loading
-  - Idempotent setup
-
-**Purpose:** Comprehensive testing of authentication, authorization, and security features.
-
-**Command:**
-
-```bash
-bun test tests/bun/databases/auth-system.test.ts
-```
-
----
-
-## ❌ Failing Tests (15)
-
-### API Endpoint Tests (4 failures)
-
-**Files:**
-
-- `tests/bun/api/system.test.ts`
-- `tests/bun/api/media.test.ts`
-- `tests/bun/api/token.test.ts`
-- `tests/bun/api/collections.test.ts`
-
-**Issue:** beforeEach/afterEach hook timeouts (5000ms)  
-**Root Cause:** Missing database connection/setup  
-**Impact:** Integration tests cannot run
-
-**Fix Required:**
-
-1. Create database mocking utilities
-2. Add test database setup
-3. Configure MongoDB test container
-4. Add database seeding helpers
-
----
-
-### Collection Builder (3 failures)
-
-**File:** `tests/bun/collection-builder.test.ts`
-
-**Issue:** `TypeError: createWidget() returns object, not function`  
-**Root Cause:** Widget factory mock structure incorrect  
-**Impact:** Widget instance creation fails
-
-**Fix Required:**
-
-```typescript
-// Current (broken)
-createWidget: vi.fn(() => ({
-	/* config */
-}));
-
-// Should be
-createWidget: vi.fn(() => () => ({
-	/* widget instance */
-}));
-```
-
----
-
-### Role & Permission Tests (4 failures)
-
-**File:** `tests/bun/RolePermissionAccess.test.ts`
-
-**Issue:** Missing proper mocking for permission system  
-**Root Cause:** Permissions now database-stored  
-**Impact:** Cannot test role-based access
-
-**Fix Required:**
-
-1. Mock `getAllRoles()` function
-2. Mock `hasPermissionWithRoles()` function
-3. Update test fixtures for database roles
-
----
-
-## ⚠️ Test Errors (3 Files)
-
-### 1. Auth Signup Test
-
-**File:** `tests/bun/auth/signup.test.ts`  
-**Error:** `Cannot find module '../helpers/db-helper'`
-
-**Fix:** Create missing helper module or update import path.
-
----
-
-### 2. Modern Widget Architecture Test
-
-**File:** `tests/bun/widgets/modern-widget-architecture.test.ts`  
-**Error:** `Export 'ensureModernField' not found`
-
-**Fix:** Update widget factory exports or test imports.
-
----
-
-### 3. Text Widget Test
-
-**File:** `tests/bun/widgets/text.test.ts`  
-**Error:** `Cannot find module '@src/widgets/text/Text.svelte'`
-
-**Fix:** Create missing widget component or update path.
-
----
-
-## 🔧 Recent Improvements
-
-### Security Fixes
-
-1. **seoAnalyzer.ts**
-   - Added loop-based script sanitization
-   - Prevents bypass attacks
-
-2. **richText/index.ts**
-   - Enhanced HTML sanitization
-   - Improved empty content detection
-
-3. **SecurityResponseService.ts**
-   - Improved XSS detection patterns
-   - Added malformed tag detection
-
-### Test Infrastructure
-
-1. ✅ Added `svelte-preprocess` dependency
-2. ✅ Created Svelte loader for `.svelte` files
-3. ✅ Fixed test imports (relative paths)
-4. ✅ Added Svelte rune mocks (`$state`, `$derived`, `$effect`)
-5. ✅ Fixed TypeScript errors in test files
-6. ✅ Created server wait helper (prevents timeouts)
-7. ✅ Added role ID resolution with caching
-8. ✅ Implemented first-user detection
-
----
-
-## 📊 Test Statistics
-
-```
-Total Test Files:    25
-Passing Tests:       295+
-Failing Tests:       15
-Error Files:         3
-Pass Rate:           95%
-Execution Time:      ~30s
-expect() Calls:      200+
-```
-
-### Performance Metrics
-
-- **Cache Tests:** High-volume (10,000+ ops) pass in <2s
-- **Security Tests:** All XSS patterns detected in <100ms
-- **User API Tests:** Full suite runs in ~5s
-- **Widget Tests:** Validation tests <500ms
-- **Dashboard API Tests:** 48 integration tests (require running server)
-
----
-
-## 🎯 Recommended Action Items
-
-### High Priority 🔴
-
-1. **Database Test Infrastructure Setup**
-   - Set up MongoDB test container (Docker or in-memory)
-   - Create database connection helpers for tests
-   - Add database seeding utilities
-   - Configure test database environment
-   - Implement placeholder tests (140+ scaffolded)
-
-2. **Fix API Integration Tests**
-   - Mock MongoDB connection for API tests
-   - Add database seeding utilities
-   - Fix `db-helper` module
-   - Configure test database environment
-
-3. **Fix Widget Factory Mocking**
-   - Update `createWidget` mock to return callable functions
-   - Add proper field instance creation
-   - Fix collection builder tests
-
-4. **Create Missing Test Helpers**
-   - `loginAsAdminAndGetToken()` in testSetup.ts
-   - `ensureModernField()` in factory
-   - `db-helper` module for auth tests
-
-### Medium Priority 🟡
-
-4. **Complete Permission System Tests**
-   - Mock user roles from database
-   - Add permission checking utilities
-   - Update fixtures for database-stored roles
-
-5. **Add Missing Widget Component**
-   - Create Text.svelte component
-   - Or update test to use existing widget
-   - Add widget documentation
-
-### Low Priority 🟢
-
-6. **Add More Integration Tests**
-   - GraphQL endpoint testing
-   - OAuth flow testing
-   - Media upload testing
-   - Batch operation edge cases
-
-7. **Improve Test Coverage**
-   - Code coverage reporting
-   - Missing branch coverage
-   - Edge case documentation
-
----
-
-## 🚀 Running Tests
-
-### Run All Bun Tests
-
-```bash
-# All unit + integration tests
-bun test tests/bun
-
-# Specific category
-bun test tests/bun/widgets
-bun test tests/bun/api
-bun test tests/bun/services
-```
-
-### Run Specific Test Files
-
-```bash
-# Security tests
-bun test tests/bun/services/SecurityResponseService.test.ts
-
-# Widget tests
-bun test tests/bun/widgets/richText.test.ts
-
-# Cache tests
-bun test tests/bun/databases/cache-integration.test.ts
-
-# User API tests
-bun test tests/bun/api/user.test.ts
-```
-
-### Run E2E Tests (Playwright)
-
-```bash
-# All E2E tests
-bun x playwright test
-
-# Specific browser
-bun x playwright test --project=chromium
-bun x playwright test --project=firefox
-
-# With UI
-bun x playwright test --ui
-```
-
-### Run All Tests
-
-```bash
-# Both Bun and Playwright
-bun run test:all
-```
-
----
-
-## 📈 Progress Tracking
-
-### Completed ✅
-
-- [x] Security vulnerability fixes (3 files)
-- [x] Test infrastructure setup
-- [x] Database interface contract tests (50+ test cases)
-- [x] MongoDB adapter test scaffolding (40+ test cases)
-- [x] Authentication system test scaffolding (50+ test cases)
-- [x] Test documentation organization (MDX format)
-- [x] Svelte component testing support
-- [x] Widget validation tests (8 tests)
-- [x] Cache system tests (17 tests)
-- [x] TypeScript error fixes
-- [x] User API comprehensive tests (47 tests)
-- [x] Server wait helper
-- [x] Role ID resolution
-- [x] Session management tests
-
-### In Progress 🔄
-
-- [ ] API endpoint tests (4 failing)
-- [ ] Auth system tests (missing helpers)
-- [ ] Widget factory improvements
-- [ ] Collection builder fixes
-
-### Planned 📋
-
-- [ ] GraphQL testing
-- [ ] Performance benchmarks
-- [ ] Code coverage reporting (Istanbul/c8)
-- [ ] CI/CD integration improvements
-- [ ] Multi-tenant test scenarios
-- [ ] 2FA flow testing
-
----
-
-## 🐛 Known Issues
-
-### Issue #1: Database Timeouts
-
-**Affected:** All API integration tests  
-**Severity:** High  
-**Workaround:** Ensure server is running before tests
-
-### Issue #2: Widget Factory Mock
-
-**Affected:** Collection builder tests  
-**Severity:** Medium  
-**Workaround:** Use static widget configurations
-
-### Issue #3: Email Service
-
-**Affected:** User invitation tests  
-**Severity:** Low  
-**Workaround:** Tests gracefully handle email unavailability
-
----
-
-## 📚 Related Documentation
-
-- [User API Tests](./user-api-tests.mdx) - Complete user API test documentation
-- [Git Workflow](./git-workflow.mdx) - CI/CD and automated testing
-- [Contributing Guide](/docs/contributing/contributing-docs.mdx) - How to contribute
-- [API Documentation](/docs/api/index.mdx) - API reference
-
----
+1. Update **this file** if health, open gaps, or **hot areas** change (few sentences + table rows).
+2. Put deep control maps and file-level inventories in **route docs** or [headless-test-inventory](./headless-test-inventory.mdx) — not a separate archive.
+3. Never treat static totals as CI truth — GitHub Actions is the live board.

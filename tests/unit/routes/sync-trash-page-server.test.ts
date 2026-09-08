@@ -1,0 +1,41 @@
+/**
+ * @file tests/unit/routes/sync-trash-page-server.test.ts
+ * @description Admin gates for config sync + global trash.
+ */
+
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+import { load as loadSync } from "../../../src/routes/(app)/config/sync/+page.server";
+import { load as loadTrash } from "../../../src/routes/(app)/config/trash/+page.server";
+
+describe("sync +page.server", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("allows admin", async () => {
+    const data: any = await loadSync({
+      locals: { user: { _id: "u1", email: "a@b.co" }, isAdmin: true },
+    } as any);
+    // Contract: the page no longer shadows page.data.user (partial shapes broke
+    // floatingNavStore.bindUser) — admin access resolves with an empty payload.
+    expect(data).toEqual({});
+  });
+
+  it("throws 403 for non-admin", async () => {
+    await expect(
+      loadSync({
+        locals: { user: { _id: "u2", email: "e@b.co" }, isAdmin: false },
+      } as any),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+});
+
+describe("trash +page.server", () => {
+  it("allows admin / rejects non-admin", async () => {
+    await expect(
+      loadTrash({ locals: { user: { _id: "u1" }, isAdmin: true } } as any),
+    ).resolves.toMatchObject({ isAdmin: true });
+    await expect(
+      loadTrash({ locals: { user: { _id: "u2" }, isAdmin: false } } as any),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+});

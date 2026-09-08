@@ -1,34 +1,179 @@
 /**
  * @file src/routes/setup/+page.server.ts
- * @description Server-side load function for the setup page.
+ * @description Server-side logic for the setup page including Server Functions (Remote Functions).
  * Note: Route protection is handled by the handleSetup middleware in hooks.server.ts
  */
 
-import type { PageServerLoad } from './$types';
-import { version as pkgVersion } from '../../../package.json';
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { version as pkgVersion } from "../../../package.json";
+import { logger } from "@utils/logger";
+import { redirect } from "@sveltejs/kit";
+import { isSetupComplete } from "@utils/setup-check-fast";
+import type { Actions, PageServerLoad } from "./$types";
+import inlangSettings from "../../../project.inlang/settings.json";
 
-// Import inlang settings directly (TypeScript/SvelteKit handles JSON imports)
-import inlangSettings from '../../../project.inlang/settings.json';
+// Delegate core setup logic to setup.remote.ts
+import {
+  testDatabaseConnection,
+  seedDatabase,
+  completeSetup,
+  testEmailConnection,
+  testRedisConnection,
+} from "./setup.server";
+
+// execFile — never exec: package names must never reach a shell.
+// The setup wizard runs pre-auth; a shell-interpolated command here would be
+// an RCE if the DRIVER_PACKAGES allowlist ever regressed.
+const execFileAsync = promisify(execFile);
+
+// Database driver mapping (MongoDB is default, others are optional)
+const DRIVER_PACKAGES = {
+  mongodb: "mongoose",
+  "mongodb+srv": "mongoose",
+  postgresql: "postgres",
+  mysql: "mysql2",
+  mariadb: "mysql2",
+  sqlite: "bun:sqlite",
+} as const;
+
+type DatabaseType = keyof typeof DRIVER_PACKAGES;
 
 export const load: PageServerLoad = async ({ locals, cookies }) => {
-	// --- SECURITY ---
-	// Note: The handleSetup middleware already checks if setup is complete
-	// and blocks access to /setup routes if config has valid values.
+  if (isSetupComplete()) {
+    throw redirect(302, "/login");
+  }
 
-	// Clear any existing session cookies to ensure fresh start
-	// This prevents issues when doing a fresh database setup
-	cookies.delete('auth_session', { path: '/' });
+  // Clear ALL existing auth session cookie variants to ensure fresh start
+  const { clearAllSessionCookies } = await import("@src/databases/auth/constants");
+  clearAllSessionCookies(cookies, "/");
 
-	// Get available system languages from inlang settings (direct import, no parsing needed)
-	const availableLanguages: string[] = inlangSettings.locales || ['en', 'de'];
+  const availableLanguages: string[] = inlangSettings.locales || ["en", "de"];
 
-	// Pass theme data and PKG_VERSION from server to client
-	return {
-		theme: locals.theme,
-		darkMode: locals.darkMode,
-		availableLanguages, // Pass the languages from settings.json
-		settings: {
-			PKG_VERSION: pkgVersion
-		}
-	};
+  return {
+    theme: locals.theme,
+    darkMode: locals.darkMode,
+    availableLanguages,
+    settings: {
+      PKG_VERSION: pkgVersion,
+    },
+  };
+};
+
+export const actions: Actions = {
+  // Setup actions delegate to setup.remote.ts
+  testDatabase: async ({ request }) => {
+    const fd = await request.formData();
+    const config = JSON.parse(fd.get("config") as string);
+    const createIfMissing = fd.get("createIfMissing") === "true";
+    const allowOverwrite = fd.get("allowOverwrite") === "true";
+    return testDatabaseConnection(config, createIfMissing, allowOverwrite);
+  },
+  seedDatabase: async ({ request }) => {
+    const fd = await request.formData();
+    const config = JSON.parse(fd.get("config") as string);
+    const system = JSON.parse((fd.get("system") as string) || "{}");
+    return seedDatabase(config, system);
+  },
+  completeSetup: async ({ request, cookies, url }) => {
+    const fd = await request.formData();
+    const payload = JSON.parse(fd.get("data") as string);
+    const result = await completeSetup(
+      payload.database,
+      payload.admin,
+      payload.system || {},
+      payload.emailSettings || {},
+    );
+    if (result.sessionCookie) {
+      const { getSessionCookieName, isSecureCookieContext } =
+        await import("@src/databases/auth/constants");
+      const isSecure = isSecureCookieContext(url.protocol, url.hostname);
+      const cookieName = getSessionCookieName(isSecure);
+      cookies.set(cookieName, result.sessionCookie.value, {
+        ...result.sessionCookie.attributes,
+        secure: isSecure,
+        sameSite: isSecure ? "strict" : "lax",
+      } as any);
+    }
+    return result;
+  },
+  testEmail: async ({ request }) => {
+    const fd = await request.formData();
+    const config = JSON.parse(fd.get("config") as string);
+    return testEmailConnection(config);
+  },
+  testRedis: async ({ request }) => {
+    const fd = await request.formData();
+    const host = (fd.get("host") as string) || "localhost";
+    const port = parseInt((fd.get("port") as string) || "6379", 10);
+    const password = fd.get("security") as string;
+    return testRedisConnection(host, port, password);
+  },
+
+  /**
+   * Installs database drivers (optional)
+   */
+  installDriver: async ({ request }) => {
+    logger.info("🚀 Action: installDriver called");
+    const formData = await request.formData();
+    const dbType = formData.get("dbType") as DatabaseType;
+
+    if (!(dbType && DRIVER_PACKAGES[dbType]) || dbType === "sqlite") {
+      return {
+        success: true,
+        message: "No driver installation needed (or invalid type).",
+      };
+    }
+
+    const packageName = DRIVER_PACKAGES[dbType];
+
+    try {
+      // Check if already installed
+      try {
+        await import(/* @vite-ignore */ packageName);
+        return {
+          success: true,
+          message: `Driver ${packageName} is already installed.`,
+          alreadyInstalled: true,
+          package: packageName,
+        };
+      } catch {
+        // Install needed
+      }
+
+      // Detect package manager
+      const cwd = process.cwd();
+      let pm = "npm";
+      if (existsSync(join(cwd, "bun.lock"))) {
+        pm = "bun";
+      } else if (existsSync(join(cwd, "yarn.lock"))) {
+        pm = "yarn";
+      } else if (existsSync(join(cwd, "pnpm-lock.yaml"))) {
+        pm = "pnpm";
+      }
+
+      logger.info(`Installing ${packageName} using ${pm}...`);
+      // Args array — no shell involved, packageName can never inject commands.
+      const args = pm === "npm" ? ["install", packageName] : ["add", packageName];
+      const { stdout, stderr } = await execFileAsync(pm, args, {
+        cwd,
+        timeout: 120_000,
+      });
+      logger.info("Installation output:", stdout + stderr);
+
+      return {
+        success: true,
+        message: `Successfully installed ${packageName}.`,
+        package: packageName,
+      };
+    } catch (error: any) {
+      logger.error("Driver installation failed:", error);
+      return {
+        success: false,
+        error: `Installation failed: ${error.message}`,
+      };
+    }
+  },
 };

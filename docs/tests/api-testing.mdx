@@ -1,0 +1,163 @@
+---
+path: "docs/tests/api-testing.mdx"
+title: "API Testing & Coverage Report"
+description: "Black-box API testing strategy, isolation rules, and CI execution model for SveltyCMS."
+order: 5
+icon: "mdi:api-check"
+author: "SveltyCMS Team"
+created: "2026-02-17"
+updated: "2026-08-19"
+tags:
+  - "testing"
+  - "api"
+  - "coverage"
+  - "fail-closed"
+---
+
+# API Testing & Coverage Report
+
+SveltyCMS validates its API layer primarily with **black-box integration tests**. The suite talks to a live server over HTTP, verifies the full middleware chain, and runs the same contracts across SQLite, MongoDB, MariaDB, and PostgreSQL.
+
+Unit-level dispatcher checks use thin shared helpers (`invokeApi` in `tests/unit/utils/mock-event.ts`) — not a separate HTTP-style client. See [API Unit Helpers](./api-unit-helpers.mdx).
+
+> [!NOTE]
+> The source of truth for the latest pass/fail state is GitHub Actions. This guide explains the contract the black-box API suite is expected to enforce.
+
+## 🛡️ Test Isolation & Safety
+
+SveltyCMS is designed so test runs never touch live user data. The safety contract is:
+
+1. **Config Isolation**: Local integration/E2E/hooks use **`config/private.test.ts` only**. They must never read or write the developer's **`config/private.ts`** (live CMS DB — e.g. `sveltycms.db`). See `src/utils/private-config-policy.ts`.
+2. **Ephemeral Mirror Only**: CI may create a short-lived `config/private.ts` on the runner as a mirror of the test config — never committed or pushed.
+3. **Test Mode Gate**: `/api/testing` is inactive unless `TEST_MODE=true` and a valid `TEST_API_SECRET` is provided.
+4. **Loopback Lockdown**: Local black-box jobs use `127.0.0.1` to avoid IPv4/IPv6 drift and keep the test API loopback-only.
+5. **Database Isolation**: SQLite jobs use isolated names (`sveltycms_test`, `benchmark_shared`, `e2e_*`). Service-backed jobs use disposable CI containers. Test `DB_NAME` must not equal live `private.ts`.
+
+## Coverage at a Glance
+
+- **Execution Style**: Real HTTP requests against a running SvelteKit server
+- **Primary Concerns**: Authentication, RBAC, setup gating, CRUD contracts, and DB parity
+- **Collection mutations**: `tests/integration/api/collections-mutations.test.ts` — create → PATCH → schedule → bulk publish → clone → bulk delete, with a **count-must-decrease** assertion so “delete created a row” cannot go green. Unit dispatcher: `tests/unit/api/collections.test.ts` (`POST /batch` delete/status/clone/schedule). Adapter `insertMany`/`updateMany`/`deleteMany` alone does **not** cover the HTTP batch router.
+- **Database Matrix**: SQLite, MongoDB, MariaDB, PostgreSQL
+- **Security Posture**: Fail-closed, loopback-only test API with shared secret
+- **Runtime Parity**: Production build preview for CI integration and most E2E jobs
+
+---
+
+## 🏗️ Testing Architecture
+
+Our API tests operate at the **integration** level. Unlike unit tests, they boot a real server process and verify the complete request path:
+
+`Request -> Hooks -> Auth -> Route Handler -> Adapter -> Response`
+
+### Key Components
+
+1. **Fail-Closed Dispatcher**: Unmapped or unauthorized routes must reject by default.
+2. **Testing API (`/api/testing`)**: Handles state reset, seed, and isolated fixture orchestration for black-box E2E and integration tests under `TEST_MODE=true`. It is not exposed to production and is never used for production benchmarks or compliance verification (which target real routes like `POST /api/gdpr`).
+3. **Integration harness**: `tests/integration/harness.ts` provisions `config/private.test.ts`, starts the preview server, and seeds via `/api/testing`. Run with `bun test --timeout 300000 tests/integration/`.
+4. **Real Authentication**: Tests obtain cookies via `/api/auth/login` and then hit the same endpoints a browser or API consumer would use.
+
+---
+
+## Verified API Areas
+
+### Authentication & Security
+
+- **2FA System**: Setup, TOTP verification, backup codes, and session recovery.
+- **Security Management**: IP blocking, incident resolving, and CSP report processing.
+- **Registration**: Verification of invitation token consumption and role assignment.
+
+### User & Token Management
+
+- **User Lifecycle**: Creation, login/logout, multi-tenant isolation, and role-based access.
+- **Token System**: JWT creation, rotation, and revocation.
+- **State Verification**: Usage of `get-user` action to verify post-registration database state.
+
+### Content & Relational APIs
+
+- **Collections**: CRUD operations, complex relations, and schema validation.
+- **Relational Benchmarks**: Dedicated performance testing for Depth 2-3 populations and JOINs.
+
+### System & Dashboard APIs
+
+- **Health and Settings**: Critical admin endpoints are exercised through the same route dispatcher used in production.
+- **Dynamic Config**: Setup-state and system settings flows are validated alongside the browser smoke coverage.
+
+---
+
+## CI Execution Model
+
+The GitHub Actions matrix runs the API suite once per supported database:
+
+- **SQLite**: File-backed local parity and reset semantics
+- **MongoDB**: Adapter parity and auth coverage
+- **MariaDB**: SQL adapter parity and relational flows
+- **PostgreSQL**: SQL adapter parity and relational flows
+
+Each job reuses the shared test secret, provisions an isolated database, boots the app in test mode, and runs the same HTTP contract suite.
+
+---
+
+## 🚀 Running the API Suite
+
+### Run All Integration Tests
+
+````bash
+bun run test:integration
+```text
+
+### Targeted Testing (day-to-day loop)
+
+Prefer **SQLite + skip rebuild** when the production bundle is already current:
+
+```bash
+# Fast local loop (SQLite once build/ exists)
+bun test --timeout 300000 tests/integration/
+
+# API suite only
+bun test --timeout 300000 tests/integration/api/
+
+# Full matrix parity (Docker profile up; slower — adapters/auth PRs)
+DB_TYPE=postgresql bun test --timeout 300000 tests/integration/
+DB_TYPE=mariadb bun test --timeout 300000 tests/integration/
+DB_TYPE=mongodb bun test --timeout 300000 tests/integration/
+```
+
+> [!TIP]
+> First run after a clean checkout needs `bun run build` (or `bun run test:integration`). Day-to-day, reuse `build/` and run `bun test --timeout 300000 tests/integration/`.
+
+### Bulk user HTTP path
+
+Bulk user actions are covered by black-box integration:
+
+- `tests/integration/api/user-extended.test.ts` → `POST /api/user/batch` (block/unblock/delete + negatives)
+
+Keep bulk **HTTP** coverage there; use unit tests for pure batch helpers only.
+
+### Session → page load (P0, 2026-07-18)
+
+`tests/integration/api/session-page-load.test.ts` proves a login cookie unlocks SvelteKit `__data.json` for admin pages (`/user`, `/dashboard`, `/config/collectionbuilder`, …) — not only `/api/user`.
+Unit companions: `tests/unit/auth/sessions/session-cookies.test.ts`, `tests/unit/api/testing-login-cookie-contract.test.ts`.
+See [Headless-First Test Inventory](./headless-test-inventory.mdx).
+
+---
+
+## Maintenance Notes
+
+- Keep raw-response contracts aligned with endpoint tests. If `raw=true` returns a bare array or object for one route, tests should enforce that shape consistently across adapters.
+- Continue migrating legacy integration files away from internal imports so black-box suites do not rely on privileged runtime access.
+- Keep setup-state and auth helpers synchronized with the Playwright smoke suites.
+
+---
+
+_Last Updated: July 15, 2026_
+````
+
+---
+
+## Related
+
+- [Test Documentation](./index.mdx)
+- [API Unit Helpers](./api-unit-helpers.mdx)
+- [Security Testing](./security-testing.mdx)
+- [Architecture Overview](../reference/architecture/index.mdx)

@@ -1,0 +1,1528 @@
+/**
+ * @file src/services/sdk/namespaces/collections-namespace.ts
+ * @description
+ * Collections namespace for LocalCMS SDK.
+ *
+ * Thin orchestrator over the split modules under `./collections/`:
+ * - lazy-services.ts  — memoized dynamic imports (workflow, response-cache,
+ *   pub-sub, outbox, token engine, history service, db module)
+ * - request-cache.ts  — L1 LRU + keyspace index
+ * - schema-store.ts   — schema LRU, hot flags, benchmark fallbacks, model cache
+ * - read-pipeline.ts  — filter normalization, tenant/publication query build,
+ *   find cache keys, read-through cache
+ * - write-pipeline.ts — field prep, schema hooks, write guard, widget pipeline,
+ *                       AES-256-GCM encrypt:true at rest
+ * - post-write.ts     — L1/L2 invalidation, outbox batching, plugin hooks
+ *
+ * ### Features:
+ * - multi-tenant isolation via tenantId injection on every DB query
+ * - publication clamping with publication-aware cache-key suffixes
+ * - L1/L2 read-through + single-flight coalescing (coalesceQuery)
+ * - detached best-effort post-write side effects
+ * - typed collection proxy (`typed`) for ergonomic access
+ */
+
+import { modifyStream, type EntryData } from "@utils/modify-request";
+import { prepareCollectionFields } from "@src/content/content-utils";
+import {
+  applyPublicationToQuery,
+  publicationCacheSuffix,
+  resolvePublicationFilter,
+} from "@utils/security/publication-policy";
+import { cacheService } from "@src/databases/cache/cache-service";
+import { CacheCategory } from "@src/databases/cache/types";
+import { deepClone } from "@utils/native-utils";
+import { logger } from "@utils/logger";
+import { AppError } from "@utils/error-handling";
+import { isMultiTenantEnabled } from "@utils/tenant";
+import type { DatabaseId, IDBAdapter } from "@src/databases/db-interface";
+import type { contentSystem as serverContentSystem } from "@src/content/index.server";
+import type { FieldInstance, Schema } from "@src/content/types";
+import { type LocalApiOptions, type CollectionProxy } from "./types";
+import { copyDataWithFreshRowIds } from "@utils/data-utils";
+import { resolvePopulatedRelations } from "./populate-resolver";
+import { PROFILE_WRITE_ENABLED, profileSpan, profileMark } from "@utils/write-profiler";
+import { decodePageCursor, mergeKeysetFilter } from "@src/databases/core/page-utils";
+import { parseIdLookup } from "@src/databases/core/lookup-query";
+import { nowISODateString } from "@src/utils/date";
+import { collectionTableName } from "@src/databases/core/collection-name";
+
+import {
+  getDbModuleLazy,
+  getHistoryServiceLazy,
+  getPubSubLazy,
+  getTokenEngineLazy,
+  getWorkflowServiceLazy,
+} from "./collections/lazy-services";
+import {
+  evictRequestCache,
+  getRequestCache,
+  hasRequestCache,
+  setRequestCache,
+} from "./collections/request-cache";
+import {
+  clearSchemaCache,
+  ensureSchemaHotFlags,
+  peekReadySchema,
+  getModelResilient,
+  resolveSchema,
+  schemaCacheEntries,
+  schemaCacheKey,
+  setCachedSchema,
+} from "./collections/schema-store";
+import {
+  assertEncryptedFieldsNotQueried,
+  buildFindCacheKey,
+  buildTenantQuery,
+  decryptReadResult,
+  decryptReadStream,
+  normalizeRelationshipFilter,
+  readThroughCache,
+} from "./collections/read-pipeline";
+import {
+  applyWidgetPipeline,
+  encryptWritePayload,
+  prepareWritePayload,
+  writeTouchesActiveWidgets,
+  type PrepFieldSchema,
+} from "./collections/write-pipeline";
+import type { FieldEncryptionContext } from "@utils/security/field-encryption";
+import {
+  invalidateCache,
+  persistWithOutbox,
+  schedulePostWrite,
+  shouldSkipWriteSideEffects,
+  triggerLifecycleHook,
+} from "./collections/post-write";
+import { scheduleDefaultListWarm } from "./collections/list-warm";
+
+type ContentSystem = typeof serverContentSystem;
+
+function isThenable<T>(value: T | Promise<T>): value is Promise<T> {
+  return !!value && typeof (value as { then?: unknown }).then === "function";
+}
+
+function fieldEncryptionContext(
+  schema: Schema,
+  tenantId: DatabaseId | null | undefined,
+): FieldEncryptionContext {
+  return {
+    collectionId: String(schema._id ?? schema.name ?? ""),
+    tenantId: tenantId != null && String(tenantId).length > 0 ? String(tenantId) : "global",
+  };
+}
+
+/** Searchable field names — hoisted so the per-item filter loop shares one array. */
+const SEARCHABLE_FIELDS = ["title", "content", "description", "name"];
+
+/** Status/schedule patches have no nested arrays — skip recursive row-id walks. */
+function isShallowPatch(data: Record<string, unknown>): boolean {
+  for (const value of Object.values(data)) {
+    if (value !== null && typeof value === "object") return false;
+  }
+  return true;
+}
+
+function sameShallowPayload(updates: Array<{ data: Record<string, unknown> }>): boolean {
+  if (updates.length <= 1) return true;
+  const first = updates[0].data;
+  const keys = Object.keys(first);
+  for (let i = 1; i < updates.length; i++) {
+    const next = updates[i].data;
+    if (Object.keys(next).length !== keys.length) return false;
+    for (const key of keys) {
+      if (next[key] !== first[key]) return false;
+    }
+  }
+  return true;
+}
+
+let resolvedContentSystem: ContentSystem | null = null;
+
+async function getContentSystem(): Promise<ContentSystem> {
+  if (!resolvedContentSystem) {
+    const mod = await import("@src/content/index.server");
+    resolvedContentSystem = mod.contentSystem;
+  }
+  return resolvedContentSystem;
+}
+
+/**
+ * Collections Namespace
+ */
+export class CollectionsNamespace {
+  private _proxy: CollectionProxy;
+
+  constructor(
+    private _dbAdapter: IDBAdapter,
+    private _contentSystemOverride?: ContentSystem,
+  ) {
+    if (!(this._dbAdapter as any).collection) {
+      const proto = (this._dbAdapter as any).constructor?.prototype;
+      if (proto?.collection) {
+        (this._dbAdapter as any).collection = proto.collection;
+      } else {
+        (this._dbAdapter as any).collection = new Proxy(
+          {},
+          {
+            get: (_, subProp) => {
+              if (subProp === "getModel") {
+                return () => ({
+                  findOne: () => Promise.resolve(null),
+                  aggregate: () => Promise.resolve([]),
+                  find: () => ({
+                    lean: () => ({ exec: () => Promise.resolve([]) }),
+                  }),
+                });
+              }
+              return () =>
+                Promise.resolve({
+                  success: false,
+                  message: "Interface initializing",
+                });
+            },
+          },
+        );
+      }
+    }
+
+    this._proxy = new Proxy({} as CollectionProxy, {
+      get: (_, prop: string) => {
+        if (prop in this) return (this as any)[prop];
+        return {
+          find: (options?: any) => this.find(prop, options),
+          findById: (id: string, options?: any) => this.findById(prop, id, options),
+          create: (data: any, options?: any) => this.create(prop, data, options),
+          update: (id: string, data: any, options?: any) => this.update(prop, id, data, options),
+          delete: (id: string, options?: any) => this.delete(prop, id, options),
+          queryBuilder: (options?: any) => this.queryBuilder(prop, options),
+        };
+      },
+    });
+  }
+
+  private get _contentSystem(): ContentSystem | null {
+    return this._contentSystemOverride || resolvedContentSystem;
+  }
+
+  private async _resolveContentSystem(): Promise<ContentSystem> {
+    return this._contentSystemOverride || getContentSystem();
+  }
+
+  public get typed(): CollectionProxy {
+    return this._proxy;
+  }
+
+  /** Thin delegate to the shared request-cache module (kept for API stability). */
+  public static setRequestCache(
+    key: string,
+    value: any,
+    collectionId?: string,
+    tenantId?: DatabaseId | null,
+  ): void {
+    setRequestCache(key, value, collectionId, tenantId);
+  }
+
+  /** Thin delegate to the shared request-cache module (kept for API stability). */
+  public static evictRequestCache(collectionId?: string, tenantId?: string): void {
+    evictRequestCache(collectionId, tenantId);
+  }
+
+  public getCollectionName(schemaId: string): string {
+    return collectionTableName(schemaId);
+  }
+
+  /**
+   * 🚀 HYDRATION: Manually register a schema in the local cache.
+   * Useful for setup scripts and benchmarks.
+   *
+   * After caching, best-effort provisions the physical collection model/table
+   * so a fresh DB (setup, ci-fresh benchmark sandbox) is ready to write
+   * immediately. Provisioning failures are expected misses (no adapter
+   * support, adapter still initializing, model already exists) and must never
+   * break schema registration. Callers that don't await still work —
+   * provisioning simply becomes fire-and-forget.
+   */
+  public async registerSchema(
+    collectionId: string,
+    schema: Schema,
+    tenantId?: DatabaseId | null,
+  ): Promise<void> {
+    const schemaKey = schemaCacheKey(tenantId, collectionId);
+    setCachedSchema(schemaKey, schema);
+    CollectionsNamespace.evictRequestCache(collectionId, tenantId as string);
+    logger.debug(`[Collections] Manually registered schema: ${schemaKey}`);
+
+    try {
+      await this._dbAdapter.collection?.createModel?.(schema);
+    } catch (err) {
+      logger.debug(
+        `[Collections] Model provisioning skipped for ${schemaKey}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  public async getSchema(collectionId: string, tenantId?: DatabaseId | null): Promise<Schema> {
+    return resolveSchema(this._dbAdapter, collectionId, tenantId, () =>
+      this._resolveContentSystem(),
+    );
+  }
+
+  /** Warm schemas skip the async getSchema microtask. */
+  private async schemaOf(collectionId: string, tenantId?: DatabaseId | null): Promise<Schema> {
+    return (
+      peekReadySchema(tenantId, collectionId) ?? (await this.getSchema(collectionId, tenantId))
+    );
+  }
+
+  async list(
+    options: {
+      tenantId?: DatabaseId | null;
+      includeFields?: boolean;
+      includeStats?: boolean;
+    } = {},
+  ) {
+    const { tenantId, includeFields = false, includeStats = false } = options;
+
+    if (isMultiTenantEnabled() && !tenantId) {
+      throw new AppError("Tenant ID required", 400, "TENANT_MISSING");
+    }
+
+    const cacheKey = `${tenantId || "global"}:system:collections:list:${includeFields}:${includeStats}`;
+
+    if (hasRequestCache(cacheKey)) {
+      return getRequestCache(cacheKey);
+    }
+
+    try {
+      const syncCached = cacheService.getSync<any>(cacheKey, (tenantId || undefined) as string);
+      if (syncCached) {
+        CollectionsNamespace.setRequestCache(cacheKey, syncCached, undefined, tenantId);
+        return syncCached;
+      }
+      const cached = await cacheService.get(cacheKey, (tenantId || undefined) as string);
+      if (cached) {
+        CollectionsNamespace.setRequestCache(cacheKey, cached, undefined, tenantId);
+        return cached;
+      }
+    } catch {}
+
+    const cs = await this._resolveContentSystem();
+    const collections = await cs.getCollections(tenantId);
+
+    // Merge in any manually registered schemas from cache
+    const prefix = `${tenantId || "global"}:`;
+    const cachedSchemas: Schema[] = [];
+    for (const [key, schema] of schemaCacheEntries()) {
+      if (key.startsWith(prefix)) {
+        if (!collections.some((c: Schema) => c._id === schema._id)) {
+          cachedSchemas.push(schema);
+        }
+      }
+    }
+    const allCollections = [...collections, ...cachedSchemas];
+
+    // Token resolution hoisted out of the per-collection map loop; `now`
+    // computed once for the whole batch (was per-iteration before).
+    const { replaceTokens } = await getTokenEngineLazy();
+    const now = nowISODateString();
+
+    const processed = await Promise.all(
+      allCollections.map(async (c: Schema) => {
+        const col = { ...c } as any;
+        if (!includeFields) delete col.fields;
+        if (includeStats) col.stats = { count: 0 };
+
+        if (col.label) col.label = await replaceTokens(col.label, { system: { now } });
+        if (col.description)
+          col.description = await replaceTokens(col.description, {
+            system: { now },
+          });
+
+        return col;
+      }),
+    );
+
+    try {
+      await cacheService.set(
+        cacheKey,
+        processed,
+        600,
+        (tenantId || undefined) as string,
+        CacheCategory.SYSTEM,
+      );
+      CollectionsNamespace.setRequestCache(cacheKey, processed, undefined, tenantId);
+    } catch {}
+
+    return processed;
+  }
+
+  async search(
+    query: string,
+    options: LocalApiOptions & {
+      collections?: string[];
+      page?: number;
+      limit?: number;
+      sortField?: string;
+      sortDirection?: "asc" | "desc";
+      filter?: any;
+      status?: string;
+      isAdmin?: boolean;
+    },
+  ) {
+    const {
+      collections,
+      tenantId,
+      user,
+      page = 1,
+      limit = 25,
+      sortField = "updatedAt",
+      sortDirection = "desc",
+      filter: additionalFilter = {},
+      status,
+      isAdmin = false,
+    } = options;
+
+    const cs = await getContentSystem();
+    const allCollections = await cs.getCollections(tenantId);
+    const collectionMap = new Map<string, Schema>();
+    for (const col of allCollections) {
+      if (col._id) collectionMap.set(col._id, col);
+    }
+
+    let collectionsToSearch: string[] = [];
+    if (collections && collections.length > 0) {
+      collectionsToSearch = collections;
+    } else {
+      collectionsToSearch = allCollections
+        .map((c) => c._id)
+        .filter((id): id is string => id !== undefined);
+    }
+
+    const baseFilter: any = normalizeRelationshipFilter({
+      ...additionalFilter,
+    });
+
+    const effectivePublicationFilter = resolvePublicationFilter(
+      { user: options.user, system: options.system },
+      status || (isAdmin ? "all" : "published"),
+    );
+    applyPublicationToQuery(baseFilter, effectivePublicationFilter);
+    if (effectivePublicationFilter === "all" && status) {
+      baseFilter.status = status;
+    }
+
+    const searchPromises = collectionsToSearch.map(async (collectionId) => {
+      const collection =
+        collectionMap.get(collectionId) || (await cs.getCollectionById(collectionId, tenantId));
+      if (!collection) return [];
+
+      try {
+        assertEncryptedFieldsNotQueried(baseFilter, ensureSchemaHotFlags(collection));
+        const result = await this._dbAdapter.crud.findMany(
+          this.getCollectionName(collection._id as string),
+          baseFilter,
+          {
+            limit: 100,
+            tenantId: tenantId as DatabaseId,
+          },
+        );
+
+        if (result.success && result.data) {
+          const hot = ensureSchemaHotFlags(collection);
+          const decrypted = await decryptReadResult(
+            { success: true, data: result.data },
+            hot,
+            fieldEncryptionContext(collection, tenantId),
+            { clone: true },
+          );
+          let items = Array.isArray(decrypted.data) ? decrypted.data : [];
+          if (query) {
+            const lowerQuery = query.toLowerCase();
+            items = items.filter((item: Record<string, unknown>) => {
+              return SEARCHABLE_FIELDS.some((field) => {
+                const value = (item as any)[field];
+                return typeof value === "string" && value.toLowerCase().includes(lowerQuery);
+              });
+            });
+          }
+
+          if (items.length > 0) {
+            await applyWidgetPipeline(collection as Schema, items as any[], {
+              dbAdapter: this._dbAdapter,
+              user,
+              type: "GET",
+              tenantId,
+              collectionName: collection.name,
+              skipValidation: options.skipValidation,
+              action: "search",
+            });
+
+            // 🚀 Zero-Copy Projection: Mutate directly to avoid spread/allocation overhead
+            for (let i = 0; i < items.length; i++) {
+              (items[i] as any)._collection = {
+                id: collection._id,
+                name: collection.name,
+                label: collection.label,
+              };
+            }
+          }
+
+          return items;
+        }
+        return [];
+      } catch {
+        return [];
+      }
+    });
+
+    const resultsArrays = await Promise.all(searchPromises);
+    const searchResults = resultsArrays.flat();
+
+    if (sortField && searchResults.length > 0) {
+      searchResults.sort((a: any, b: any) => {
+        const aVal = a[sortField];
+        const bVal = b[sortField];
+        if (typeof aVal === "string" && typeof bVal === "string") {
+          return sortDirection === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+        }
+        if (typeof aVal === "number" && typeof bVal === "number") {
+          return sortDirection === "asc" ? aVal - bVal : bVal - aVal;
+        }
+        return 0;
+      });
+    }
+
+    const startIndex = (page - 1) * limit;
+    return {
+      items: searchResults.slice(startIndex, startIndex + limit),
+      total: searchResults.length,
+      page,
+      pageSize: limit,
+      totalPages: Math.ceil(searchResults.length / limit),
+    };
+  }
+
+  async find(collectionId: string, options: any = {}) {
+    const { tenantId, filter = {}, limit = 50, offset = 0, bypassCache = false } = options;
+    const ttl = options.ttl ? Number(options.ttl) : undefined;
+    const schema = await this.schemaOf(collectionId, tenantId);
+    const normalizedFilter = normalizeRelationshipFilter(filter);
+    const decodedCursor = decodePageCursor(options.cursor);
+    const baseQuery: any = decodedCursor
+      ? mergeKeysetFilter(normalizedFilter as Record<string, unknown>, decodedCursor)
+      : normalizedFilter;
+
+    const { query, effectiveFilter: effectivePublicationFilter } = buildTenantQuery(
+      baseQuery,
+      tenantId,
+      { user: options.user, system: options.system },
+      options.publicationFilter,
+    );
+
+    const hot = ensureSchemaHotFlags(schema);
+    const encCtx = fieldEncryptionContext(schema, tenantId);
+    assertEncryptedFieldsNotQueried(
+      query,
+      hot,
+      options.sortField || (Array.isArray(options.sort) ? options.sort?.[0]?.[0] : undefined),
+    );
+
+    // Id lookup (optional tenant + scalar status from publication clamp):
+    // one findOne on the adapter ultra path, `{ data: T[] }` envelope.
+    if (!decodedCursor && !offset && !options.fields && !options.populate) {
+      const lookup = parseIdLookup(query);
+      if (lookup) {
+        const one = await this._dbAdapter.crud.findOne(
+          this.getCollectionName(schema._id as string),
+          query,
+          { tenantId: tenantId as DatabaseId },
+        );
+        const row =
+          one?.success && one.data ? (Array.isArray(one.data) ? one.data[0] : one.data) : null;
+        if (row) {
+          if (hot._hasActiveWidgets) {
+            const payload = [row];
+            await applyWidgetPipeline(schema, payload, {
+              dbAdapter: this._dbAdapter,
+              user: options.user || { _id: "system", role: "admin" },
+              type: "GET",
+              tenantId,
+              collectionName: schema.name,
+              skipValidation: options.skipValidation,
+              action: "find",
+            });
+          }
+          (row as any)._collection = (schema as any)._collectionMeta || {
+            id: schema._id,
+            name: schema.name,
+            label: schema.label,
+          };
+          (schema as any)._collectionMeta = (row as any)._collection;
+        }
+        const envelope = { success: true, data: row ? [row] : [] };
+        return decryptReadResult(envelope, hot, encCtx, { clone: true });
+      }
+    }
+
+    const sort =
+      options.sort ||
+      (options.sortField
+        ? ([[options.sortField, options.sortDirection || "desc"]] as [string, "asc" | "desc"][])
+        : undefined);
+
+    const skipRequestCache = bypassCache || options.bypassRequestCache;
+    const cacheKey = buildFindCacheKey({
+      schemaId: schema._id as string,
+      tenantId,
+      filter,
+      query,
+      limit,
+      offset,
+      sort,
+      decodedCursor,
+      effectiveFilter: effectivePublicationFilter,
+      skipRequestCache,
+      bypassCache,
+      options,
+    });
+
+    if (cacheKey) {
+      const cacheHit = await readThroughCache(cacheKey, tenantId, {
+        skipRequestCache,
+        bypassCache,
+      });
+      if (cacheHit.hit) {
+        // Re-register with the collection id so list keys join the keyspace index.
+        CollectionsNamespace.setRequestCache(
+          cacheKey,
+          cacheHit.payload,
+          schema._id as string,
+          tenantId,
+        );
+        return decryptReadResult(cacheHit.payload, hot, encCtx, { clone: true });
+      }
+    }
+
+    const fetchFromDb = () =>
+      this._dbAdapter.crud.findMany(this.getCollectionName(schema._id as string), query, {
+        limit,
+        offset,
+        sort,
+        fields: options.fields,
+        populate: options.populate,
+      });
+
+    const result = cacheKey
+      ? await cacheService.coalesceQuery(cacheKey, fetchFromDb)
+      : await fetchFromDb();
+
+    if (result.success && result.data) {
+      if (hot._hasActiveWidgets) {
+        await applyWidgetPipeline(schema, result.data as unknown as EntryData[], {
+          dbAdapter: this._dbAdapter,
+          user: options.user || { _id: "system", role: "admin" },
+          type: "GET",
+          tenantId,
+          collectionName: schema.name,
+          skipValidation: options.skipValidation,
+          action: "find",
+        });
+      }
+
+      if (Array.isArray(result.data)) {
+        const collectionMeta = (schema as any)._collectionMeta || {
+          id: schema._id,
+          name: schema.name,
+          label: schema.label,
+        };
+        (schema as any)._collectionMeta = collectionMeta;
+        for (let i = 0; i < result.data.length; i++) {
+          const item = result.data[i] as any;
+          if (item) {
+            item._collection = collectionMeta;
+          }
+        }
+      }
+    }
+
+    if (options.populate && result.success && Array.isArray(result.data)) {
+      await resolvePopulatedRelations(
+        result.data,
+        schema,
+        options.populate,
+        tenantId,
+        this._dbAdapter,
+        this.getCollectionName.bind(this),
+      );
+    }
+
+    if (!bypassCache && cacheKey && result.success && result.data) {
+      try {
+        const cachePayload =
+          options.populate && Array.isArray(result.data) ? deepClone(result.data) : result.data;
+        await cacheService.set(
+          cacheKey,
+          cachePayload,
+          ttl || 180,
+          (tenantId || undefined) as string,
+          CacheCategory.CONTENT,
+          // 🚀 List/query caches are collection-wide: any write to the collection
+          // must clear them. Tagged so clearByTags is O(#list-keys), not O(#docs).
+          [`collection:${schema._id}`],
+        );
+
+        // Negative Caching: If result is empty and it was a specific ID query
+        if (
+          query._id &&
+          (!result.data || (Array.isArray(result.data) && result.data.length === 0))
+        ) {
+          cacheService.recordMiss(cacheKey, (tenantId || undefined) as string);
+        }
+
+        CollectionsNamespace.setRequestCache(cacheKey, result, schema._id as string, tenantId);
+      } catch {}
+    }
+
+    return decryptReadResult(result, hot, encCtx, { clone: true });
+  }
+
+  async findStreaming(
+    collectionId: string,
+    options: LocalApiOptions & {
+      limit?: number;
+      offset?: number;
+      fields?: string[];
+      sortField?: string;
+      sortDirection?: "asc" | "desc";
+      filter?: any;
+      skipValidation?: boolean;
+      publicationFilter?: "published" | "draft" | "all";
+    } = {},
+  ) {
+    const { tenantId, user } = options;
+    // Shared getSchema path — findStreaming previously bypassed the schema cache
+    // via cs.getCollectionById, causing duplicate resolution per stream.
+    const schema = await this.schemaOf(collectionId, tenantId);
+    const hot = ensureSchemaHotFlags(schema);
+    const encCtx = fieldEncryptionContext(schema, tenantId);
+    const normalizedStreamFilter = normalizeRelationshipFilter({ ...options.filter });
+    assertEncryptedFieldsNotQueried(normalizedStreamFilter, hot, options.sortField);
+
+    const { query } = buildTenantQuery(
+      normalizedStreamFilter,
+      tenantId,
+      { user: options.user, system: options.system },
+      options.publicationFilter,
+    );
+    const findOptions = {
+      limit: options.limit,
+      offset: options.offset,
+      sort: options.sortField
+        ? ([[options.sortField, options.sortDirection || "desc"]] as [string, "asc" | "desc"][])
+        : undefined,
+      fields: options.fields as any,
+      tenantId: tenantId as DatabaseId,
+    };
+
+    const streamResult = await this._dbAdapter.crud.streamMany(
+      this.getCollectionName(schema._id as string),
+      query,
+      findOptions,
+    );
+
+    if (!streamResult.success) throw new Error(streamResult.message);
+
+    const collectionModel = await getModelResilient(this._dbAdapter, schema);
+
+    const stream = modifyStream(streamResult.data as unknown as AsyncIterable<EntryData>, {
+      collection: collectionModel,
+      fields: schema.fields as FieldInstance[],
+      user: user || ({ _id: "system", role: "admin" } as any),
+      type: "GET",
+      tenantId: tenantId as string,
+      collectionName: schema.name,
+      skipValidation: options.skipValidation,
+      action: "find",
+    });
+    return decryptReadStream(stream, hot, encCtx);
+  }
+
+  async count(
+    collectionId: string,
+    options: {
+      tenantId?: DatabaseId | null;
+      filter?: any;
+      user?: any;
+      system?: boolean;
+      publicationFilter?: "published" | "draft" | "all";
+    } = {},
+  ) {
+    const { tenantId, filter = {} } = options;
+    const schema = await this.schemaOf(collectionId, tenantId);
+    const normalizedFilter = normalizeRelationshipFilter(filter);
+    assertEncryptedFieldsNotQueried(normalizedFilter, ensureSchemaHotFlags(schema));
+
+    const { query } = buildTenantQuery(
+      normalizedFilter,
+      tenantId,
+      { user: options.user, system: options.system },
+      options.publicationFilter,
+    );
+
+    return this._dbAdapter.crud.count(this.getCollectionName(schema._id as string), query as any, {
+      tenantId: tenantId as DatabaseId,
+    });
+  }
+
+  queryBuilder(collectionId: string, options: { tenantId?: DatabaseId | null } = {}) {
+    const { tenantId } = options;
+    const collectionName = this.getCollectionName(collectionId);
+    const builder = this._dbAdapter.queryBuilder<any>(collectionName);
+
+    if (tenantId) {
+      builder.where({ tenantId } as any);
+    }
+
+    return builder;
+  }
+
+  async refresh(tenantId?: DatabaseId | null, skipReconciliation = false) {
+    CollectionsNamespace.evictRequestCache();
+    clearSchemaCache();
+    await cacheService.clearByPattern("system:collections:*", (tenantId || undefined) as string);
+
+    const { getDb } = await getDbModuleLazy();
+    const freshDb = getDb();
+    if (freshDb) this._dbAdapter = freshDb;
+
+    return this._contentSystem?.refresh(tenantId as any, skipReconciliation);
+  }
+
+  async getStructure(tenantId?: DatabaseId | null) {
+    const cs = await getContentSystem();
+    return cs.getContentStructure(tenantId);
+  }
+
+  async reorderContentNodes(items: any[], tenantId?: DatabaseId | null) {
+    const cs = await getContentSystem();
+    return cs.reorderContentNodes(items, tenantId);
+  }
+
+  async getRevisions(
+    collectionId: string,
+    entryId: string,
+    options: LocalApiOptions & { limit?: number; page?: number } = {},
+  ) {
+    const { tenantId, limit, page } = options;
+    const { HistoryService } = await getHistoryServiceLazy();
+    return HistoryService.getRevisions({
+      collectionId,
+      entryId,
+      tenantId: tenantId as string,
+      dbAdapter: this._dbAdapter,
+      limit: limit || 100,
+      page: page || 1,
+    });
+  }
+
+  async bulkCreate(collectionId: string, data: any[], options: LocalApiOptions = {}) {
+    const { user, tenantId, system } = options;
+    if (!user && !system) throw new AppError("Authentication required", 401, "UNAUTHORIZED");
+    const schema = await this.schemaOf(collectionId, tenantId);
+    const hot = ensureSchemaHotFlags(schema);
+
+    const effectiveUser = system ? { _id: "system", role: "admin" } : user;
+
+    const now = nowISODateString();
+    const createdBy = effectiveUser?._id;
+
+    const entries: EntryData[] = data.map((item) => {
+      let doc = item;
+      if (doc && typeof doc === "object") {
+        if (hot._hasConstrainedFields) {
+          doc = prepareCollectionFields(doc, schema as PrepFieldSchema, { constraints: true });
+        }
+        return {
+          ...doc,
+          tenantId,
+          createdBy,
+          createdAt: (doc as any).createdAt || now,
+        } as EntryData;
+      }
+      return doc as EntryData;
+    });
+
+    if (hot._hasActiveWidgets) {
+      await applyWidgetPipeline(schema, entries, {
+        dbAdapter: this._dbAdapter,
+        user: effectiveUser,
+        type: "POST",
+        tenantId,
+        collectionName: schema.name,
+        skipValidation: options.skipValidation,
+        action: "bulkCreate",
+        system,
+      });
+    }
+
+    if (hot._hasEncryptedFields) {
+      const encCtx = fieldEncryptionContext(schema, tenantId);
+      for (let i = 0; i < entries.length; i++) {
+        await encryptWritePayload(entries[i], hot, encCtx);
+      }
+    }
+
+    let result;
+    if (this._dbAdapter.batch && typeof this._dbAdapter.batch.bulkInsert === "function") {
+      result = await this._dbAdapter.batch.bulkInsert(
+        this.getCollectionName(schema._id as string),
+        entries as any[],
+      );
+    } else if (this._dbAdapter.crud && typeof this._dbAdapter.crud.insertMany === "function") {
+      result = await this._dbAdapter.crud.insertMany(
+        this.getCollectionName(schema._id as string),
+        entries as any[],
+        { tenantId } as any,
+      );
+    } else {
+      throw new Error("Adapter does not support bulk operations.");
+    }
+
+    if (result.success && !shouldSkipWriteSideEffects(options)) {
+      try {
+        const workflowService = await getWorkflowServiceLazy();
+        const insertedIds = Array.from({
+          length: (result.data as any[]).length,
+        }) as string[];
+        const resultsData = result.data as any[];
+        for (let i = 0; i < resultsData.length; i++) {
+          insertedIds[i] = resultsData[i]._id as string;
+        }
+        await workflowService.bulkInitializeWorkflow(
+          insertedIds,
+          schema._id as string,
+          tenantId as string,
+        );
+      } catch {}
+
+      invalidateCache(schema, tenantId);
+      try {
+        const pubSub = await getPubSubLazy();
+        pubSub.publish("entryUpdated", {
+          collection: schema.name || (schema._id as string),
+          id: "bulk",
+          action: "bulkCreate",
+          data: { count: entries.length },
+          timestamp: nowISODateString(),
+          user,
+        });
+      } catch {}
+    }
+
+    return result;
+  }
+
+  async bulkUpdate(
+    collectionId: string,
+    updates: Array<{ id: string; data: any }>,
+    options: LocalApiOptions = {},
+  ) {
+    const { user, tenantId, system } = options;
+    if (!user && !system) throw new AppError("Authentication required", 401, "UNAUTHORIZED");
+    const schema = await this.schemaOf(collectionId, tenantId);
+
+    if (!system && !user?.isAdmin && schema.fields && schema.fields.length > 0) {
+      const { assertWriteAllowed } =
+        await import("@src/services/security/field-permission-service");
+      for (const u of updates) {
+        await assertWriteAllowed(
+          schema.fields as FieldInstance[],
+          (u.data ?? {}) as Record<string, unknown>,
+          user,
+          {
+            collectionName: schema.name,
+            entryId: u.id,
+            tenantId: tenantId ?? undefined,
+          },
+        );
+      }
+    }
+
+    const now = nowISODateString();
+    const hot = ensureSchemaHotFlags(schema);
+    const encCtx = fieldEncryptionContext(schema, tenantId);
+
+    const formattedUpdates = [];
+    for (const u of updates) {
+      const raw = (u.data ?? {}) as Record<string, unknown>;
+      const patched = isShallowPatch(raw)
+        ? raw
+        : (copyDataWithFreshRowIds(raw) as Record<string, unknown>);
+      const data = {
+        ...patched,
+        updatedBy: user?._id,
+        updatedAt: now,
+      };
+      await encryptWritePayload(data, hot, encCtx);
+      formattedUpdates.push({
+        id: u.id as DatabaseId,
+        data,
+      });
+    }
+
+    const table = this.getCollectionName(schema._id as string);
+    let result;
+
+    // Homogeneous payload (bulk publish/draft/archive) → one UPDATE WHERE _id IN (...)
+    // instead of N per-row statements. Tenant is applied by crud.updateMany.
+    if (formattedUpdates.length > 0 && sameShallowPayload(formattedUpdates)) {
+      result = await this._dbAdapter.crud.updateMany(
+        table,
+        { _id: { $in: formattedUpdates.map((u) => u.id) } } as any,
+        formattedUpdates[0].data as any,
+        { tenantId: tenantId as DatabaseId },
+      );
+    } else {
+      result = await this._dbAdapter.batch.bulkUpdate(table, formattedUpdates, {
+        tenantId: tenantId as DatabaseId,
+      });
+    }
+
+    if (result.success && !shouldSkipWriteSideEffects(options)) {
+      invalidateCache(schema, tenantId, {
+        writtenIds: formattedUpdates.map((u) => String(u.id)),
+      });
+    }
+
+    return result;
+  }
+
+  async bulkDelete(collectionId: string, ids: string[], options: LocalApiOptions = {}) {
+    const { user, tenantId } = options;
+    if (!user) throw new AppError("Authentication required", 401, "UNAUTHORIZED");
+    const schema = await this.schemaOf(collectionId, tenantId);
+    if (schema?.disableBulkDelete) {
+      throw new AppError(
+        `Bulk delete is disabled for collection "${schema.name || collectionId}"`,
+        403,
+        "BULK_DELETE_DISABLED",
+      );
+    }
+
+    // Single DELETE WHERE _id IN (...) with tenant isolation via mapQuery.
+    // `permanent: true` matches previous batch.bulkDelete (hard delete, not isDeleted).
+    const result = await this._dbAdapter.crud.deleteMany(
+      this.getCollectionName(schema._id as string),
+      { _id: { $in: ids as DatabaseId[] } } as any,
+      { tenantId: tenantId as DatabaseId, userId: user?._id as DatabaseId, permanent: true },
+    );
+
+    if (result.success && !shouldSkipWriteSideEffects(options)) {
+      invalidateCache(schema, tenantId, { writtenIds: ids });
+    }
+
+    return result;
+  }
+
+  /**
+   * Raw id lookup — one `WHERE _id IN (...)` query, no widget modifyRequest.
+   * Used by bulk clone so source rows are not processed twice.
+   */
+  async findByIds(collectionId: string, ids: string[], options: LocalApiOptions = {}) {
+    if (!ids.length) return { success: true, data: [] };
+    const { tenantId } = options;
+    const schema = await this.schemaOf(collectionId, tenantId);
+    const result = await this._dbAdapter.crud.findByIds(
+      this.getCollectionName(schema._id as string),
+      ids as DatabaseId[],
+      { tenantId: tenantId as DatabaseId, limit: ids.length },
+    );
+    // Normalize to the SDK envelope so callers can always read `.data`.
+    const envelope = result?.success
+      ? result
+      : { success: false, data: [], message: (result as any)?.message };
+    return decryptReadResult(
+      envelope,
+      ensureSchemaHotFlags(schema),
+      fieldEncryptionContext(schema, tenantId),
+      { clone: true },
+    );
+  }
+
+  async findById(collectionId: string, entryId: string, options: LocalApiOptions = {}) {
+    const { tenantId, bypassCache = false, disableErrors = false } = options;
+    // Canonical lowercase schema cache key — the legacy `${tenant}:${collectionId}`
+    // (no lowercase) always missed getSchema's lowercased key, guaranteeing a
+    // duplicate entry + wasted resolution on every findById.
+    const schema =
+      peekReadySchema(tenantId, collectionId) ||
+      (await this.getSchema(collectionId, tenantId).catch((err) => {
+        if (disableErrors && err.status === 404) return null;
+        throw err;
+      }));
+
+    if (!schema) return { success: true, data: null };
+
+    const effectivePublicationFilter = resolvePublicationFilter(
+      { user: options.user, system: options.system },
+      options.publicationFilter,
+    );
+    const cacheKey = `${tenantId || "global"}:collection:${schema._id}:${entryId}${publicationCacheSuffix(effectivePublicationFilter)}`;
+    const skipRequestCache = bypassCache || options.bypassRequestCache;
+
+    if (!skipRequestCache && hasRequestCache(cacheKey)) {
+      return decryptReadResult(
+        getRequestCache(cacheKey),
+        ensureSchemaHotFlags(schema),
+        fieldEncryptionContext(schema, tenantId),
+        { clone: true },
+      );
+    }
+
+    // 🚀 SYNC L1 HIT: Use synchronous L1 check instead of async L2 get.
+    // For findByIdRandom (10K distinct IDs), the async cacheService.get() costs
+    // ~5µs per miss just in microtask overhead — getSync eliminates that.
+    if (!bypassCache) {
+      const syncCached = cacheService.getSync?.<any>(cacheKey, (tenantId || undefined) as string);
+      if (syncCached !== undefined && syncCached !== null) {
+        CollectionsNamespace.setRequestCache(cacheKey, syncCached, schema._id as string, tenantId);
+        return decryptReadResult(
+          syncCached,
+          ensureSchemaHotFlags(schema),
+          fieldEncryptionContext(schema, tenantId),
+          { clone: true },
+        );
+      }
+    }
+
+    // Single-id hot path: direct loadOneById (no microtask batch delay)
+    return this.loadOneById(schema, entryId, {
+      ...options,
+      tenantId,
+      bypassCache,
+      effectivePublicationFilter,
+    });
+  }
+
+  /**
+   * Single-id hot path — findOne + optional widget pipeline (no microtask batch delay).
+   */
+  private async loadOneById(schema: Schema, entryId: string, options: any) {
+    const { tenantId, ttl, bypassCache } = options;
+    const collectionName = this.getCollectionName(schema._id as string);
+    const effectivePublicationFilter =
+      options.effectivePublicationFilter ||
+      resolvePublicationFilter(
+        { user: options.user, system: options.system },
+        options.publicationFilter,
+      );
+    // 🚀 DIRECT DB CALL: Direct findById bypasses findOne -> parseIdLookup overhead.
+    // Publication clamping is applied to the retrieved item so unpublished rows never
+    // escape to clamped callers (and empty result is cached under the publication suffix).
+    const crud = this._dbAdapter.crud as any;
+    const result =
+      typeof crud.findById === "function"
+        ? await crud.findById(collectionName, entryId as DatabaseId, {
+            tenantId: tenantId as DatabaseId,
+          })
+        : await crud.findOne(collectionName, { _id: entryId } as any, {
+            tenantId: tenantId as DatabaseId,
+          });
+
+    let item =
+      result.success && result.data
+        ? Array.isArray(result.data)
+          ? result.data[0]
+          : result.data
+        : null;
+
+    if (item && effectivePublicationFilter !== "all") {
+      if (item.status && item.status !== effectivePublicationFilter) {
+        item = null;
+      }
+    }
+
+    if (item) {
+      const hot = ensureSchemaHotFlags(schema);
+      if (hot._hasActiveWidgets) {
+        const payload = [{ ...item }];
+        await applyWidgetPipeline(schema, payload, {
+          dbAdapter: this._dbAdapter,
+          user: options.user || { _id: "system", role: "admin" },
+          type: "GET",
+          tenantId,
+          collectionName: schema.name,
+          skipValidation: options.skipValidation,
+          action: "findById",
+        });
+        item = payload[0] ?? item;
+      }
+
+      item._collection = (schema as any)._collectionMeta || {
+        id: schema._id,
+        name: schema.name,
+        label: schema.label,
+      };
+      (schema as any)._collectionMeta = item._collection;
+    }
+
+    const finalResult = { success: true, data: item || null };
+    const cacheKey = `${tenantId || "global"}:collection:${schema._id}:${entryId}${publicationCacheSuffix(effectivePublicationFilter)}`;
+
+    if (!bypassCache) {
+      // 🚀 FIRE-AND-FORGET L2: Don't await async cache write on the response path.
+      // L1 set is synchronous; L2 set is microtasked.
+      CollectionsNamespace.setRequestCache(cacheKey, finalResult, schema._id as string, tenantId);
+      if (item) {
+        cacheService
+          .set(
+            cacheKey,
+            finalResult,
+            ttl || 180,
+            (tenantId || undefined) as string,
+            CacheCategory.CONTENT,
+            // 🚀 Surgical invalidation: tag by the SPECIFIC doc so a write to
+            // this entry clears only this key — NOT all 10k per-id entries.
+            [`doc:${schema._id}:${entryId}`],
+          )
+          .catch(() => {});
+      } else {
+        cacheService.recordMiss(cacheKey, (tenantId || undefined) as string);
+      }
+    }
+
+    return decryptReadResult(
+      finalResult,
+      ensureSchemaHotFlags(schema),
+      fieldEncryptionContext(schema, tenantId),
+      { clone: true },
+    );
+  }
+
+  async create(collectionId: string, data: any, options: LocalApiOptions = {}) {
+    const { user, tenantId, system } = options;
+    if (!user && !system) throw new AppError("Authentication required", 401, "UNAUTHORIZED");
+    const peeked = peekReadySchema(tenantId, collectionId);
+    const schema = peeked
+      ? peeked
+      : PROFILE_WRITE_ENABLED
+        ? await profileSpan("ns:getSchema", () => this.schemaOf(collectionId, tenantId))
+        : await this.schemaOf(collectionId, tenantId);
+    const hot = ensureSchemaHotFlags(schema);
+
+    // 🛡️ ACTIVE SANITIZATION + hooks + write guard in one shared pass
+    const m1 = PROFILE_WRITE_ENABLED ? profileMark("ns:sanitize+validate") : null;
+    let entryData = prepareWritePayload(data, schema, hot, {
+      user,
+      system,
+      operation: "create",
+      tenantId,
+    });
+    if (isThenable(entryData)) entryData = await entryData;
+
+    const effectiveUser = system ? { _id: "system", role: "admin" } : user;
+
+    // 🚪 Publication gate: workflows with gatePublication block direct
+    // publishing of brand-new entries (no instance exists yet — the workflow
+    // must approve before publish). System writes bypass the gate.
+    if (!system && (data as { status?: string } | null)?.status === "publish") {
+      const workflowService = await getWorkflowServiceLazy();
+      await workflowService.assertPublishAllowed(
+        schema._id as string,
+        (tenantId as string | undefined) ?? undefined,
+        effectiveUser,
+      );
+    }
+
+    let finalData = triggerLifecycleHook(
+      this._dbAdapter,
+      "beforeSave",
+      collectionId,
+      entryData,
+      options,
+      schema,
+    );
+    if (isThenable(finalData)) finalData = await finalData;
+
+    const m2 = PROFILE_WRITE_ENABLED ? profileMark("ns:widgets") : null;
+    // Widget pipeline only when this payload actually hits a modifyRequest widget.
+    // DateTime is inlined in prepareWritePayload — skip the async round-trip.
+    if (hot._hasActiveWidgets && writeTouchesActiveWidgets(hot, finalData)) {
+      const payload = [finalData];
+      await applyWidgetPipeline(schema, payload, {
+        dbAdapter: this._dbAdapter,
+        user: effectiveUser,
+        type: "POST",
+        tenantId,
+        collectionName: schema.name,
+        skipValidation: options.skipValidation,
+        action: "create",
+        system,
+        skipSanitize: true,
+      });
+      finalData = payload[0] ?? finalData;
+    }
+    m2?.();
+
+    const collectionName = this.getCollectionName(schema._id as string);
+    const encCtx = fieldEncryptionContext(schema, tenantId);
+    finalData = await encryptWritePayload(finalData, hot, encCtx);
+    const m3 = PROFILE_WRITE_ENABLED ? profileMark("ns:persist") : null;
+    const result = await persistWithOutbox(
+      "create",
+      async (txOpts) =>
+        this._dbAdapter.crud.insert(collectionName, finalData, {
+          tenantId: tenantId as DatabaseId,
+          ...txOpts,
+        }),
+      schema,
+      tenantId,
+      effectiveUser,
+      (res) => String(res.data?._id ?? ""),
+      (res) => res.data,
+      { skipSideEffects: options.skipSideEffects },
+    );
+    m3?.();
+    m1?.();
+
+    const decryptedCreate = await decryptReadResult(result, hot, encCtx, { clone: true });
+    if (result && result.success && result.data) {
+      const createdId = result.data!._id as string;
+      // ⚡ Response-path: never await side effects — concurrent create RPS depends on this
+      schedulePostWrite(
+        this._dbAdapter,
+        "create",
+        schema,
+        collectionId,
+        tenantId,
+        createdId,
+        decryptedCreate?.data ?? result.data,
+        effectiveUser,
+        options,
+      );
+      if (!shouldSkipWriteSideEffects(options)) {
+        scheduleDefaultListWarm(schema._id as string, tenantId, effectiveUser, (warmOpts) =>
+          this.find(collectionId, { tenantId: warmOpts.tenantId, user: warmOpts.user }),
+        );
+      }
+    }
+
+    return decryptedCreate;
+  }
+
+  async update(collectionId: string, entryId: string, data: any, options: LocalApiOptions = {}) {
+    const { user, tenantId, system } = options;
+    if (!user && !system) throw new AppError("Authentication required", 401, "UNAUTHORIZED");
+    const peekedUpdate = peekReadySchema(tenantId, collectionId);
+    const schema = peekedUpdate
+      ? peekedUpdate
+      : PROFILE_WRITE_ENABLED
+        ? await profileSpan("ns:getSchema", () => this.schemaOf(collectionId, tenantId))
+        : await this.schemaOf(collectionId, tenantId);
+    const hot = ensureSchemaHotFlags(schema);
+
+    const m1u = PROFILE_WRITE_ENABLED ? profileMark("ns:sanitize+validate") : null;
+    let updateData = prepareWritePayload(data, schema, hot, {
+      user,
+      system,
+      operation: "update",
+      tenantId,
+      entryId,
+    });
+    if (isThenable(updateData)) updateData = await updateData;
+
+    const effectiveUser = system ? { _id: "system", role: "admin" } : user;
+
+    // 🚪 Publication gate: workflows with gatePublication only allow status
+    // "publish" while the entry's workflow instance is in a final state.
+    // System writes (scheduled publishing, sync, imports) bypass the gate.
+    if (!system && (data as { status?: string } | null)?.status === "publish") {
+      const workflowService = await getWorkflowServiceLazy();
+      await workflowService.assertPublishAllowed(
+        schema._id as string,
+        (tenantId as string | undefined) ?? undefined,
+        effectiveUser,
+        entryId,
+      );
+    }
+
+    let finalData = triggerLifecycleHook(
+      this._dbAdapter,
+      "beforeSave",
+      collectionId,
+      updateData,
+      options,
+      schema,
+    );
+    if (isThenable(finalData)) finalData = await finalData;
+
+    const m2u = PROFILE_WRITE_ENABLED ? profileMark("ns:widgets") : null;
+    if (hot._hasActiveWidgets && writeTouchesActiveWidgets(hot, finalData)) {
+      const payload = [finalData];
+      await applyWidgetPipeline(schema, payload, {
+        dbAdapter: this._dbAdapter,
+        user: effectiveUser,
+        type: "PATCH",
+        tenantId,
+        collectionName: schema.name,
+        skipValidation: options.skipValidation,
+        action: "update",
+        system,
+        skipSanitize: true,
+      });
+      finalData = payload[0] ?? finalData;
+    }
+    m2u?.();
+
+    // 🛡️ REVISION TRACKING: for revision-enabled collections, snapshot the entry
+    // BEFORE the write so the update can persist the previous version. Best-effort
+    // — a failed snapshot must never fail the update itself.
+    const revisionEnabled = schema.revision === true && !options.skipSideEffects;
+    let previousSnapshot: any = null;
+    if (revisionEnabled) {
+      try {
+        const prev = await this._dbAdapter.crud.findOne(
+          this.getCollectionName(schema._id as string),
+          { _id: entryId } as any,
+          { tenantId: tenantId as DatabaseId },
+        );
+        if (prev.success && prev.data) {
+          previousSnapshot = prev.data;
+        }
+      } catch {
+        /* best-effort */
+      }
+    }
+
+    const encCtx = fieldEncryptionContext(schema, tenantId);
+    finalData = await encryptWritePayload(finalData, hot, encCtx);
+    const m3u = PROFILE_WRITE_ENABLED ? profileMark("ns:persist") : null;
+    const result = await persistWithOutbox(
+      "update",
+      async (txOpts) =>
+        this._dbAdapter.crud.update(
+          this.getCollectionName(schema._id as string),
+          entryId as DatabaseId,
+          finalData,
+          { tenantId: tenantId as DatabaseId, ...txOpts },
+        ),
+      schema,
+      tenantId,
+      effectiveUser,
+      () => entryId,
+      (res) => res.data,
+      { skipSideEffects: options.skipSideEffects },
+    );
+    m3u?.();
+    m1u?.();
+
+    const decryptedUpdate = await decryptReadResult(result, hot, encCtx, { clone: true });
+    if (result && result.success && result.data) {
+      // 🛡️ REVISION TRACKING: persist the pre-write snapshot (fire-and-forget).
+      if (revisionEnabled && previousSnapshot) {
+        void this.recordRevision(entryId, previousSnapshot, effectiveUser, tenantId);
+      }
+      // ⚡ Response-path: never await side effects — concurrent update RPS depends on this
+      schedulePostWrite(
+        this._dbAdapter,
+        "update",
+        schema,
+        collectionId,
+        tenantId,
+        entryId,
+        decryptedUpdate?.data ?? result.data,
+        effectiveUser,
+        options,
+      );
+      if (!shouldSkipWriteSideEffects(options)) {
+        scheduleDefaultListWarm(schema._id as string, tenantId, effectiveUser, (warmOpts) =>
+          this.find(collectionId, { tenantId: warmOpts.tenantId, user: warmOpts.user }),
+        );
+      }
+    }
+
+    return decryptedUpdate;
+  }
+
+  /**
+   * Persist a revision snapshot for a revision-enabled collection update.
+   * Fire-and-forget — revision history must never block or fail the write path.
+   * The version is derived from the latest existing revision (+1).
+   */
+  private async recordRevision(
+    entryId: string,
+    previousData: any,
+    user: any,
+    tenantId: DatabaseId | null | undefined,
+  ): Promise<void> {
+    try {
+      const history = await this._dbAdapter.content.revisions.getHistory(entryId as DatabaseId, {
+        page: 1,
+        pageSize: 1,
+      });
+      const items = history.success ? history.data.items : [];
+      const latestVersion = items.length > 0 ? items[0].version : 0;
+      await this._dbAdapter.content.revisions.create({
+        contentId: entryId as DatabaseId,
+        authorId: (user?._id || "system") as DatabaseId,
+        data: previousData,
+        version: latestVersion + 1,
+        tenantId: tenantId ?? undefined,
+      });
+    } catch (err) {
+      logger.debug(
+        `[Revisions] Failed to record revision for ${entryId}: ${(err as Error)?.message ?? err}`,
+      );
+    }
+  }
+
+  async delete(collectionId: string, entryId: string, options: LocalApiOptions = {}) {
+    const { user, tenantId, system } = options;
+    if (!user && !system) throw new AppError("Authentication required", 401, "UNAUTHORIZED");
+    const schema = await this.schemaOf(collectionId, tenantId);
+
+    const effectiveUser = system ? { _id: "system", role: "admin" } : user;
+
+    const result = await persistWithOutbox(
+      "delete",
+      async (txOpts) =>
+        this._dbAdapter.crud.delete(
+          this.getCollectionName(schema._id as string),
+          entryId as DatabaseId,
+          {
+            tenantId: tenantId as DatabaseId,
+            ...txOpts,
+          },
+        ),
+      schema,
+      tenantId,
+      effectiveUser,
+      () => entryId,
+      () => null,
+      { skipSideEffects: options.skipSideEffects },
+    );
+
+    if (result && result.success) {
+      // ⚡ Response-path: never await side effects — concurrent delete RPS depends on this
+      schedulePostWrite(
+        this._dbAdapter,
+        "delete",
+        schema,
+        collectionId,
+        tenantId,
+        entryId,
+        null,
+        effectiveUser,
+        options,
+      );
+      if (!shouldSkipWriteSideEffects(options)) {
+        scheduleDefaultListWarm(schema._id as string, tenantId, effectiveUser, (warmOpts) =>
+          this.find(collectionId, { tenantId: warmOpts.tenantId, user: warmOpts.user }),
+        );
+      }
+    }
+
+    return result;
+  }
+}

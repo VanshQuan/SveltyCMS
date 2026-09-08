@@ -1,0 +1,380 @@
+---
+path: "docs/tests/testing-scripts.mdx"
+title: "Testing Scripts Catalog"
+description: "Complete catalog of all testing-related scripts in scripts/ — purpose, invocation, git hook/CI integration (July 2026)."
+order: 15
+icon: "🔧"
+author: "SveltyCMS Team"
+created: "2026-07-04"
+updated: "2026-08-07"
+tags:
+  - "testing"
+  - "scripts"
+  - "ci"
+  - "git-hooks"
+---
+
+# Testing Scripts Catalog
+
+## CI log policy (quiet by default)
+
+GitHub Actions sets `CI=true` and the workflow sets `CI_QUIET=1`. Together they keep signal high without dropping failure detail:
+
+| Layer                              | Quiet behavior                                                                              | Failure detail                                                                 |
+| ---------------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Bun package cache                  | `actions/cache/restore` + `save` only on miss + success; key `bun-v3-$OS-$bunVer-$lockHash` | digest-mismatch is non-fatal; next successful install re-saves a clean archive |
+| oxfmt / oxlint                     | `::group::` collapsed logs; oxlint `--quiet --format=github`                                | full tool exit + annotations on fail                                           |
+| Unit (`vitest`)                    | `reporters: [dot, github-actions]`, `silent: "passed-only"`                                 | failed test logs + annotations                                                 |
+| Integration (`run-integration.ts`) | `bun test --only-failures`; server stdout buffered                                          | failure list, summary box, preview log tail on fail                            |
+| E2E (`playwright`)                 | `dot` + `github` + HTML/JSON artifacts                                                      | expanded failures, `ci-report-playwright.ts` step summary                      |
+
+Local defaults stay verbose. Force quiet locally with `CI_QUIET=1` or `CI=true`.
+
+### Integration / E2E build harness (not Docker alone)
+
+Docker DBs (`docker compose … up`) are necessary for multi-DB matrix runs, but **not sufficient**.
+The production preview must include `/api/testing` (seed/reset). A normal `bun run build` **strips** that handler.
+
+| Command                    | Behavior                                                                     |
+| -------------------------- | ---------------------------------------------------------------------------- |
+| `bun run test:integration` | Always builds with `COMPILE_ALL_ADAPTERS=true`                               |
+| `… --no-build` (local)     | Reuses `build/` **if** harness present; **auto-rebuilds** if deploy-stripped |
+| `… --strict-no-build` / CI | Fail if harness missing (no silent rebuild)                                  |
+
+Markers checked: `Unauthorized: Testing endpoints are disabled`, `[TestingHandler]` (same as `verify-prod-build-backdoor --mode=bench`).
+
+## Git Hooks
+
+### `.githooks/pre-commit` — Format → Lint → Unit (~40s)
+
+Runs before every commit. Steps:
+
+1. **Database safety** — `scripts/check-test-db-safety.ts`
+2. **Format + lint** — `bun run check` (oxfmt + oxlint)
+3. **Lint-staged** — `bun run gate:fast`
+4. **Unit tests** — `vitest run` (skipped if only docs changed)
+
+### `.githooks/pre-push` — Build → SQLite Integration (~1.5 min)
+
+Runs before every push. Steps:
+
+1. **Production build** — `COMPILE_ALL_ADAPTERS=true bun run build`
+2. **Quality Gate** — `bun run check`
+3. **CVE Audit** — `bun audit`
+4. **Secret Misuse Scan** — `bun run scripts/scan-secret-misuse.ts`
+5. **Tenant Isolation Gate** — `bun run test:tenant`
+6. **SQLite integration** — `bun test tests/integration/`
+
+### Full DB Matrix (Local Pre-CI) — ~8 min
+
+For 1:1 CI parity, run all 4 databases locally before pushing:
+
+```bash
+bun run test:matrix          # SQLite + MongoDB + MariaDB + PostgreSQL
+```
+
+Requires Docker containers running (`docker compose -f tests/docker-compose.yml --profile '*' up -d`).
+Covers 2380 tests across all adapters — the same matrix CI runs.
+
+---
+
+## Core Testing Scripts
+
+### `scripts/run-e2e.ts` — E2E Test Runner
+
+Unified E2E runner with CI and dev modes.
+
+```bash
+bun run test:e2e                        # CI mode (production build, :4173)
+bun run test:e2e:dev                    # Dev mode (Vite dev server, :5173)
+bun run test:e2e:quick                  # CI mode, reuse existing build
+bun run test:e2e --dev --grep=login     # Dev mode + filter
+```
+
+**CI mode**: Builds with `COMPILE_ALL_ADAPTERS=true`, starts production preview, runs wizard → auth-setup → chromium.
+**Dev mode**: Starts Vite dev server, runs Playwright directly. Faster but not CI-identical.
+
+### `scripts/test-doctor.ts` — Local Health Check
+
+Prints the real local vs CI gate map, then runs unit + SQLite integration.
+
+```bash
+bun run test:doctor                 # unit + SQLite integration
+bun run test:doctor --list          # gate map only
+bun run test:doctor --unit-only     # skip integration
+bun run test:doctor --with-e2e      # also Playwright (CI-parity, reuses build)
+```
+
+**Used by**: Manual developer workflow (not in hooks/CI). Prefer this over outdated `ci:local` / `verify:*` names (those scripts do not exist).
+
+### `scripts/test-smart.ts` — Smart Test Orchestrator
+
+Git-diff-aware test selector. Analyzes changed files and selects the optimal subset of tests.
+
+```bash
+bun run test:smart                     # Auto-detect from git diff
+bun run test:smart --all               # Run everything
+bun run test:smart --list              # Dry-run
+bun run test:smart --suite=auth        # Filter by suite label
+```
+
+**Used by**: Manual developer workflow (not in hooks/CI). Unit suites use Vitest; integration uses `bun test` + harness.
+
+### Security unit suite (package script)
+
+Focused hooks security regression (not a separate `security-regression.ts` file):
+
+```bash
+bun run test:security
+# equivalent: vitest run defense-in-depth + authentication + authorization + file-server-tenant
+```
+
+**Used by**: Manual; covered by full unit suite on pre-commit.
+
+### Vitest 5 Developer Workflows (package scripts)
+
+Vitest 5 introduces high-performance developer ergonomics and smart change execution:
+
+```bash
+bun run test:watch                     # Interactive TDD watch mode with instant HMR
+bun run test:ui                        # Launches Vitest 5 Web UI with visual trace viewer
+bun run test:changed                   # Smart: evaluates git diff and runs only impacted suites
+bun run test:repeat 5 <test-path>      # Stress-test concurrency, rate limits, and flaky tests
+bun run test:unit:coverage             # Enterprise P0 coverage gate (outputs to .vitest/coverage)
+```
+
+**Features enabled**:
+
+- `fsModuleCache: true`: Filesystem caching of transformed modules for sub-second test turnaround.
+- Top-level `forks: { execArgv: ["--enable-source-maps"] }`: Accurate TypeScript stack traces across forks.
+- Isolated output directory: Reports and coverage stored in `.vitest/` (ignored by git).
+
+---
+
+## Security Scripts
+
+### `scripts/security-audit.ts` — Unified Security Audit
+
+Master runner that dispatches to engines in `scripts/security/` plus the static scanners:
+
+```bash
+bun run security                        # Scanner against localhost:4173
+bun run security --auth                 # Build + start server + seed + authenticated scan
+bun run security --ci                   # CI mode (exit 1 on findings)
+bun run security --base=http://localhost:3000
+bun run security --secret-scan          # Also run secret misuse scanner
+bun run security --slop                 # Also run code quality slop scanner
+bun run security --cve                  # Also run dependency CVE audit (SBOM refresh + bun audit)
+bun run security --full                 # Run ALL scanners (auth + secret + slop + cve)
+```
+
+**Engines**:
+
+- `scripts/security/auth.ts` — Authenticated audit (builds, starts production server, seeds admin, runs scanner with `--auth`)
+- `scripts/security/scanner.ts` — OWASP A01-A07 probes (auth bypass, injection, headers, rate limiting, info leakage)
+- `bun audit` (via `--cve`/`--full`) — dependency CVE check across the full lockfile tree, after refreshing `sbom.json`
+
+### `scripts/scan-secret-misuse.ts` — Secret Misuse Scanner
+
+Static analysis scanner that detects hardcoded credentials, API keys, and secret exposure in non-server files. 6 detection rules including **comparison-based backdoor detection** (Rule 6: catches `password === "hardcoded"` patterns that assignment-based scanners miss). Known key formats cover AWS, GitHub, Stripe, Google, OpenAI/Anthropic (`sk-`), Slack (`xox*-`), Hugging Face (`hf_`), JWTs, and private key blocks.
+
+```bash
+bun run scripts/scan-secret-misuse.ts          # scan all files
+bun run scripts/scan-secret-misuse.ts --strict # CI mode (exit 1 on findings)
+```
+
+### `scripts/scan-security-risk.ts` — Global Security Risk Scanner (entire `src/`)
+
+Static scanner for vulnerability classes in OUR code — the layer no external database can cover. Scans all files under `src/` (vendored `src/types/`, `node_modules`, generated `src/paraglide/` excluded):
+
+| Rule                         | Severity | Detects                                                                                                                |
+| ---------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------- |
+| SQL value interpolation      | error    | `'${value}'` inside SQL strings — the `author__not_in` SQLi class; values must be bound parameters or tagged templates |
+| SQL string concatenation     | error    | `"..." + value + "..."` SQL assembly                                                                                   |
+| MongoDB JS execution         | error    | `$where` / `$function` / `$accumulator` — server-side JS (RCE class)                                                   |
+| Dynamic code execution       | error    | `eval(` / `new Function(` (RCE sinks; `bun:sqlite` import workaround allowlisted)                                      |
+| SvelteKit CSRF disabled      | error    | `csrf: { checkOrigin: false }` / `csrf: false`                                                                         |
+| Non-httpOnly cookie          | error    | `httpOnly: false` (double-submit CSRF cookie exempted by design)                                                       |
+| Shell command interpolation  | warning  | `exec(\`...${...}\`)` — use execFile/spawn with an args array (`.exec()` DB methods, WAF regex literals excluded)      |
+| Path interpolation           | warning  | `fs.*` with member-access `${x.y}` paths or quote-concat — path-traversal class; guarded files + bare locals pass      |
+| SSRF                         | warning  | `fetch()` with request-derived URL (configured endpoints like `ollamaUrl`/`this.baseUrl` pass)                         |
+| XSS sinks                    | warning  | `innerHTML=`, `outerHTML=`, `insertAdjacentHTML(`, `document.write(`                                                   |
+| Regex interpolation          | warning  | `new RegExp(\`...${x}...\`)` without escaping (escape helpers, `\$&` idiom, constants, `\\${` pass)                    |
+| SQL identifier interpolation | warning  | Unescaped identifiers (skipped in files with `assertSafeSqlIdentifier`-style guards)                                   |
+
+```bash
+bun run scripts/scan-security-risk.ts          # scan (warnings tolerated)
+bun run scripts/scan-security-risk.ts --strict # exit 1 on errors (pre-commit)
+```
+
+### `scripts/scan-osv.ts` — Global Vulnerability Check (OSV.dev)
+
+Queries **OSV.dev** — the global aggregator that merges GitHub Advisory DB (GHSA), NVD, and 20+ other feeds — with the purls from `sbom.json` (CycloneDX, kept in lockstep by pre-commit). One batch request covers the whole dependency tree, including SvelteKit/Svelte/Vite advisories. Results cached 24h under `node_modules/.cache/osv-cache.json`.
+
+```bash
+bun run scripts/scan-osv.ts          # check (24h cache)
+bun run scripts/scan-osv.ts --strict # exit 1 on any vulnerability
+bun run scripts/scan-osv.ts --fresh  # ignore cache
+```
+
+### `scripts/risk-audit.ts` — Full Commit Risk Audit
+
+Runs all fast, stateless security checks in one gate (wired into `.githooks/pre-commit`):
+
+1. `scan-security-risk --strict` — global scan: DB (4 adapters) + command injection, eval, paths, SSRF, XSS + SvelteKit config
+2. `scan-secret-misuse --strict` — hardcoded credentials
+3. `slop-scanner --strict` — XSS/RTL/security architecture
+4. `bun audit` — GitHub Advisory DB (npm tree)
+5. `scan-osv --strict` — OSV.dev global database
+
+```bash
+bun run risk:audit
+```
+
+### `scripts/verify-prod-build-backdoor.ts` — Build Backdoor Verification
+
+Scans build output to confirm `/api/testing` handler is present (bench builds) or stripped (deploy builds).
+
+```bash
+bun run scripts/verify-prod-build-backdoor.ts         # deploy mode
+bun run scripts/verify-prod-build-backdoor.ts --mode=bench
+```
+
+### `scripts/probe-deploy-testing-api.ts` — Deploy Backdoor Probe (A01)
+
+Full end-to-end probe: builds deploy-safe artifact, scans chunks, starts preview server, live-probes `/api/testing`.
+
+```bash
+bun run scripts/probe-deploy-testing-api.ts
+bun run scripts/probe-deploy-testing-api.ts --skip-build
+```
+
+**Used by**: CI whitebox job (`07-deploy-backdoor`).
+
+---
+
+## Safety & Validation
+
+### `scripts/check-test-db-safety.ts` — Production DB Guard
+
+Blocks unsafe `config/private.test.ts` before any tests run. DB names must contain `test`, `bench`, `e2e`, or end in `_functional`.
+
+```bash
+bun run scripts/check-test-db-safety.ts
+```
+
+**Used by**: Pre-commit hook.
+
+### `scripts/slop-scanner.ts` — Code Quality + Security Architecture Scanner
+
+Svelte 5 + Accessibility + RTL + Quality + Security scanner. Catches issues oxlint doesn't cover.
+
+**Code quality checks:** XSS (`{@html}`), RTL compatibility, button variant validation, file naming, duplicate content, stale-placeholder tracking.
+
+**Security architecture checks (6 rules):**
+
+| Rule                  | Detects                                                                             |
+| --------------------- | ----------------------------------------------------------------------------------- |
+| CORS reflection       | `Access-Control-Allow-Origin` reflecting arbitrary `Origin` header with credentials |
+| Broad MIME types      | File upload allowlist accepting `application/*` without specific subtypes           |
+| Fast hash for secrets | `createHash("sha256")` used on API keys/tokens — should use HMAC                    |
+| System user backdoor  | `user._id === "system" && password === "hardcoded"` patterns                        |
+| Request body clone    | `request.clone()` without size limits — OOM risk                                    |
+
+**Client/security consistency checks:**
+
+| Check                 | Detects                                                                                                                                                        |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Raw SQL identifiers   | SQL DML/DDL template literals interpolating identifiers without validation (skips Drizzle `sql.raw`/`sql.identifier` and files that already guard identifiers) |
+| Mutating fetch + CSRF | `fetch("/api/...", { method: POST/PATCH/PUT/DELETE })` without `X-CSRF-Token` — prefer `fetchApi`/`clientJsonHeaders`                                          |
+| RegExp interpolation  | `new RegExp(\`...${input}...\`)` without escaping — regex injection / ReDoS footgun                                                                            |
+
+Use `slop:suppress` in a comment to skip a file.
+
+```bash
+bun run slop                           # Check all files
+bun run slop --strict                  # CI mode (fail on findings)
+bun run scripts/slop-scanner.ts --fix  # Check + autofix
+```
+
+---
+
+## Bundle Analysis
+
+### `scripts/check-bundle-size.ts` — CI Bundle Gate
+
+Fails if TipTap/prosemirror leaks into the critical entry chunk or if entry/layout chunks exceed size thresholds.
+
+```bash
+bun run scripts/check-bundle-size.ts
+```
+
+**Used by**: CI build job.
+
+### `scripts/bundle-stats.ts` — Bundle Analytics
+
+Detailed bundle report with gzip/brotli sizes, history tracking.
+
+```bash
+bun run build:stats
+```
+
+---
+
+## Benchmark Scripts
+
+### `scripts/run-core-benchmarks.ts` — CI-Core Benchmarks
+
+Runs core benchmarks for one or all adapters.
+
+```bash
+bun run scripts/run-core-benchmarks.ts              # All adapters
+bun run scripts/run-core-benchmarks.ts --db=sqlite  # Single adapter
+```
+
+**Used by**: CI `bench-core` job.
+
+### `scripts/verify-benchmark-local.ts` — Local Benchmark Preflight
+
+Blocks local benchmarks when live config uses test DB names.
+
+```bash
+bun run verify:benchmark-local
+```
+
+---
+
+## Other Scripts
+
+| Script                       | Purpose                                                  |
+| ---------------------------- | -------------------------------------------------------- |
+| `create-app.ts`              | Scaffolds new SveltyCMS project (`npx create-sveltycms`) |
+| `generate-sbom.ts`           | Generates software bill of materials                     |
+| `generate-core-countries.js` | Generates country list for address fields                |
+| `git-safe.ts`                | Hardened git wrapper (blocks `--no-verify`)              |
+| `setup-system.ts`            | One-time system initialization                           |
+| `upgrade.ts`                 | Full SveltyCMS version upgrade (`bun run upgrade`)       |
+| `ci-report-all-green.ts`     | CI dashboard for all-green gate (ci.yml)                 |
+| `ci-report-playwright.ts`    | CI reporter for Playwright results (ci.yml)              |
+
+## Git Hook Flow
+
+```
+git commit
+  └─ pre-commit
+       ├─ check-test-db-safety.ts
+       ├─ bun run check (format + lint)
+       ├─ lint-staged
+       └─ test:unit
+
+git push
+  └─ pre-push
+       ├─ COMPILE_ALL_ADAPTERS=true bun run build
+       └─ bun test tests/integration/
+```
+
+## Related
+
+- [Testing Index](./index.mdx)
+- [Benchmark Matrix](./benchmark-matrix.mdx)
+- [Git Workflow](./git-workflow.mdx)

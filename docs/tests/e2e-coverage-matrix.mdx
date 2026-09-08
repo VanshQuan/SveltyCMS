@@ -1,0 +1,282 @@
+---
+path: "docs/tests/e2e-coverage-matrix.mdx"
+title: "E2E Coverage Matrix"
+description: "A comprehensive route-based analysis of E2E coverage and identified gaps in SveltyCMS."
+order: 10
+icon: "mdi:table-large"
+author: "SveltyCMS Team"
+created: "2026-06-13"
+updated: "2026-08-09"
+tags:
+  - "testing"
+  - "e2e"
+  - "coverage"
+  - "playwright"
+---
+
+# E2E Coverage Matrix — Route-Based Analysis
+
+> Generated: 2026-06-19 (spec count refreshed 2026-08-09)
+> Total routes: 10 (matrix scope below) | Total E2E specs: **44 on disk** | CI projects: **5** (wizard · firstuser · oauth · auth-setup · chromium)
+
+## 1. `/setup` — Setup Wizard (24 components, 6 tested)
+
+| Feature                                         | Component                  | Tested? | Test File                |
+| ----------------------------------------------- | -------------------------- | ------- | ------------------------ |
+| DB type selection (sqlite/mongo/maria/postgres) | `database-config.svelte`   | ✅      | `setup-wizard.spec.ts`   |
+| DB connection test (success)                    | `connection-status.svelte` | ✅      | setup-wizard             |
+| DB connection test (bad host)                   | `connection-status.svelte` | ✅      | setup-wizard             |
+| Admin account creation (valid)                  | `admin-config.svelte`      | ✅      | setup-wizard (full flow) |
+| Admin password mismatch                         | `admin-config.svelte`      | ✅      | setup-wizard             |
+| SMTP invalid host error                         | `email-config.svelte`      | ✅      | setup-wizard             |
+| **Preset/template selection**                   | `preset-selector.svelte`   | ❌      | —                        |
+| **System config (site name, media folder)**     | `system-config.svelte`     | ❌      | —                        |
+
+| Feature                                    | Component                 | Tested? | Test File     |
+| ------------------------------------------ | ------------------------- | ------- | ------------- |
+| **SMTP test email (valid config)**         | `email-config.svelte`     | ❌      | —             |
+| **Review step verification**               | `review-config.svelte`    | ❌      | —             |
+| **Back navigation (return to previous)**   | `setup-navigation.svelte` | ❌      | —             |
+| **OAuth config during setup**              | setup server              | ❌      | —             |
+| **Demo mode detection**                    | `+page.svelte`            | ❌      | —             |
+| **Multi-DB provisioning (Mongo/Maria/PG)** | full flow                 | ❌      | Commented out |
+| **Config write permissions error**         | `write-private-config.ts` | ❌      | —             |
+| **Cookie consent during setup**            | `CookieConsent` plugin    | ⚠️      | Flaky         |
+
+**Coverage: 6/16 features (37%)**
+
+---
+
+## 2. `/login` — Authentication (4 components, 6 specs)
+
+| Feature                               | Test File               | Status         |
+| ------------------------------------- | ----------------------- | -------------- |
+| Login with valid credentials          | `login.spec.ts`         | ✅             |
+| Logout                                | `login.spec.ts`         | ✅             |
+| Sign Up (first user)                  | `login/signup.spec.ts`  | ⚠️ Broken      |
+| Forgot password flow                  | `login/signup.spec.ts`  | ⚠️ Broken      |
+| OAuth button visibility               | `login/oauth.spec.ts`   | ⚠️ Skips       |
+| OAuth redirect mock                   | `login/oauth.spec.ts`   | ✅             |
+| OAuth error handling                  | `login/oauth.spec.ts`   | ✅             |
+| Axe accessibility audit               | `accessibility.spec.ts` | ⚠️ 1 violation |
+| Keyboard focus trap                   | `accessibility.spec.ts` | ✅ Fixed       |
+| RTL layout audit                      | `accessibility.spec.ts` | ⚠️ 1 violation |
+| Login branding (public theme API)     | `branding.spec.ts`      | ✅             |
+| Expired reset-token toast             | `extended-auth.spec.ts` | ✅             |
+| **2FA/TOTP flow**                     | —                       | ❌             |
+| **SAML SSO login**                    | —                       | ❌             |
+| **Rate limiting (5 failed attempts)** | —                       | ❌             |
+| **Account lockout (15 min)**          | —                       | ❌             |
+| **Session timeout warning**           | —                       | ❌             |
+| **"Remember me" persistent session**  | —                       | ❌             |
+
+**Coverage: 10/16 features (62%)**
+
+---
+
+## 3. `/user` — User Profile & Management (7 specs + control map)
+
+> Full 1:1 control map: [routes/user.mdx](./routes/user.mdx) (updated 2026-07-18).
+> Product fixes: batch self-delete, CSRF on remotes/GDPR, permissions display, sessions UI.
+
+| Feature                        | Test File                        | Status                                                 |
+| ------------------------------ | -------------------------------- | ------------------------------------------------------ |
+| View profile                   | `user/account-smoke.spec.ts`     | ✅                                                     |
+| Edit avatar                    | `user/profile.spec.ts`           | ✅ (fixture `testthumb.png` committed + hard-required) |
+| Delete avatar                  | `user/profile.spec.ts`           | ✅ serial (button hard-asserted; no soft-skip)         |
+| Edit user details              | `user/profile.spec.ts`           | ✅                                                     |
+| Appearance settings link       | `user/profile.spec.ts`           | ✅                                                     |
+| Registration token workflow    | `user/profile.spec.ts`           | ⚠️                                                     |
+| Toggle token/list visibility   | `user/profile.spec.ts`           | ✅                                                     |
+| Read/edit user (admin)         | `user/management.spec.ts`        | ✅                                                     |
+| Delete/block/unblock (admin)   | `user/management.spec.ts`        | ✅                                                     |
+| Invite user via email          | `user/management-invite.spec.ts` | ✅                                                     |
+| Auth preference toggles        | `user/complete-coverage.spec.ts` | ✅                                                     |
+| Admin table search/sort        | `user/complete-coverage.spec.ts` | ✅                                                     |
+| Privacy modal open/close       | `user/complete-coverage.spec.ts` | ✅ (`privacy-data-btn`)                                |
+| Active sessions refresh        | `user/complete-coverage.spec.ts` | ✅                                                     |
+| **Password change (full)**     | `user/p0-journeys.spec.ts`       | ✅ editor verify→set→re-login                          |
+| **Non-admin profile**          | `user/p0-journeys.spec.ts`       | ✅ AdminArea hidden                                    |
+| **Token edit/delete (seeded)** | `user/p0-journeys.spec.ts`       | ✅ no soft-skip                                        |
+| **2FA setup / enroll**         | `user/coverage-100.spec.ts`      | ✅ USE_2FA + TOTP                                      |
+| **GDPR export / anonymize**    | `user/coverage-100.spec.ts`      | ✅ download + secondary wipe                           |
+| **RTC prefs persistence**      | `user/coverage-100.spec.ts`      | ✅ toggle + reload                                     |
+| **Permissions badges**         | `user/coverage-100.spec.ts`      | ✅ admin list                                          |
+| **Pagination (11+ users)**     | `user/coverage-100.spec.ts`      | ✅ bulk-create-users                                   |
+| **Identity email/role/id**     | `user/coverage-100.spec.ts`      | ✅                                                     |
+
+**Coverage: 100% of `/user` control map** — see [routes/user.mdx](./routes/user.mdx)
+
+---
+
+## 3b. `/dashboard` — Shell (widget catalog varies per install)
+
+> Full control map: [routes/dashboard.mdx](./routes/dashboard.mdx).  
+> **Never assert a fixed widget list** — core + plugins differ by install.
+
+| Feature                           | Test File                       | Status                                                 |
+| --------------------------------- | ------------------------------- | ------------------------------------------------------ |
+| Page shell + title                | `dashboard/dashboard.spec.ts`   | ✅                                                     |
+| Empty state **or** widget grid    | same                            | ✅ install-dependent                                   |
+| Add widget menu                   | same                            | ✅ if catalog has free widgets                         |
+| Widget search filter              | same                            | ✅ nonsense → no results                               |
+| Reset layout                      | same                            | ✅                                                     |
+| AI toggle present                 | same                            | ✅ no live MCP required                                |
+| Plugin slot                       | same                            | ✅ attached                                            |
+| Dashboard APIs (health/metrics/…) | integration `dashboard.test.ts` | ✅                                                     |
+| Drag-reorder E2E                  | —                               | 🟢 Low (keyboard reorder exists; pointer DnD optional) |
+
+**Coverage: shell 100%** (per-widget UI content = opt-in, not part of shell contract)
+
+---
+
+## 4. `/config/collectionbuilder` (1 E2E spec: shell + structure + golden)
+
+| Feature                                 | Test File                          | Status |
+| --------------------------------------- | ---------------------------------- | ------ |
+| Shell: open builder + new editor        | `builder.spec.ts` shell            | ✅     |
+| Golden: schema → entry → API            | `builder.spec.ts` golden           | ✅     |
+| Collections list auth                   | integration `collection-structure` | ✅     |
+| Structure persistence                   | integration `collectionbuilder/*`  | ✅     |
+| Pure tree/slug utils                    | unit `collectionbuilder-utils`     | ✅     |
+| Empty state / multi-spec sprawl         | _demoted (ADR: one golden)_        | —      |
+| Field reordering / relation / templates | not P0                             | ❌     |
+
+---
+
+## 5. `/config/*` — System Configuration (13 specs)
+
+| Route                       | Feature                          | Test File                               | CI Project | Status |
+| --------------------------- | -------------------------------- | --------------------------------------- | ---------- | ------ |
+| `/config/system-settings`   | Cache repair                     | `system/settings.spec.ts`               | chromium   | ✅     |
+| `/config/access-management` | Roles, permissions, save gating  | `config/access-management.spec.ts`      | chromium   | ✅     |
+| `/config/access-management` | Permission matrix (system)       | `system/permissions.spec.ts`            | chromium   | ✅     |
+| `/config/access-management` | RBAC (admin/dev/editor)          | `system/rbac.spec.ts`                   | chromium   | ✅     |
+| `/config/access-management` | Permission removal blocks API+UI | `system/permission-enforcement.spec.ts` | chromium   | ✅     |
+| `/config/webhooks`          | List, create form, delivery logs | `config/webhooks.spec.ts`               | chromium   | ✅     |
+| `/config/automations`       | Workflow builder smoke           | `config/automations.spec.ts`            | chromium   | ✅     |
+| `/config/migration`         | Smart migration smoke            | `config/data-management.spec.ts`        | chromium   | ✅     |
+
+| Route                   | Feature                                   | Test File                                                                         | CI Project | Status |
+| ----------------------- | ----------------------------------------- | --------------------------------------------------------------------------------- | ---------- | ------ |
+| `/config/sync`          | Sync settings smoke                       | `config/data-management.spec.ts`                                                  | chromium   | ✅     |
+| `/config/redirects`     | Create / search / delete                  | `config/redirects.spec.ts`                                                        | chromium   | ✅     |
+| `/config/monitor`       | Stats + service health                    | `config/operations.spec.ts`                                                       | chromium   | ✅     |
+| `/config/queue`         | Stats + status filter URL                 | `config/operations.spec.ts`                                                       | chromium   | ✅     |
+| `/config/webhooks`      | Modal + logs shell                        | `config/webhooks.spec.ts`                                                         | chromium   | ✅     |
+| `/config/extensions`    | Tabs + plugins grid                       | `config/extensions.spec.ts`                                                       | chromium   | ✅     |
+| `/config/automations`   | List + new builder link                   | `config/automations.spec.ts`                                                      | chromium   | ✅     |
+| `/config/sync`          | Tabs + status shell                       | `config/data-ops.spec.ts`                                                         | chromium   | ✅     |
+| `/config/trash`         | Empty or restore table                    | `config/data-ops.spec.ts`                                                         | chromium   | ✅     |
+| `/config/extensions`    | Extension list                            | `config/operations.spec.ts`                                                       | chromium   | ✅     |
+| `/config/design-system` | Sole Design System / Appearance workspace | `config/design-system.spec.ts`, `appearance.spec.ts`, `appearance-golden.spec.ts` | chromium   | ✅     |
+| `/config/workflows`     | Shell + golden (seed→GET by collectionId) | `config/workflows.spec.ts`                                                        | chromium   | ✅     |
+| `/config/unified-hub`   | Unified Data Hub (always-on + PG fixture) | `config/unified-hub.spec.ts`                                                      | chromium   | ✅     |
+| (dashboard / health)    | Lane-router smoke: admin session + health | `system/hooks-lane-smoke.spec.ts`                                                 | chromium   | ✅     |
+
+---
+
+## 6. `/admin/tenants` — Multi-Tenant Management (1 spec)
+
+| Feature                    | Test File                         | CI Project | Status                             |
+| -------------------------- | --------------------------------- | ---------- | ---------------------------------- |
+| Tenant list load           | `admin/tenants.spec.ts`           | chromium   | ✅                                 |
+| Quota headers/empty        | `admin/tenants.spec.ts`           | chromium   | ✅                                 |
+| **Create tenant**          | —                                 | —          | ❌                                 |
+| **Edit tenant**            | —                                 | —          | ❌                                 |
+| **Cross-tenant isolation** | `multi-tenancy/isolation.spec.ts` | chromium   | ⚠️ env-gated (`MULTI_TENANT=true`) |
+
+---
+
+## 7. `/dashboard` — Shell 100% (widget catalog install-specific)
+
+| Feature                         | Test File                       | CI Project | Status                                     |
+| ------------------------------- | ------------------------------- | ---------- | ------------------------------------------ |
+| Page shell + toolbar            | `dashboard/dashboard.spec.ts`   | chromium   | ✅                                         |
+| Empty state **or** grid         | same                            |            | ✅ never fixed widget list                 |
+| Add / search / reset            | same                            |            | ✅                                         |
+| AI toggle present               | same                            |            | ✅                                         |
+| Dashboard APIs                  | integration `dashboard.test.ts` |            | ✅                                         |
+| **Pointer drag-reorder E2E**    | `dashboard/dashboard.spec.ts`   |            | ✅ ≥2 widgets, header band drag            |
+| **Keyboard Ctrl+Arrow reorder** | same                            |            | ✅                                         |
+| **Per-widget visual content**   | —                               |            | ⚪ out of shell scope (varies per install) |
+
+---
+
+## 8. `/mediagallery` — Shell strong (see [routes/mediagallery.mdx](./routes/mediagallery.mdx))
+
+| Feature                          | Test File                           | CI Project | Status            |
+| -------------------------------- | ----------------------------------- | ---------- | ----------------- |
+| Page shell + toolbar             | `mediagallery/mediagallery.spec.ts` | chromium   | ✅                |
+| Search + type filter             | `mediagallery/mediagallery.spec.ts` | chromium   | ✅                |
+| Grid/table view toggle           | `mediagallery/mediagallery.spec.ts` | chromium   | ✅                |
+| Local file upload                | `mediagallery/mediagallery.spec.ts` | chromium   | ✅                |
+| **Delete media**                 | `mediagallery/mediagallery.spec.ts` | chromium   | ✅                |
+| **Image editor (crop/focal)**    | `mediagallery/image-editor.spec.ts` | chromium   | ✅                |
+| **Image editor save**            | `mediagallery/image-editor.spec.ts` | chromium   | ✅ manipulate API |
+| **Create / open folder**         | `mediagallery/folders-bulk.spec.ts` | chromium   | ✅                |
+| **Bulk select / download / Del** | `mediagallery/folders-bulk.spec.ts` | chromium   | ✅                |
+| **media:read gate**              | unit `mediagallery-page-server`     | —          | ✅                |
+| Selection + breadcrumb move      | `mediagallery/move-remote.spec.ts`  | chromium   | ✅                |
+| Remote URL upload page           | `mediagallery/move-remote.spec.ts`  | chromium   | ✅                |
+
+---
+
+## 9. `/language` — Partially tested
+
+| Feature                     | Status                   |
+| --------------------------- | ------------------------ |
+| Language switching dropdown | ⚠️ `data-testid` missing |
+| RTL layout (Arabic/Hebrew)  | ⚠️ Axe violation         |
+| Translation coverage        | ❌                       |
+
+---
+
+## 10. Additional covered routes (current suite)
+
+| Route              | Feature                          | Test File                               | CI Project | Status                                           |
+| ------------------ | -------------------------------- | --------------------------------------- | ---------- | ------------------------------------------------ |
+| `/` (site starter) | Seed-backed starter page smoke   | `site/site-starter.spec.ts`             | chromium   | ✅                                               |
+| `/admin-theme`     | Visual regression screenshots    | `admin-theme/visual-regression.spec.ts` | chromium   | ⚠️ env-gated (`RUN_VISUAL` / `UPDATE_SNAPSHOTS`) |
+| `/login`           | Keyboard-focus smoke (root spec) | `accessibility.spec.ts`                 | chromium   | ✅                                               |
+
+---
+
+## Summary
+
+| Route                       | Features | Tested | Coverage                           |
+| --------------------------- | -------- | ------ | ---------------------------------- |
+| `/setup`                    | 16       | 6      | 37%                                |
+| `/login`                    | 16       | 10     | 62%                                |
+| `/user`                     | 15       | 9      | 60%                                |
+| `/config/collectionbuilder` | 15       | 10     | 66%                                |
+| `/config/*` (other)         | 15       | 11     | 73%                                |
+| `/admin/tenants`            | 5        | 2      | 40%                                |
+| `/dashboard`                | 8        | 7      | **88% shell** (widget content N/A) |
+| `/mediagallery`             | 8        | 4      | 50%                                |
+| `/language`                 | 3        | 1      | 33%                                |
+| **TOTAL**                   | **105**  | **63** | **60%**                            |
+
+> **Critical gaps**: Setup presets, 2FA, SAML, rate limiting.
+>
+> See [Next Steps](#next-steps) for prioritized action items.
+
+## CI Playwright Projects (5)
+
+Source of truth: [`playwright.config.ts`](../../playwright.config.ts) — 5 projects; `chromium` carries all route specs.
+
+| Project      | Runs (testMatch)                                                                 | Depends on   |
+| ------------ | -------------------------------------------------------------------------------- | ------------ |
+| `wizard`     | `routes/setup/setup-wizard.spec.ts` (serial, 1 worker)                           | —            |
+| `firstuser`  | `routes/login/signup.spec.ts` (serial, 1 worker)                                 | —            |
+| `oauth`      | `routes/login/oauth.spec.ts` (CI only when `OAUTH_ENABLED=true`)                 | —            |
+| `auth-setup` | `auth.setup.ts` + `routes/login/login.spec.ts` (serial, 1 worker)                | `firstuser`  |
+| `chromium`   | all remaining route specs — fully parallel, CI-sharded via named `--grep` groups | `auth-setup` |
+
+CI (`e2e-prep`) runs `wizard` → `auth-setup` (which pulls in `firstuser`) sequentially; the `e2e` job then shards `chromium` into 6 named groups via `.github/workflows/e2e-matrix.ts`: Config & System · Builder & Content · Users & RBAC · Media & Dashboard · Auth & Branding · Admin & Catch-All.
+
+## Next Steps
+
+- [E2E Testing Guide](./e2e-testing-guide.mdx)
+- [Testing Overview & Strategy](./testing-strategy.mdx)
+- [Accessibility Audit](./accessibility-audit.mdx)

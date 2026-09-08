@@ -1,0 +1,428 @@
+/**
+ * @file tests/unit/plugins/settings-crypto.test.ts
+ * @description Unit tests for plugin settings encryption and settings declaration validation.
+ *
+ * Features tested:
+ * - Secret encryption/decryption (AES-256-GCM)
+ * - Versioned envelope format
+ * - Masked/masked value detection
+ * - Secret field processing (encrypt new, preserve existing)
+ * - Settings validation against declaration
+ * - Secret field name extraction
+ * - SettingsField type constraints
+ */
+
+import { describe, it, expect, vi } from "vitest";
+import { createCipheriv, createHash, randomBytes } from "node:crypto";
+import {
+  isMasked,
+  getMaskedValue,
+  maskSecretFields,
+  processSecretFields,
+  decryptSecretFields,
+} from "@src/plugins/settings-crypto";
+import {
+  validatePluginSettings,
+  getSecretFieldNames,
+  hasSecretFields,
+} from "@src/plugins/settings-declaration";
+import type { SettingsPart } from "@src/plugins/settings-declaration";
+
+// ============================================================================
+// Encryption availability — requires SECRET_ENCRYPTION_KEY in env
+// ============================================================================
+
+describe("Plugin Settings Crypto — Masking", () => {
+  it("should detect masked values", () => {
+    expect(isMasked("••••••••")).toBe(true);
+    expect(isMasked("")).toBe(true);
+    expect(isMasked(null as any)).toBe(true);
+    expect(isMasked(undefined as any)).toBe(true);
+  });
+
+  it("should detect non-masked values", () => {
+    expect(isMasked("real-value")).toBe(false);
+    expect(isMasked("sk_live_123")).toBe(false);
+  });
+
+  it("should return a consistent masked value", () => {
+    const masked = getMaskedValue();
+    expect(masked).toBe("••••••••");
+    expect(typeof masked).toBe("string");
+  });
+
+  describe("maskSecretFields", () => {
+    it("should replace encrypted values with masked placeholder", () => {
+      const stored = {
+        apiKey: "v1:abc123encrypted",
+        currency: "eur",
+      };
+      const result = maskSecretFields(stored, ["apiKey"]);
+      expect(result.apiKey).toBe("••••••••");
+      expect(result.currency).toBe("eur");
+    });
+
+    it("should not mask non-secret fields", () => {
+      const stored = { name: "test", value: 42 };
+      const result = maskSecretFields(stored, ["secretKey"]);
+      expect(result.name).toBe("test");
+      expect(result.value).toBe(42);
+    });
+
+    it("should handle empty secret fields list", () => {
+      const stored = { apiKey: "value", currency: "eur" };
+      const result = maskSecretFields(stored, []);
+      expect(result).toEqual(stored);
+    });
+
+    it("should not mask already-masked or empty values", () => {
+      const stored = { apiKey: "", webhookSecret: "••••••••" };
+      const result = maskSecretFields(stored, ["apiKey", "webhookSecret"]);
+      expect(result.apiKey).toBe("");
+      expect(result.webhookSecret).toBe("••••••••");
+    });
+  });
+});
+
+describe("Plugin Settings Crypto — processSecretFields", () => {
+  it("should preserve existing encrypted values when blank/masked is submitted", async () => {
+    const submitted = { apiKey: "••••••••", currency: "usd" };
+    const existing = { apiKey: "v1:existingEncryptedValue", currency: "eur" };
+
+    const result = await processSecretFields(submitted, existing, ["apiKey"]);
+
+    // Existing encrypted value should be preserved
+    expect(result.apiKey).toBe("v1:existingEncryptedValue");
+    // Non-secret field should use submitted value
+    expect(result.currency).toBe("usd");
+  });
+
+  it("should preserve existing secret when empty string is submitted", async () => {
+    const submitted = { apiKey: "" };
+    const existing = { apiKey: "v1:someEncryptedValue" };
+
+    const result = await processSecretFields(submitted, existing, ["apiKey"]);
+
+    expect(result.apiKey).toBe("v1:someEncryptedValue");
+  });
+
+  it("should leave secret blank when no existing value and blank submitted", async () => {
+    const submitted = { apiKey: "" };
+    const existing = null;
+
+    const result = await processSecretFields(submitted, existing, ["apiKey"]);
+
+    expect(result.apiKey).toBe("");
+  });
+
+  // Encrypts with a deterministic test key injected per-run (module latches the key
+  // on first call, so a fresh module instance is loaded after the env is set).
+  it("should encrypt new plaintext values when key is configured", async () => {
+    const prev = process.env.SECRET_ENCRYPTION_KEY;
+    process.env.SECRET_ENCRYPTION_KEY =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    vi.resetModules();
+    const fresh = await import("@src/plugins/settings-crypto");
+    try {
+      const submitted = { apiKey: "sk_live_secret123" };
+      const existing = null;
+
+      const result = await fresh.processSecretFields(submitted, existing, ["apiKey"]);
+
+      // New value should be encrypted (not plaintext)
+      expect(result.apiKey).not.toBe("sk_live_secret123");
+      expect(typeof result.apiKey).toBe("string");
+      expect((result.apiKey as string).length).toBeGreaterThan(20);
+    } finally {
+      if (prev === undefined) delete process.env.SECRET_ENCRYPTION_KEY;
+      else process.env.SECRET_ENCRYPTION_KEY = prev;
+      vi.resetModules();
+    }
+  });
+});
+
+describe("Plugin Settings Crypto — decryptSecretFields", () => {
+  it("should leave non-secret fields unchanged", async () => {
+    const stored = { name: "test", currency: "eur" };
+    const result = await decryptSecretFields(stored, []);
+    expect(result).toEqual(stored);
+  });
+
+  it("should leave masked values as-is (don't attempt to decrypt)", async () => {
+    const stored = { apiKey: "••••••••" };
+    const result = await decryptSecretFields(stored, ["apiKey"]);
+    expect(result.apiKey).toBe("••••••••");
+  });
+
+  it("should handle stored settings with no secret fields gracefully", async () => {
+    const stored = { name: "test", value: 42 };
+    const result = await decryptSecretFields(stored, []);
+    expect(result).toEqual(stored);
+  });
+});
+
+describe("Plugin Settings Crypto — HKDF passphrase dual-read", () => {
+  const envKeyMaterial = "plugin-static-env-key-32byte!!";
+
+  it("round-trips a passphrase-derived envelope", async () => {
+    const prev = process.env.SECRET_ENCRYPTION_KEY;
+    process.env.SECRET_ENCRYPTION_KEY = envKeyMaterial;
+    vi.resetModules();
+    const fresh = await import("@src/plugins/settings-crypto");
+    try {
+      const envelope = await fresh.encryptSecret("sk_live_hkdf");
+      expect(envelope).toBeTruthy();
+      const plain = await fresh.decryptSecret(envelope!);
+      expect(plain).toBe("sk_live_hkdf");
+    } finally {
+      if (prev === undefined) delete process.env.SECRET_ENCRYPTION_KEY;
+      else process.env.SECRET_ENCRYPTION_KEY = prev;
+      vi.resetModules();
+    }
+  });
+
+  it("decrypts envelopes written with SHA-256(raw) before HKDF", async () => {
+    const prev = process.env.SECRET_ENCRYPTION_KEY;
+    process.env.SECRET_ENCRYPTION_KEY = envKeyMaterial;
+    vi.resetModules();
+    const fresh = await import("@src/plugins/settings-crypto");
+    try {
+      const legacyKey = createHash("sha256").update(envKeyMaterial, "utf8").digest();
+      // codeql[js/insufficient-password-hash]: legacy pre-HKDF envelope fixture
+      // (AES key material, not a password KDF).
+      const iv = randomBytes(16);
+      const cipher = createCipheriv("aes-256-gcm", legacyKey, iv);
+      const ciphertext = Buffer.concat([cipher.update("legacy-secret", "utf8"), cipher.final()]);
+      const envelope = Buffer.concat([
+        Buffer.from([1]),
+        iv,
+        cipher.getAuthTag(),
+        ciphertext,
+      ]).toString("base64");
+
+      const plain = await fresh.decryptSecret(envelope);
+      expect(plain).toBe("legacy-secret");
+    } finally {
+      if (prev === undefined) delete process.env.SECRET_ENCRYPTION_KEY;
+      else process.env.SECRET_ENCRYPTION_KEY = prev;
+      vi.resetModules();
+    }
+  });
+});
+
+describe("Plugin Settings Crypto — AAD tenant+plugin binding", () => {
+  const envKeyMaterial = "plugin-static-env-key-32byte!!";
+
+  it("round-trips an envelope with matching context", async () => {
+    const prev = process.env.SECRET_ENCRYPTION_KEY;
+    process.env.SECRET_ENCRYPTION_KEY = envKeyMaterial;
+    vi.resetModules();
+    const fresh = await import("@src/plugins/settings-crypto");
+    try {
+      const ctx = { tenantId: "tenant-a", pluginId: "plugin-1" };
+      const envelope = await fresh.encryptSecret("sk_live_aad", ctx);
+      expect(envelope).toBeTruthy();
+      expect(await fresh.decryptSecret(envelope!, ctx)).toBe("sk_live_aad");
+    } finally {
+      if (prev === undefined) delete process.env.SECRET_ENCRYPTION_KEY;
+      else process.env.SECRET_ENCRYPTION_KEY = prev;
+      vi.resetModules();
+    }
+  });
+
+  it("rejects a DB copy moved to another tenant (AAD mismatch)", async () => {
+    const prev = process.env.SECRET_ENCRYPTION_KEY;
+    process.env.SECRET_ENCRYPTION_KEY = envKeyMaterial;
+    vi.resetModules();
+    const fresh = await import("@src/plugins/settings-crypto");
+    try {
+      const envelope = await fresh.encryptSecret("sk_live_aad", {
+        tenantId: "tenant-a",
+        pluginId: "plugin-1",
+      });
+      // Same plugin, different tenant — must NOT decrypt.
+      expect(
+        await fresh.decryptSecret(envelope!, { tenantId: "tenant-b", pluginId: "plugin-1" }),
+      ).toBeNull();
+      // Same tenant, different plugin — must NOT decrypt.
+      expect(
+        await fresh.decryptSecret(envelope!, { tenantId: "tenant-a", pluginId: "plugin-2" }),
+      ).toBeNull();
+      // No context at decrypt time — AAD mismatch, must NOT decrypt.
+      expect(await fresh.decryptSecret(envelope!)).toBeNull();
+    } finally {
+      if (prev === undefined) delete process.env.SECRET_ENCRYPTION_KEY;
+      else process.env.SECRET_ENCRYPTION_KEY = prev;
+      vi.resetModules();
+    }
+  });
+
+  it("encrypt is fail-closed without a configured key (throws)", async () => {
+    const prev = process.env.SECRET_ENCRYPTION_KEY;
+    delete process.env.SECRET_ENCRYPTION_KEY;
+    vi.resetModules();
+    const fresh = await import("@src/plugins/settings-crypto");
+    try {
+      await expect(fresh.encryptSecret("sk_live")).rejects.toThrow(/not set/i);
+    } finally {
+      if (prev === undefined) delete process.env.SECRET_ENCRYPTION_KEY;
+      else process.env.SECRET_ENCRYPTION_KEY = prev;
+      vi.resetModules();
+    }
+  });
+
+  it("decrypt returns null without a configured key (fail-closed)", async () => {
+    const prev = process.env.SECRET_ENCRYPTION_KEY;
+    delete process.env.SECRET_ENCRYPTION_KEY;
+    vi.resetModules();
+    const fresh = await import("@src/plugins/settings-crypto");
+    try {
+      expect(await fresh.decryptSecret("v1:garbage")).toBeNull();
+    } finally {
+      if (prev === undefined) delete process.env.SECRET_ENCRYPTION_KEY;
+      else process.env.SECRET_ENCRYPTION_KEY = prev;
+      vi.resetModules();
+    }
+  });
+});
+
+// ============================================================================
+// Settings Declaration Validation
+// ============================================================================
+
+describe("Settings Declaration — validatePluginSettings", () => {
+  const declaration: SettingsPart = {
+    label: "Test Plugin Settings",
+    fields: [
+      { name: "apiKey", type: "secret", label: "API Key", required: true },
+      {
+        name: "currency",
+        type: "string",
+        label: "Currency",
+        default: "eur",
+        list: ["eur", "usd", "gbp"],
+      },
+      { name: "maxRetries", type: "number", label: "Max Retries", default: 3, min: 1, max: 10 },
+      { name: "enabled", type: "boolean", label: "Enabled", default: false },
+      { name: "description", type: "text", label: "Description" },
+    ],
+  };
+
+  it("should accept valid settings", () => {
+    const submitted = {
+      apiKey: "sk_test_123",
+      currency: "usd",
+      maxRetries: 5,
+      enabled: true,
+      description: "A test config",
+    };
+    const issues = validatePluginSettings(submitted, declaration);
+    expect(issues).toHaveLength(0);
+  });
+
+  it("should reject invalid currency option", () => {
+    const submitted = { apiKey: "sk_test", currency: "jpy", maxRetries: 5, enabled: true };
+    const issues = validatePluginSettings(submitted, declaration);
+    expect(issues.length).toBeGreaterThan(0);
+    expect(issues.some((i) => i.field === "currency")).toBe(true);
+  });
+
+  it("should reject number out of range (below min)", () => {
+    const submitted = { apiKey: "sk_test", currency: "eur", maxRetries: 0, enabled: true };
+    const issues = validatePluginSettings(submitted, declaration);
+    // maxRetries: 0 is below min: 1
+    expect(issues.some((i) => i.field === "maxRetries")).toBe(true);
+  });
+
+  it("should reject number out of range (above max)", () => {
+    const submitted = { apiKey: "sk_test", currency: "eur", maxRetries: 100, enabled: true };
+    const issues = validatePluginSettings(submitted, declaration);
+    expect(issues.some((i) => i.field === "maxRetries")).toBe(true);
+  });
+
+  it("should reject non-number for number field", () => {
+    const submitted = {
+      apiKey: "sk_test",
+      currency: "eur",
+      maxRetries: "five" as any,
+      enabled: true,
+    };
+    const issues = validatePluginSettings(submitted, declaration);
+    expect(issues.some((i) => i.field === "maxRetries")).toBe(true);
+  });
+
+  it("should not require secret fields (blank means keep existing)", () => {
+    const submitted = { apiKey: "", currency: "eur", maxRetries: 5, enabled: true };
+    const issues = validatePluginSettings(submitted, declaration);
+    // Secret field blank is allowed (preserve existing)
+    expect(issues.filter((i) => i.field === "apiKey")).toHaveLength(0);
+  });
+
+  it("should require non-secret required fields", () => {
+    // Create a declaration with required non-secret field
+    const decl: SettingsPart = {
+      fields: [{ name: "name", type: "string", label: "Name", required: true }],
+    };
+    const issues = validatePluginSettings({}, decl);
+    expect(issues.some((i) => i.field === "name")).toBe(true);
+  });
+});
+
+describe("Settings Declaration — getSecretFieldNames", () => {
+  it("should extract secret field names from a declaration", () => {
+    const declaration: SettingsPart = {
+      fields: [
+        { name: "apiKey", type: "secret", label: "API Key" },
+        { name: "webhookSecret", type: "secret", label: "Webhook Secret" },
+        { name: "currency", type: "string", label: "Currency" },
+      ],
+    };
+
+    const secrets = getSecretFieldNames(declaration);
+    expect(secrets).toEqual(["apiKey", "webhookSecret"]);
+  });
+
+  it("should return empty array when no secret fields exist", () => {
+    const declaration: SettingsPart = {
+      fields: [
+        { name: "currency", type: "string", label: "Currency" },
+        { name: "enabled", type: "boolean", label: "Enabled" },
+      ],
+    };
+
+    expect(getSecretFieldNames(declaration)).toEqual([]);
+  });
+});
+
+describe("Settings Declaration — hasSecretFields", () => {
+  it("should detect presence of secret fields", () => {
+    const withSecret: SettingsPart = {
+      fields: [{ name: "apiKey", type: "secret", label: "API Key" }],
+    };
+    const withoutSecret: SettingsPart = {
+      fields: [{ name: "currency", type: "string", label: "Currency" }],
+    };
+
+    expect(hasSecretFields(withSecret)).toBe(true);
+    expect(hasSecretFields(withoutSecret)).toBe(false);
+  });
+});
+
+describe("Settings Declaration — requiredCapabilities", () => {
+  it("should accept requiredCapabilities on the declaration", () => {
+    const declaration: SettingsPart = {
+      fields: [{ name: "apiKey", type: "secret", label: "API Key" }],
+      requiredCapabilities: ["settings:write"],
+    };
+
+    expect(declaration.requiredCapabilities).toEqual(["settings:write"]);
+  });
+
+  it("should be optional (undefined when not set)", () => {
+    const declaration: SettingsPart = {
+      fields: [{ name: "name", type: "string", label: "Name" }],
+    };
+
+    expect(declaration.requiredCapabilities).toBeUndefined();
+  });
+});

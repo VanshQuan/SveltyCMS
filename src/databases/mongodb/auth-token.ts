@@ -1,0 +1,439 @@
+/**
+ * @file src/databases/mongodb/models/auth-token.ts
+ * @description MongoDB adapter for token-related operations.
+ */
+
+import type { Token } from "@src/databases/auth/types";
+import type {
+  DatabaseId,
+  DatabaseResult,
+  ISODateString,
+  BaseQueryOptions,
+} from "@src/databases/db-interface";
+import mongoose, { Schema, type Model } from "mongoose";
+import { generateId, getOrCreateModel } from "./mongodb-utils";
+import { generateRandomToken } from "@src/databases/auth/constants";
+import { safeQuery } from "@src/utils/security/safe-query";
+import { normalizeEmail } from "@src/utils/normalize-email";
+import { logger } from "@src/utils/logger";
+
+export const TokenSchema = new Schema(
+  {
+    _id: { type: String, required: true },
+    token: { type: String, required: true, unique: true },
+    user_id: { type: String, required: true, ref: "auth_users" },
+    email: { type: String, required: true },
+    type: { type: String, required: true },
+    expires: { type: Date, required: true },
+    tenantId: { type: String },
+    blocked: { type: Boolean, default: false },
+    role: String,
+    username: String,
+  },
+  {
+    timestamps: true,
+    collection: "auth_tokens",
+    _id: false,
+  },
+);
+
+// TokenSchema.index({ token: 1 }); // Redundant, already part of unique: true in schema
+TokenSchema.index({ expires: 1 }, { expireAfterSeconds: 0 });
+TokenSchema.index({ tenantId: 1 });
+
+export class TokenAdapter {
+  private _TokenModel: Model<Token> | null = null;
+
+  private get TokenModel(): Model<Token> {
+    if (!this._TokenModel) {
+      this._TokenModel = getOrCreateModel(mongoose, "auth_tokens", TokenSchema);
+    }
+    return this._TokenModel;
+  }
+
+  /**
+   * Auth tokens (invite/reset/magic links) must never be stored in plaintext.
+   * Mirrors the relational adapter: SHA-256 (lowercase hex) — cross-adapter parity.
+   */
+  private async _hashToken(token: string): Promise<string> {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(token);
+    const hash = await globalThis.crypto.subtle.digest("SHA-256", data);
+    return Array.from(new Uint8Array(hash))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  }
+
+  /**
+   * Explicitly set the model using a specific connection to support isolated adapters.
+   */
+  public setModel(conn: any) {
+    this._TokenModel = getOrCreateModel(conn, "auth_tokens", TokenSchema);
+  }
+
+  constructor() {}
+
+  async createToken(data: {
+    user_id: DatabaseId;
+    email: string;
+    expires: ISODateString;
+    type: string;
+    tenantId?: DatabaseId | null;
+    role?: string;
+  }): Promise<DatabaseResult<string>> {
+    try {
+      const tokenValue = generateRandomToken(32);
+      const hashedToken = await this._hashToken(tokenValue);
+      const Model = this.TokenModel;
+      const token = new Model({
+        ...data,
+        email: normalizeEmail(data.email),
+        token: hashedToken,
+        _id: generateId(),
+      });
+      await token.save();
+      return { success: true, data: tokenValue };
+    } catch (err) {
+      const message = "Token creation failed";
+      logger.error(message, err);
+      return {
+        success: false,
+        message,
+        error: { code: "TOKEN_CREATE_ERROR", message },
+      };
+    }
+  }
+
+  async validateToken(
+    token: string,
+    userId?: DatabaseId,
+    type?: string,
+    options?: BaseQueryOptions,
+  ): Promise<
+    DatabaseResult<{
+      success: boolean;
+      message: string;
+      email?: string;
+      details?: Token;
+    }>
+  > {
+    try {
+      const tenantId = options?.tenantId;
+      const hashedToken = await this._hashToken(token);
+      let filter = safeQuery({ token: hashedToken } as any, tenantId as string, {
+        includeDeleted: true,
+      });
+      if (userId) filter.user_id = userId;
+      if (type) filter.type = type;
+
+      let found = await this.TokenModel.findOne(filter).lean();
+
+      // Legacy plaintext rows (pre-hash) — accept and migrate on use so the row
+      // is no longer at rest in plaintext.
+      if (!found && hashedToken !== token) {
+        const legacyFilter = safeQuery({ token } as any, tenantId as string, {
+          includeDeleted: true,
+        });
+        if (userId) legacyFilter.user_id = userId;
+        if (type) legacyFilter.type = type;
+        const legacy = await this.TokenModel.findOne(legacyFilter).lean();
+        if (legacy) {
+          await this.TokenModel.updateOne({ _id: legacy._id }, { $set: { token: hashedToken } });
+          found = { ...legacy, token: hashedToken };
+        }
+      }
+
+      if (!found || found.blocked || new Date(found.expires) < new Date()) {
+        return {
+          success: false,
+          message: "Invalid or expired token",
+          error: {
+            code: "TOKEN_INVALID",
+            message: "Token not found or expired",
+          },
+        };
+      }
+      return {
+        success: true,
+        data: {
+          success: true,
+          message: "Valid",
+          email: found.email,
+          details: found as any,
+        },
+      };
+    } catch (err) {
+      const message = "Token validation error";
+      logger.error(message, err);
+      return {
+        success: false,
+        message,
+        error: { code: "TOKEN_VALIDATE_ERROR", message },
+      };
+    }
+  }
+
+  async consumeToken(
+    token: string,
+    userId?: DatabaseId,
+    type?: string,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<void>> {
+    try {
+      const tenantId = options?.tenantId;
+      const hashedToken = await this._hashToken(token);
+      // Atomic findOneAndDelete fixes TOCTOU race condition
+      let filter = safeQuery({ token: hashedToken } as any, tenantId as string, {
+        includeDeleted: true,
+      });
+      if (userId) filter.user_id = userId;
+      if (type) filter.type = type;
+
+      // Only claim non-expired tokens (expiry must be in the claim filter)
+      const claimFilter = {
+        ...filter,
+        expires: { $gt: new Date() },
+        blocked: { $ne: true },
+      };
+      let found = await this.TokenModel.findOneAndDelete(claimFilter).lean();
+
+      // Legacy plaintext rows (pre-hash) — claim the same way; deletion removes the
+      // plaintext-at-rest row entirely, so no migrate-on-use is needed here.
+      if (!found && hashedToken !== token) {
+        const legacyFilter = safeQuery({ token } as any, tenantId as string, {
+          includeDeleted: true,
+        });
+        if (userId) legacyFilter.user_id = userId;
+        if (type) legacyFilter.type = type;
+        found = await this.TokenModel.findOneAndDelete({
+          ...legacyFilter,
+          expires: { $gt: new Date() },
+          blocked: { $ne: true },
+        }).lean();
+      }
+
+      if (found) {
+        return { success: true, data: undefined };
+      }
+
+      // Diagnose: missing vs expired vs blocked (hashed first, then legacy)
+      let existing = await this.TokenModel.findOne(filter).lean();
+      if (!existing && hashedToken !== token) {
+        const legacyFilter = safeQuery({ token } as any, tenantId as string, {
+          includeDeleted: true,
+        });
+        if (userId) legacyFilter.user_id = userId;
+        if (type) legacyFilter.type = type;
+        existing = await this.TokenModel.findOne(legacyFilter).lean();
+      }
+      if (!existing) {
+        return {
+          success: false,
+          message: "Token not found",
+          error: { code: "TOKEN_NOT_FOUND", message: "Token not found" },
+        };
+      }
+      if (existing.blocked) {
+        return {
+          success: false,
+          message: "Token is blocked",
+          error: { code: "TOKEN_BLOCKED", message: "Token is blocked" },
+        };
+      }
+      if (new Date(existing.expires) < new Date()) {
+        return {
+          success: false,
+          message: "Token has expired. Request a new reset link.",
+          error: { code: "TOKEN_EXPIRED", message: "Token has expired" },
+        };
+      }
+      return {
+        success: false,
+        message: "Invalid or expired token",
+        error: { code: "TOKEN_INVALID", message: "Token not found or expired" },
+      };
+    } catch (err) {
+      const message = "Token consumption error";
+      logger.error(message, err);
+      return {
+        success: false,
+        message,
+        error: { code: "TOKEN_CONSUME_ERROR", message },
+      };
+    }
+  }
+
+  async getTokenByValue(
+    token: string,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<Token | null>> {
+    try {
+      const tenantId = options?.tenantId;
+      const hashedToken = await this._hashToken(token);
+      let filter: any = { token: hashedToken };
+      if (tenantId) filter.tenantId = tenantId;
+      let found = await this.TokenModel.findOne(filter).lean();
+
+      // Legacy plaintext rows (pre-hash) — accept and migrate on use.
+      if (!found && hashedToken !== token) {
+        const legacyFilter: any = { token };
+        if (tenantId) legacyFilter.tenantId = tenantId;
+        const legacy = await this.TokenModel.findOne(legacyFilter).lean();
+        if (legacy) {
+          await this.TokenModel.updateOne({ _id: legacy._id }, { $set: { token: hashedToken } });
+          found = { ...legacy, token: hashedToken };
+        }
+      }
+      return { success: true, data: found as Token | null };
+    } catch (err) {
+      return {
+        success: false,
+        message: "Error getting token",
+        error: { code: "TOKEN_GET_ERROR", message: String(err) },
+      };
+    }
+  }
+
+  async getTokenById(
+    tokenId: DatabaseId,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<Token | null>> {
+    try {
+      const tenantId = options?.tenantId;
+      const filter: any = { _id: tokenId };
+      if (tenantId) filter.tenantId = tenantId;
+      const found = await this.TokenModel.findOne(filter).lean();
+      return { success: true, data: found as Token | null };
+    } catch (err) {
+      return {
+        success: false,
+        message: "Error getting token",
+        error: { code: "TOKEN_GET_ERROR", message: String(err) },
+      };
+    }
+  }
+
+  async getAllTokens(
+    options?: BaseQueryOptions,
+    filter: any = {},
+  ): Promise<DatabaseResult<Token[]>> {
+    try {
+      const tenantId = options?.tenantId;
+      const safeFilter = safeQuery(filter, tenantId as string, {
+        includeDeleted: true,
+      });
+      const tokens = await this.TokenModel.find(safeFilter).lean();
+      return { success: true, data: tokens as Token[] };
+    } catch (err) {
+      const message = "Error getting tokens";
+      logger.error(message, err);
+      return {
+        success: false,
+        message,
+        error: { code: "TOKEN_GET_ERROR", message },
+      };
+    }
+  }
+
+  async updateToken(
+    tokenId: DatabaseId,
+    tokenData: Partial<Token>,
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<Token>> {
+    try {
+      const tenantId = options?.tenantId;
+      const filter = safeQuery({ _id: tokenId } as any, tenantId as string, {
+        includeDeleted: true,
+      });
+
+      // Prevent token value from being updated
+      const { token: _, ...validUpdates } = tokenData;
+
+      const res = await this.TokenModel.findOneAndUpdate(filter, validUpdates, {
+        returnDocument: "after",
+      }).lean();
+      if (!res) throw new Error("Token not found");
+      return { success: true, data: res as Token };
+    } catch (err) {
+      const message = "Error updating token";
+      logger.error(message, err);
+      return {
+        success: false,
+        message,
+        error: { code: "TOKEN_UPDATE_ERROR", message },
+      };
+    }
+  }
+
+  async deleteTokens(
+    tokenIds: DatabaseId[],
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<{ deletedCount: number }>> {
+    try {
+      const tenantId = options?.tenantId;
+      const filter: any = { _id: { $in: tokenIds } };
+      if (tenantId) filter.tenantId = tenantId;
+      const res = await this.TokenModel.deleteMany(filter);
+      return { success: true, data: { deletedCount: res.deletedCount } };
+    } catch (err) {
+      return {
+        success: false,
+        message: "Error deleting tokens",
+        error: { code: "TOKEN_DELETE_ERROR", message: String(err) },
+      };
+    }
+  }
+
+  async blockTokens(
+    tokenIds: DatabaseId[],
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<{ modifiedCount: number }>> {
+    try {
+      const tenantId = options?.tenantId;
+      const filter: any = { _id: { $in: tokenIds } };
+      if (tenantId) filter.tenantId = tenantId;
+      const res = await this.TokenModel.updateMany(filter, { blocked: true });
+      return { success: true, data: { modifiedCount: res.modifiedCount } };
+    } catch (err) {
+      return {
+        success: false,
+        message: "Error blocking tokens",
+        error: { code: "TOKEN_BLOCK_ERROR", message: String(err) },
+      };
+    }
+  }
+
+  async unblockTokens(
+    tokenIds: DatabaseId[],
+    options?: BaseQueryOptions,
+  ): Promise<DatabaseResult<{ modifiedCount: number }>> {
+    try {
+      const tenantId = options?.tenantId;
+      const filter: any = { _id: { $in: tokenIds } };
+      if (tenantId) filter.tenantId = tenantId;
+      const res = await this.TokenModel.updateMany(filter, { blocked: false });
+      return { success: true, data: { modifiedCount: res.modifiedCount } };
+    } catch (err) {
+      return {
+        success: false,
+        message: "Error unblocking tokens",
+        error: { code: "TOKEN_UNBLOCK_ERROR", message: String(err) },
+      };
+    }
+  }
+
+  async deleteExpiredTokens(): Promise<DatabaseResult<number>> {
+    try {
+      const res = await this.TokenModel.deleteMany({
+        expires: { $lt: new Date() },
+      } as any);
+      return { success: true, data: res.deletedCount };
+    } catch (err) {
+      return {
+        success: false,
+        message: "Error deleting expired tokens",
+        error: { code: "TOKEN_CLEANUP_ERROR", message: String(err) },
+      };
+    }
+  }
+}

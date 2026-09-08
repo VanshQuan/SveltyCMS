@@ -1,119 +1,173 @@
 /**
  * @file playwright.config.ts
  * @description Playwright test configuration for SveltyCMS
+ *
+ * Simplified 4-project architecture:
+ * - wizard:     Setup wizard on clean slate (serial, port 5174 fallback)
+ * - firstuser:  Signup + OAuth before auth seeding (serial)
+ * - auth-setup: Seed users + login test + save auth state (serial)
+ * - chromium:   All CMS routes — fully parallel, sharded in CI
+ *
+ * Projects run in dependency order. In CI, e2e-prep runs wizard →
+ * firstuser → auth-setup sequentially, then chromium is sharded N ways.
+ *
+ * Local default (CI-parity): `bun run test:e2e` → scripts/run-e2e-ci.ts
+ *   (preview server :4173, COMPILE_ALL_ADAPTERS build, wizard → auth-setup → chromium)
+ * Dev-server shortcut: `bun run test:e2e:dev` (Vite :5173) — not CI-identical.
  */
 
-import { defineConfig, devices } from '@playwright/test';
+import { defineConfig, devices } from "@playwright/test";
+import { randomUUID } from "node:crypto";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 
-// See https://playwright.dev/docs/test-configuration.
+// Ensure .auth directory exists for secret sync
+const authDir = join(process.cwd(), "tests/e2e/.auth");
+if (!existsSync(authDir)) {
+  mkdirSync(authDir, { recursive: true });
+}
+
+// Share one test secret across all Playwright workers for explicit /api/testing calls.
+const SECRET_FILE = join(authDir, "test-secret.txt");
+let TEST_API_SECRET = process.env.TEST_API_SECRET;
+
+if (!TEST_API_SECRET) {
+  if (existsSync(SECRET_FILE)) {
+    TEST_API_SECRET = readFileSync(SECRET_FILE, "utf-8").trim();
+  } else {
+    TEST_API_SECRET = randomUUID();
+    writeFileSync(SECRET_FILE, TEST_API_SECRET);
+  }
+}
+
+// Ensure workers inherit the secret so they can authenticate testing endpoints
+process.env.TEST_API_SECRET = TEST_API_SECRET;
+
 export default defineConfig({
-	testDir: './tests/playwright',
-	testMatch: '**/*.{test,spec,spect}.ts',
-	/* Run tests in files in parallel */
-	fullyParallel: true,
-	/* Fail the build on CI if you accidentally left test.only in the source code. */
-	forbidOnly: !!process.env.CI,
-	/* Retry on CI only */
-	retries: process.env.CI ? 2 : 0,
-	/* Opt out of parallel tests on CI. */
-	workers: process.env.CI ? 1 : undefined,
-	/* Reporter to use. See https://playwright.dev/docs/test-reporters */
-	//reporter: 'html',
+  testDir: "./tests/e2e",
+  testMatch: "**/*.{test,spec,spect}.ts",
+  outputDir: "./tests/test-results",
+  timeout: 90_000,
+  expect: {
+    timeout: 10 * 1000,
+    toHaveScreenshot: {
+      animations: "disabled",
+      maxDiffPixelRatio: 0.02,
+      threshold: 0.25,
+    },
+  },
+  snapshotPathTemplate: "{testDir}/{testFileDir}/{testFileName}-snapshots/{arg}-{projectName}{ext}",
+  fullyParallel: true,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 1 : 0,
+  workers: process.env.PLAYWRIGHT_WORKERS ? Number.parseInt(process.env.PLAYWRIGHT_WORKERS, 10) : 4,
+  // CI: compact dots (failures still expand) + GitHub annotations + HTML/JSON for artifacts.
+  // Local: list for readable progress.
+  reporter: process.env.CI
+    ? [
+        ["dot"],
+        ["github"], // inline annotations on the PR check
+        ["html", { outputFolder: "tests/playwright-report", open: "never" }],
+        // Machine-readable for scripts/ci-report-playwright.ts → GITHUB_STEP_SUMMARY
+        ["json", { outputFile: "tests/playwright-results.json" }],
+      ]
+    : [["list"], ["html", { outputFolder: "tests/playwright-report", open: "never" }]],
 
-	/* Set environment variables for tests */
-	use: {
-		/* Base URL to use in actions like `await page.goto('/')`. */
-		baseURL: process.env.PLAYWRIGHT_TEST_BASE_URL || (process.env.CI ? 'http://localhost:4173' : 'http://localhost:5173'),
+  use: {
+    // Default: Vite dev server (port 5173). CI sets PLAYWRIGHT_TEST_BASE_URL.
+    baseURL: process.env.PLAYWRIGHT_TEST_BASE_URL || "http://127.0.0.1:5173",
+    extraHTTPHeaders: {
+      "x-test-mode": "true",
+      "x-test-worker-index": process.env.TEST_WORKER_INDEX || "0",
+      "x-test-secret": TEST_API_SECRET || "",
+    },
+    launchOptions: {
+      slowMo: Number.parseInt(process.env.SLOW_MO || "0", 10),
+    },
+    trace: "on-first-retry",
+    video: "retain-on-failure",
+    bypassCSP: true,
+  },
 
-		launchOptions: {
-			slowMo: parseInt(process.env.SLOW_MO || '0'),
-			devtools: !process.env.CI // Enable devtools when not in CI
-		},
-		// Explicitly set PWDEBUG for local runs
-		// Set environment variables in your test runner or webServer configuration if needed
+  // Auto-start Vite dev server when running in isolation (no PLAYWRIGHT_TEST_BASE_URL set)
+  webServer: process.env.PLAYWRIGHT_TEST_BASE_URL
+    ? undefined
+    : {
+        command: "bun run dev",
+        port: 5173,
+        timeout: 120_000,
+        env: {
+          PLAYWRIGHT_TEST: "1",
+          TEST_MODE: "true",
+          DB_TYPE: process.env.DB_TYPE || "sqlite",
+          DB_HOST: process.env.DB_HOST || "127.0.0.1",
+          DB_NAME: process.env.DB_NAME || "e2e_auth_test",
+          JWT_SECRET_KEY: process.env.JWT_SECRET_KEY || "Integration-Test-JWT-Secret-Key-2026",
+          ENCRYPTION_KEY:
+            process.env.ENCRYPTION_KEY ||
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        },
+        reuseExistingServer: true,
+      },
 
-		/* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
-		trace: 'on-first-retry',
-		video: 'retain-on-failure',
+  globalSetup: "./tests/e2e/global.setup.ts",
 
-		/* Bypass CSP in tests to allow MongoDB connections */
-		bypassCSP: true
-	},
-
-	/* Configure projects for major browsers */
-	projects: [
-		{
-			name: 'chromium',
-			use: {
-				...devices['Desktop Chrome'],
-				headless: process.env.CI ? true : false // Always headless in CI
-			}
-		},
-
-		{
-			name: 'firefox',
-			use: {
-				...devices['Desktop Firefox'],
-				headless: process.env.CI ? true : false
-			}
-		},
-
-		{
-			name: 'webkit',
-			use: {
-				...devices['Desktop Safari'],
-				headless: process.env.CI ? true : false
-			}
-		},
-
-		/* Test against mobile viewports. */
-		{
-			name: 'Mobile Chrome',
-			use: {
-				...devices['Pixel 5'],
-				headless: process.env.CI ? true : false
-			}
-		},
-		{
-			name: 'Mobile Safari',
-			use: {
-				...devices['iPhone 12'],
-				headless: process.env.CI ? true : false
-			}
-		},
-
-		/* Test against branded browsers. */
-		{
-			name: 'Microsoft Edge',
-			use: {
-				...devices['Desktop Edge'],
-				channel: 'msedge',
-				headless: process.env.CI ? true : false
-			}
-		},
-		{
-			name: 'Google Chrome',
-			use: {
-				...devices['Desktop Chrome'],
-				channel: 'chrome',
-				headless: process.env.CI ? true : false
-			}
-		}
-	],
-
-	/* Run your local dev server before starting the tests */
-	// In CI, the workflow starts the server manually, so we only use webServer locally
-	...(process.env.CI
-		? {}
-		: {
-				webServer: {
-					command: 'bun install && bun dev --port 5173',
-					port: 5173,
-					timeout: 60000, // Increased timeout to 1 minute
-					reuseExistingServer: true,
-					env: {
-						PLAYWRIGHT_TEST: 'true'
-					}
-				}
-			})
+  projects: [
+    {
+      name: "wizard",
+      use: { baseURL: process.env.PLAYWRIGHT_TEST_BASE_URL || "http://127.0.0.1:5173" },
+      testMatch: "routes/setup/setup-wizard.spec.ts",
+      workers: 1,
+      // Timing-sensitive interactions (portal confirm dialogs, stepper, real
+      // SMTP/DNS attempts to dead hosts). Every project depends on the wizard
+      // completing — one flake would skip the whole chain, so absorb it here.
+      retries: 2,
+    },
+    {
+      name: "firstuser",
+      // Wizard must finish first: both projects share one SQLite DB, and the
+      // wizard resets system state mid-spec. Running them concurrently made
+      // signup/setup see each other's intermediate state (root → /setup race,
+      // view flips mid-toggle). Playwright runs dependencies to completion
+      // before the dependent project starts.
+      dependencies: ["wizard"],
+      testMatch: ["**/login/signup.spec.ts"],
+      workers: 1,
+    },
+    // OAuth tests require a real IdP — run manually when configured
+    // bun x playwright test tests/e2e/routes/login/oauth.spec.ts --project=firstuser
+    {
+      name: "oauth",
+      testMatch: ["**/login/oauth.spec.ts"],
+      workers: 1,
+      // Only included in CI when OAUTH_ENABLED=true
+      ...(process.env.CI === "true" && process.env.OAUTH_ENABLED !== "true"
+        ? { testIgnore: ["**/*.spec.ts"] }
+        : {}),
+    },
+    {
+      name: "auth-setup",
+      testMatch: [/auth\.setup\.ts/, /routes\/login\/login\.spec\.ts/],
+      dependencies: ["firstuser"],
+      workers: 1,
+    },
+    {
+      name: "chromium",
+      testIgnore: [
+        "**/setup/setup-wizard.spec.ts",
+        "**/auth.setup.ts",
+        "**/routes/login/login.spec.ts",
+        "**/routes/login/signup.spec.ts",
+        "**/routes/login/oauth.spec.ts",
+      ],
+      use: {
+        ...devices["Desktop Chrome"],
+        headless: !!process.env.CI,
+        ...(existsSync(join(authDir, "admin.json"))
+          ? { storageState: join(authDir, "admin.json") }
+          : {}),
+      },
+      dependencies: process.env.SKIP_E2E_DEPS === "true" ? [] : ["auth-setup"],
+    },
+  ],
 });

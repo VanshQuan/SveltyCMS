@@ -1,0 +1,474 @@
+/**
+ * @file src/stores/collection-store.svelte.ts
+ * @description
+ * **Active Context Store**: Reactive state for the current collection, mode, and entry values.
+ *
+ * This store dictates what the user is currently looking at (View, Edit, Create) and holds the reactive transient state of any entry being modified.
+ *
+ * ### Responsibilities:
+ * - Managing the Active Collection Schema.
+ * - Mode Switching (View/Edit/Create/Media).
+ * - Holding the `activeValue` (Svelte 5 $state) for forms.
+ * - Guarding against redundant content structure updates (Circuit Breaker).
+ */
+import type { ContentNode, Schema, StatusType, WidgetFieldPermissions } from "@src/content/types";
+import { StatusTypes } from "@src/content/types";
+import { updateEntryStatus } from "@src/utils/api";
+import { toast } from "@src/stores/toast.svelte.ts";
+import { logger } from "@utils/logger";
+
+/** Cheap FNV-1a fingerprint — avoids JSON.stringify of large ContentNode trees (client-safe). */
+function structureFingerprint(nodes: ContentNode[]): string {
+  let h = 2166136261;
+  for (const n of nodes) {
+    const fieldCount = n.collectionDef?.fields?.length ?? 0;
+    const s = `${n._id ?? ""}|${n.path ?? ""}|${n.parentId ?? ""}|${n.order ?? 0}|${n.nodeType ?? ""}|${n.name ?? ""}|${fieldCount}`;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+  }
+  return (h >>> 0).toString(36);
+}
+
+// Types
+export type ModeType = "view" | "edit" | "create" | "delete" | "modify" | "media";
+
+export interface Widget {
+  permissions?: Record<string, Record<string, boolean>> | WidgetFieldPermissions;
+  [key: string]: Record<string, Record<string, boolean>> | WidgetFieldPermissions | unknown;
+}
+
+export const statusMap = {
+  publish: "publish",
+  unpublish: "unpublish",
+  draft: "draft",
+  archived: "archived",
+} as const;
+
+/**
+ * Enterprise-level Collection Management State
+ * Consolidates all collection-related reactivity into a single class.
+ */
+class CollectionState {
+  // Record of all collections indexed by UUID (static schema tree - $state.raw eliminates proxy overhead)
+  all = $state.raw<Record<string, Schema>>({});
+
+  // Active collection being viewed or edited (immutable replacement)
+  active = $state.raw<Schema | null>(null);
+
+  // Data value of the currently active entry (e.g. form data — fine-grained reactive)
+  activeValue = $state<Record<string, unknown>>({});
+
+  // Operational mode (view, edit, etc.)
+  mode = $state<ModeType>("view");
+
+  loading = $state(false);
+  error = $state<string | null>(null);
+
+  // Miscellaneous state
+  currentId = $state<string | null>(null);
+  unassigned = $state<Schema>({} as Schema);
+  modifyEntry = $state<(status?: keyof typeof statusMap) => Promise<void>>(() => Promise.resolve());
+  targetWidget = $state<Widget>({ permissions: {} });
+  contentStructure = $state.raw<ContentNode[]>([]);
+  selectedEntries = $state<string[]>([]);
+
+  // --- Derived Properties ---
+
+  get total() {
+    return Object.keys(this.all).length;
+  }
+
+  get hasSelected() {
+    return this.selectedEntries.length > 0;
+  }
+
+  get activeName() {
+    return this.active?.name;
+  }
+
+  // --- Status & Publishing State ---
+  isStatusLoading = $state(false);
+  private lastStatusToggleTime = 0;
+
+  get isPublish(): boolean {
+    if (this.activeValue?.status) {
+      return this.activeValue.status === StatusTypes.publish;
+    }
+    const collectionStatus = this.active?.status;
+    const defaultStatus = collectionStatus || StatusTypes.unpublish;
+    return defaultStatus === StatusTypes.publish;
+  }
+
+  get currentStatus(): StatusType {
+    if (this.activeValue?.status) {
+      return this.activeValue.status as StatusType;
+    }
+    const collectionStatus = this.active?.status;
+    return (collectionStatus || StatusTypes.unpublish) as StatusType;
+  }
+
+  getStatusForSave(): StatusType {
+    return this.currentStatus;
+  }
+
+  setStatusLocal(status: StatusType): void {
+    logger.debug(`[CollectionState] Setting status locally to ${status}`);
+    this.setCollectionValue({
+      ...this.activeValue,
+      status,
+    });
+  }
+
+  hasStatus(status: StatusType): boolean {
+    return this.currentStatus === status;
+  }
+
+  get isScheduled(): boolean {
+    return this.currentStatus === StatusTypes.schedule && !!this.activeValue?._scheduled;
+  }
+
+  async toggleStatus(newValue: boolean, componentName = "Component"): Promise<boolean> {
+    if (newValue === this.isPublish) {
+      logger.debug(`[CollectionState] Status already ${newValue ? "published" : "unpublished"}`);
+      return true;
+    }
+    if (this.isStatusLoading) {
+      logger.warn("[CollectionState] Status toggle already in progress");
+      return false;
+    }
+    const now = Date.now();
+    if (now - this.lastStatusToggleTime < 500) {
+      logger.debug("[CollectionState] Throttling rapid status toggle");
+      return false;
+    }
+
+    this.isStatusLoading = true;
+    this.lastStatusToggleTime = now;
+
+    const newStatus = newValue ? StatusTypes.publish : StatusTypes.unpublish;
+    logger.debug(`[CollectionState] Toggling status to ${newStatus} (from ${componentName})`);
+
+    try {
+      if (this.activeValue?._id && this.active?._id) {
+        const result = await updateEntryStatus(
+          String(this.active._id),
+          String(this.activeValue._id),
+          newStatus,
+        );
+
+        if (result.success) {
+          this.setCollectionValue({
+            ...this.activeValue,
+            status: newStatus,
+            _scheduled: undefined,
+          });
+          toast.success(
+            newValue ? "Entry published successfully" : "Entry unpublished successfully",
+          );
+          return true;
+        }
+        toast.error(result.error || `Failed to ${newStatus} entry`);
+        return false;
+      }
+
+      this.setCollectionValue({
+        ...this.activeValue,
+        status: newStatus,
+      });
+      logger.debug(`[CollectionState] Status set to ${newStatus} (unsaved entry)`);
+      return true;
+    } catch (e) {
+      const error = e as Error;
+      toast.error(`Error updating status: ${error.message}`);
+      logger.error(`[CollectionState] Error in ${componentName}:`, error);
+      return false;
+    } finally {
+      this.isStatusLoading = false;
+    }
+  }
+
+  // --- Change Tracking State ---
+  hasChanges = $state(false);
+  initialDataSnapshot = $state("");
+
+  setHasChanges(v: boolean) {
+    this.hasChanges = v;
+  }
+
+  setInitialSnapshot(data: Record<string, unknown>) {
+    this.initialDataSnapshot = JSON.stringify(data);
+    this.hasChanges = false;
+  }
+
+  compareWithCurrent(currentData: Record<string, unknown>): boolean {
+    if (!this.initialDataSnapshot) return false;
+    const currentSnapshot = JSON.stringify(currentData);
+    const changed = currentSnapshot !== this.initialDataSnapshot;
+    if (this.hasChanges !== changed) {
+      this.hasChanges = changed;
+    }
+    return changed;
+  }
+
+  resetChanges() {
+    this.hasChanges = false;
+    this.initialDataSnapshot = "";
+  }
+
+  // --- Actions ---
+
+  setCollection(newCollection: Schema | null) {
+    this.active = newCollection;
+  }
+
+  setMode(newMode: ModeType) {
+    logger.debug(`CollectionState: mode changed from ${this.mode} to ${newMode}`);
+    this.mode = newMode;
+  }
+
+  setCollectionValue(newValue: Record<string, unknown>) {
+    this.activeValue = newValue;
+    // Business logic: ensure status is set if not present
+    if (this.activeValue && !("status" in this.activeValue)) {
+      this.activeValue.status = this.active?.status ?? "unpublish";
+    }
+  }
+
+  setModifyEntry(newFn: (status?: keyof typeof statusMap) => Promise<void>) {
+    this.modifyEntry = newFn;
+  }
+
+  private lastStructureHash = "";
+  private pendingStructureHash: string | null = null;
+
+  /**
+   * Monotonic counter bumped on every applied structure change. Lets an async
+   * consumer (e.g. the SSE-driven content refresh) detect that newer state landed
+   * while its request was in flight and drop its now-stale snapshot instead of
+   * overwriting the newer one. Plain number — a comparison token, not UI state.
+   */
+  structureRevision = 0;
+
+  setContentStructure(newContentStructure: ContentNode[]) {
+    this.pendingStructureHash = null;
+    this.applyContentStructure(newContentStructure);
+  }
+
+  setDraftContentStructure(newContentStructure: ContentNode[]) {
+    this.pendingStructureHash = structureFingerprint(newContentStructure);
+    this.applyContentStructure(newContentStructure);
+  }
+
+  applyRemoteContentStructure(newContentStructure: ContentNode[]): boolean {
+    const incomingHash = structureFingerprint(newContentStructure);
+    if (this.pendingStructureHash && incomingHash !== this.pendingStructureHash) {
+      logger.debug("CollectionState: ignored stale remote structure while draft is pending");
+      return false;
+    }
+    if (incomingHash === this.pendingStructureHash) {
+      this.pendingStructureHash = null;
+    }
+    this.applyContentStructure(newContentStructure, incomingHash);
+    return true;
+  }
+
+  private applyContentStructure(newContentStructure: ContentNode[], hash?: string) {
+    // Prevent redundant syncs that trigger reactivity loops
+    const currentHash = hash ?? structureFingerprint(newContentStructure);
+    if (currentHash === this.lastStructureHash) return;
+    this.lastStructureHash = currentHash;
+
+    this.structureRevision++;
+    this.contentStructure = newContentStructure;
+  }
+
+  /**
+   * Surgical patch when the active collection schema was recompiled.
+   * Preserves mode / activeValue / selection (no session break).
+   */
+  patchActiveSchema(schema: Schema) {
+    if (!schema?._id && !schema?.name) return;
+    const id = String(schema._id || schema.name);
+    if (this.active) {
+      const activeId = String(this.active._id || this.active.name || "");
+      if (activeId.toLowerCase() === id.toLowerCase() || this.active.name === schema.name) {
+        this.active = { ...this.active, ...schema, fields: schema.fields ?? this.active.fields };
+      }
+    }
+    if (schema._id) {
+      this.all = { ...this.all, [String(schema._id)]: schema };
+    }
+  }
+
+  setTargetWidget(newWidget: Widget) {
+    this.targetWidget = newWidget;
+    // Sync into active.fields so Save persists label, db_fieldName, required, icon, etc.
+    const idx = (newWidget as { __fieldIndex?: number }).__fieldIndex;
+    if (
+      typeof idx === "number" &&
+      this.active?.fields &&
+      idx >= 0 &&
+      idx < this.active.fields.length
+    ) {
+      const nextFields = [...this.active.fields];
+      const existing = nextFields[idx];
+      if (existing != null) {
+        const merged = { ...existing, ...newWidget };
+        delete (merged as Record<string, unknown>).__fieldIndex;
+        nextFields[idx] = merged;
+        this.active = { ...this.active, fields: nextFields };
+      }
+    }
+  }
+
+  // Entry selection management
+  addEntry(entryId: string) {
+    if (!this.selectedEntries.includes(entryId)) {
+      this.selectedEntries.push(entryId);
+    }
+  }
+
+  removeEntry(entryId: string) {
+    const index = this.selectedEntries.indexOf(entryId);
+    if (index > -1) {
+      this.selectedEntries.splice(index, 1);
+    }
+  }
+
+  clearSelected() {
+    this.selectedEntries.length = 0;
+  }
+
+  // Legacy compatibility getters/setters for smooth migration
+  get current() {
+    return this.active;
+  }
+  set current(v) {
+    this.active = v;
+  }
+}
+
+// Singleton instances
+export const collections = new CollectionState();
+
+/**
+ * BACKWARD COMPATIBILITY LAYER
+ * These exports are maintained to prevent immediate breakage.
+ * TODO: Migrate all consumers to use the 'collections' singleton.
+ */
+
+// Legacy 'collections' was a record. We bridge it to collections.all
+// This is tricky because it was a direct export of a $state object.
+// We'll provide a Proxy or just keep the old collections record for now if needed,
+// but let's try to migrate.
+
+// Actually, let's keep the discrete exports for now but wire them to the singleton.
+
+export const collection = {
+  get value() {
+    return collections.active;
+  },
+  set value(v) {
+    collections.active = v;
+  },
+};
+
+export const collectionValue = {
+  get value() {
+    return collections.activeValue;
+  },
+  set value(v) {
+    collections.setCollectionValue(v);
+  },
+};
+
+export const mode = {
+  get value() {
+    return collections.mode;
+  },
+  set value(v) {
+    collections.setMode(v);
+  },
+};
+
+export const contentStructure = {
+  get value() {
+    return collections.contentStructure;
+  },
+  set value(v) {
+    collections.contentStructure = v;
+  },
+};
+
+export const modifyEntry = {
+  get value() {
+    return collections.modifyEntry;
+  },
+  set value(v) {
+    collections.modifyEntry = v;
+  },
+};
+
+export const targetWidget = {
+  get value() {
+    return collections.targetWidget;
+  },
+  set value(v) {
+    collections.targetWidget = v;
+  },
+};
+
+// Action functions
+export const setCollection = (v: Schema | null) => collections.setCollection(v);
+export const setMode = (v: ModeType) => collections.setMode(v);
+export const setCollectionValue = (v: Record<string, unknown>) => collections.setCollectionValue(v);
+export const setModifyEntry = (v: (status?: keyof typeof statusMap) => Promise<void>) =>
+  collections.setModifyEntry(v);
+export const setContentStructure = (v: ContentNode[]) => collections.setContentStructure(v);
+export const setDraftContentStructure = (v: ContentNode[]) =>
+  collections.setDraftContentStructure(v);
+export const applyRemoteContentStructure = (v: ContentNode[]) =>
+  collections.applyRemoteContentStructure(v);
+/** Current structure revision — see `CollectionState.structureRevision`. */
+export const getStructureRevision = () => collections.structureRevision;
+export const setTargetWidget = (v: Widget) => collections.setTargetWidget(v);
+
+// Legacy derived/utility functions
+export const getTotalCollections = () => collections.total;
+export const getHasSelectedEntries = () => collections.hasSelected;
+export const getCurrentCollectionName = () => collections.activeName;
+
+export const entryActions = {
+  addEntry: (id: string) => collections.addEntry(id),
+  removeEntry: (id: string) => collections.removeEntry(id),
+  clear: () => collections.clearSelected(),
+};
+
+// Reactive getters for legacy components — reads from singleton directly
+export const currentCollectionId = {
+  get value() {
+    return collections.currentId;
+  },
+};
+export const collectionsLoading = {
+  get value() {
+    return collections.loading;
+  },
+};
+export const collectionsError = {
+  get value() {
+    return collections.error;
+  },
+};
+export const unAssigned = {
+  get value() {
+    return collections.unassigned;
+  },
+};
+export const selectedEntries = {
+  get value() {
+    return collections.selectedEntries;
+  },
+};

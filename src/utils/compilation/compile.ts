@@ -1,548 +1,730 @@
 /**
  * @file src/utils/compilation/compile.ts
- * @description Compiles TypeScript files from the collections folder into JavaScript files using vite with custom AST transformations
+ * @description Compiles TypeScript collection files into optimized JavaScript.
  *
- * Features:
- * - Recursive directory scanning for nested collections
- * - Avoids recompilation of unchanged files via hash comparison
- * - Content hashing for change detection
- * - Concurrent file operations for improved performance
- * - Support for nested category structure
- * - Error handling and logging
- * - Cleanup of orphaned collection files
- * - Name conflict detection to prevent duplicate collection names
- * - HASH and UUID Management for collections and widgets
+ * ### Bug fixes (audit 2026-07):
+ * - 1a: `targetFile` builds no longer wipe other compiled collections
+ * - 1b: Failed compiles preserve last-good output (re-added to processed set)
+ * - 1c: `tenantId: null` skips are now correctly detected (?? null normalization)
+ *
+ * ### Smart upgrades:
+ * - 2a: Compiler fingerprint — manifest invalidates when transformer/TS version changes
+ * - 2b: Dependency-aware invalidation — recompiles when imported helpers change
+ * - 2c: Deterministic widget UUIDs (in transformers.ts)
+ * - 2d: Manifest hygiene — relative keys, atomic writes, version field
+ * - 2e: Discovery hardening — excludes .d.ts, detects output collisions
+ *
+ * ### Performance design:
+ * - Single-pass composite transformer (5 AST traversals → 1)
+ * - O(1) queue via index cursor, not O(n) shift()
+ * - Adaptive concurrency: 75% of cores, min 4
+ * - Orphan file + empty directory cleanup on full builds only
+ * - 3a: Atomic `.js` writes (crash-safe)
+ * - 3b: `changedJsPaths` / `noOp` for surgical HMR + model provisioning
  */
 
-import fs from 'fs/promises';
-import path from 'path';
-import * as ts from 'typescript';
-import { v4 as uuidv4 } from 'uuid';
+import { xxhash64 } from "hash-wasm";
+import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import * as ts from "typescript";
+// RELATIVE import (not `@utils/...`): vite.config.ts dynamically imports this
+// module, and Vite's config loader (esbuild) cannot resolve path aliases — a
+// bare `@utils/hardware-profile` here breaks `svelte-kit sync` for the project.
+import { getHardwareProfile } from "../hardware-profile.ts";
+import { isValidTenantId } from "../tenant.ts";
+import { getCollectionsPath, getCompiledCollectionsPath } from "../tenant.server.ts";
+import { isBenchmarkArtifact, isBenchmarkRuntime } from "../benchmark-runtime.ts";
+import { isBenchmarkRelativePath } from "../benchmark-paths.ts";
+import { assertLiveDataWriteAllowed } from "../benchmark-sandbox.ts";
+import { atomicWriteFile } from "../atomic-write.ts";
+import { createCompositeTransformer } from "./transformers.ts";
+import { pathAliases } from "../../../path-aliases.ts";
+import type { CompilationResult, CompileOptions, Logger, ManifestEntry } from "./types.ts";
 
-// Note: Cannot import logger.server here as this file is imported by vite.config.ts
-// which runs before SvelteKit is initialized. Use console for build-time logging.
+// ─── Compile-time aliases (matching transformers.ts) ───────────────────
+const compileAliases: Record<string, string> = Object.fromEntries(
+  Object.entries(pathAliases).map(([k, v]) => [k, v.replace(/^\.\//, "")]),
+);
 
-interface CompileOptions {
-	systemCollections?: string;
-	userCollections?: string;
-	compiledCollections?: string;
-}
+// ─── Transformer version — bump on ANY transformer logic change ─────────
+const TRANSFORMER_VERSION = 6;
 
-interface ExistingFileData {
-	jsPath: string;
-	uuid: string | null;
-	hash: string | null;
-}
+// ─── Manifest metadata keys ─────────────────────────────────────────────
+const MANIFEST_ORDER_KEY = "collectionOrder";
+const MANIFEST_STRUCTURE_KEY = "structureNodes";
+const MANIFEST_FINGERPRINT_KEY = "__fingerprint";
+const MANIFEST_VERSION_KEY = "__version";
 
-export async function compile(options: CompileOptions = {}): Promise<void> {
-	// Define collection paths directly and use process.cwd()
-	const {
-		userCollections = path.posix.join(process.cwd(), 'config/collections'),
-		compiledCollections = path.posix.join(process.cwd(), 'compiledCollections')
-	} = options;
-
-	try {
-		// Ensure both input and output directories exist
-		await fs.mkdir(userCollections, { recursive: true });
-		await fs.mkdir(compiledCollections, { recursive: true });
-
-		// 1. Pre-scan existing compiled files
-		const { existingFilesByPath, existingFilesByHash } = await scanCompiledFiles(compiledCollections);
-
-		// 2. Get source TypeScript and JavaScript files
-		const sourceFiles = await getTypescriptAndJavascriptFiles(userCollections);
-		// Create a set of source file relative paths for quick lookup during clone detection
-		const sourceFileSet = new Set(sourceFiles);
-		// 3. Create output directories for source files
-		await createOutputDirectories(sourceFiles, compiledCollections);
-
-		// 4. Compile source files concurrently and track processed paths
-		const processedJsPaths = new Set<string>();
-		const compilePromises = sourceFiles.map(async (file) => {
-			const jsFilePath = await compileFile(file, userCollections, compiledCollections, existingFilesByPath, existingFilesByHash, sourceFileSet);
-			if (jsFilePath) {
-				processedJsPaths.add(jsFilePath);
-			}
-		});
-		await Promise.all(compilePromises);
-
-		// 5. Cleanup orphaned files
-		await cleanupOrphanedFiles(compiledCollections, existingFilesByPath, processedJsPaths);
-	} catch (error) {
-		if (error instanceof Error && error.message.includes('Collection name conflict')) {
-			console.error('Error:', error.message);
-			// Propagate the specific error
-			throw error;
-		}
-		// Rethrow other errors
-		throw error;
-	}
-}
-
-// Helper to scan existing compiled files and build lookup maps
-async function scanCompiledFiles(compiledCollections: string): Promise<{
-	existingFilesByPath: Map<string, ExistingFileData>;
-	existingFilesByHash: Map<string, ExistingFileData>;
-}> {
-	const existingFilesByPath = new Map<string, ExistingFileData>();
-	const existingFilesByHash = new Map<string, ExistingFileData>();
-
-	async function traverseDirectory(currentFolder: string) {
-		try {
-			const entries = await fs.readdir(currentFolder, { withFileTypes: true });
-			for (const entry of entries) {
-				const fullPath = path.posix.join(currentFolder, entry.name);
-				if (entry.isDirectory()) {
-					await traverseDirectory(fullPath);
-				} else if (entry.isFile() && entry.name.endsWith('.js')) {
-					const relativePath = path.posix.relative(compiledCollections, fullPath);
-					try {
-						const content = await fs.readFile(fullPath, 'utf8');
-						const hash = extractHashFromJs(content);
-						const uuid = extractUUIDFromJs(content);
-						const fileData: ExistingFileData = { jsPath: relativePath, uuid, hash };
-
-						existingFilesByPath.set(relativePath, fileData);
-						// Only add to hash map if hash is valid
-						if (hash) {
-							// Handle potential hash collisions (rare, but possible)
-							// If collision, prioritize the one already in the map or log a warning.
-							// For simplicity here, we overwrite, assuming MD5 collisions are unlikely for typical collection files.
-							existingFilesByHash.set(hash, fileData);
-						}
-					} catch (readError) {
-						console.warn(`Warning: Could not read or parse compiled file ${relativePath}:`, readError);
-					}
-				}
-			}
-		} catch (err) {
-			if (err instanceof Error && 'code' in err && err.code !== 'ENOENT') {
-				console.error(`Error scanning directory ${currentFolder}:`, err);
-			}
-		}
-	}
-
-	await traverseDirectory(compiledCollections);
-	return { existingFilesByPath, existingFilesByHash };
-}
-
-async function getTypescriptAndJavascriptFiles(folder: string, subdir: string = ''): Promise<string[]> {
-	const files: string[] = [];
-
-	try {
-		const entries = await fs.readdir(path.posix.join(folder, subdir), { withFileTypes: true });
-		const dirCollectionNames = new Set<string>();
-
-		for (const entry of entries) {
-			const relativePath = path.posix.join(subdir, entry.name);
-
-			if (entry.isDirectory()) {
-				// Recursively get files from subdirectories
-				const subFiles = await getTypescriptAndJavascriptFiles(folder, relativePath);
-				files.push(...subFiles);
-			} else if (entry.isFile() && (entry.name.endsWith('.ts') || entry.name.endsWith('.js'))) {
-				const collectionName = entry.name.replace(/\.(ts|js)$/, '');
-				if (dirCollectionNames.has(collectionName)) {
-					// Construct full path for error message
-					const conflictPath = path.posix.join(folder, subdir, entry.name);
-					throw new Error(`Collection name conflict: "${collectionName}" is used multiple times in directory "${path.posix.dirname(conflictPath)}".`);
-				}
-				dirCollectionNames.add(collectionName);
-				files.push(relativePath);
-			}
-		}
-	} catch (err) {
-		if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
-			console.warn(`Source directory not found: ${path.posix.join(folder, subdir)}`);
-			return [];
-		}
-		// Rethrow other errors
-		throw err;
-	}
-
-	return files;
-}
-
-// Updated cleanup function
-export async function cleanupOrphanedFiles(
-	compiledCollections: string,
-	existingFilesByPath: Map<string, ExistingFileData>,
-	processedJsPaths: Set<string>
-): Promise<void> {
-	const unlinkPromises: Promise<void>[] = [];
-
-	// Iterate through the files found during the initial scan
-	for (const relativePath of existingFilesByPath.keys()) {
-		// Only need the path (key)
-		// If a file existed before but wasn't processed in this run (not compiled, not skipped), it's orphaned.
-		if (!processedJsPaths.has(relativePath)) {
-			const fullPath = path.posix.join(compiledCollections, relativePath);
-			// Keep essential log for removal action
-			console.log(`Removing orphaned collection file: ${relativePath}`);
-			// Add the unlink promise to the array
-			unlinkPromises.push(fs.unlink(fullPath).catch((err) => console.error(`Error removing orphaned file ${fullPath}:`, err)));
-		}
-	}
-
-	// Wait for all unlink operations to complete
-	await Promise.all(unlinkPromises);
-
-	// Clean up empty directories using a recursive function with a post-order traversal
-	async function removeEmptyDirs(folder: string): Promise<boolean> {
-		let entries;
-		try {
-			entries = await fs.readdir(folder, { withFileTypes: true });
-		} catch (err) {
-			if (err instanceof Error && 'code' in err && err.code === 'ENOENT') return true;
-			console.error(`Error reading directory ${folder} for cleanup:`, err);
-			return false;
-		}
-
-		let isEmpty = true;
-		const dirPromises: Promise<boolean>[] = [];
-
-		for (const entry of entries) {
-			const fullPath = path.posix.join(folder, entry.name);
-			if (entry.isDirectory()) {
-				// Recursively check subdirectory and add promise
-				dirPromises.push(removeEmptyDirs(fullPath));
-			} else {
-				// If there's a file, the directory is not empty
-				isEmpty = false;
-			}
-		}
-
-		if ((await Promise.all(dirPromises)).some((res) => !res)) {
-			isEmpty = false;
-		}
-
-		if (isEmpty) {
-			try {
-				await fs.rmdir(folder);
-				return true;
-			} catch (rmErr) {
-				console.error(`Error removing directory ${folder}:`, rmErr);
-				return false;
-			}
-		}
-		return false;
-	}
-
-	// Start cleanup from the root compiled directory
-	await removeEmptyDirs(compiledCollections);
-}
-
-// Optimized for creating nested output directories
-async function createOutputDirectories(files: string[], destFolder: string): Promise<void> {
-	const directories = new Set(files.map((file) => path.posix.dirname(file)).filter((dir) => dir !== '.'));
-	const mkdirPromises = Array.from(directories).map((dir) => fs.mkdir(path.posix.join(destFolder, dir), { recursive: true }));
-	await Promise.all(mkdirPromises);
-}
-
-// Updated compileFile function
-async function compileFile(
-	file: string,
-	srcFolder: string,
-	destFolder: string,
-	existingFilesByPath: Map<string, ExistingFileData>,
-	existingFilesByHash: Map<string, ExistingFileData>,
-	sourceFileSet: Set<string>
-): Promise<string | null> {
-	const sourceFilePath = path.posix.join(srcFolder, file);
-	const targetJsPathRelative = file.replace(/\.(ts|js)$/, '.js');
-	const targetJsPathAbsolute = path.posix.join(destFolder, targetJsPathRelative);
-	const shortPath = path.posix.relative(process.cwd(), targetJsPathAbsolute);
-
-	try {
-		// 1. Read the source file content
-		const sourceContent = await fs.readFile(sourceFilePath, 'utf8');
-		const sourceContentHash = getContentHash(sourceContent);
-		const existingDataAtPath = existingFilesByPath.get(targetJsPathRelative);
-
-		// Case 1: Target file exists and hash matches -> Reuse UUID, skip compile
-		if (existingDataAtPath && existingDataAtPath.hash === sourceContentHash) {
-			return targetJsPathRelative;
-		}
-
-		let uuid: string | null = null;
-		let uuidReason = '';
-		let isClone = false;
-		const existingDataByHash = existingFilesByHash.get(sourceContentHash);
-
-		if (!existingDataAtPath && existingDataByHash?.uuid) {
-			const potentialOriginalSourceTs = existingDataByHash.jsPath.replace(/\.js$/, '.ts');
-			const potentialOriginalSourceJs = existingDataByHash.jsPath;
-			const tsSourceExists = sourceFileSet.has(potentialOriginalSourceTs);
-			const jsSourceExists = sourceFileSet.has(potentialOriginalSourceJs);
-
-			if ((tsSourceExists && potentialOriginalSourceTs !== file) || (jsSourceExists && potentialOriginalSourceJs !== file)) {
-				// Original source still exists -> This is a CLONE
-				isClone = true;
-			} else {
-				// Original source likely gone -> This is a MOVE/RENAME
-				uuid = existingDataByHash.uuid;
-				uuidReason = 'Reused from content hash (move/rename)';
-			}
-		}
-
-		// Case 3: Target file exists but hash differs (and not a clone detected above) -> Reuse existing UUID at path if valid
-		if (!uuid && !isClone && existingDataAtPath && existingDataAtPath.uuid) {
-			uuid = existingDataAtPath.uuid;
-			uuidReason = 'Reused from existing file path';
-		}
-
-		// Case 4: No existing UUID found (or it's a clone) -> Generate new UUID
-		if (!uuid || isClone) {
-			uuid = uuidv4().replace(/-/g, '');
-			uuidReason = isClone ? 'Generated new (clone detected)' : 'Generated new';
-		}
-
-		const isTypeScript = file.endsWith('.ts');
-		const transpileResult = isTypeScript
-			? ts.transpileModule(sourceContent, {
-					compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext, esModuleInterop: true, allowJs: true }
-				})
-			: { outputText: sourceContent };
-
-		let finalCode = transformCodeWithAST(transpileResult.outputText, uuid);
-		finalCode = processHashAndUUID(finalCode, sourceContentHash, targetJsPathRelative, uuid);
-
-		await writeCompiledFile(targetJsPathAbsolute, finalCode);
-		console.log(`Compiled ${shortPath} (${uuidReason}: ${uuid})`);
-
-		return targetJsPathRelative;
-	} catch (error) {
-		console.error(`Error compiling file ${file}:`, error);
-		return null;
-	}
-}
-
-// --- AST Transformation Functions ---
-const printer = ts.createPrinter({ newLine: ts.NewLineKind.LineFeed });
-
-function transformCodeWithAST(code: string, uuid: string): string {
-	const sourceFile = ts.createSourceFile('tempFile.js', code, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS);
-	const transformationResult = ts.transform(sourceFile, [
-		schemaUuidTransformer(uuid), // Inject UUID into schema
-		widgetTransformer, // Apply custom transformations
-		addJsExtensionTransformer, // Add .js extensions
-		commonjsToEsModuleTransformer // Replace __filename and __dirname
-	]);
-	return printer.printFile(transformationResult.transformed[0]);
-}
-
-// Transformer factory for widget-related changes
-const widgetTransformer: ts.TransformerFactory<ts.SourceFile> = (context) => (sourceFile) => {
-	const visitor = (node: ts.Node): ts.VisitResult<ts.Node> => {
-		// 1. Remove widget imports
-		if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
-			const moduleSpecifier = node.moduleSpecifier.text;
-			let removeImport = false;
-
-			// Old pattern: import widgets from '@widgets'
-			if (node.importClause?.name?.text === 'widgets' && /widgets/.test(moduleSpecifier)) {
-				removeImport = true;
-			}
-
-			// New patterns (aliased):
-			if (node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)) {
-				const hasWidgetsAlias = node.importClause.namedBindings.elements.some((element) => element.name.text === 'widgets');
-
-				if (hasWidgetsAlias) {
-					// Check if it's one of the known widget sources
-					if (
-						moduleSpecifier.includes('@stores/widgetStore.svelte') ||
-						moduleSpecifier.includes('@src/widgets/proxy') ||
-						moduleSpecifier.includes('widgets/proxy') ||
-						/widgets/.test(moduleSpecifier)
-					) {
-						removeImport = true;
-					}
-				}
-			}
-
-			if (removeImport) {
-				return []; // Return an empty array to remove the import node
-			}
-		}
-
-		// 2. Replace standalone `widgets` identifier with `globalThis.widgets`
-		if (ts.isIdentifier(node) && node.text === 'widgets') {
-			// Avoid replacing if it's already part of `globalThis.widgets` or a property name
-			if (
-				!ts.isPropertyAccessExpression(node.parent) ||
-				(ts.isPropertyAccessExpression(node.parent) && node.parent.name !== node) ||
-				(ts.isPropertyAccessExpression(node.parent) &&
-					node.parent.expression.kind !== ts.SyntaxKind.ThisKeyword &&
-					(!ts.isIdentifier(node.parent.expression) || node.parent.expression.text !== 'globalThis'))
-			) {
-				return ts.factory.createPropertyAccessExpression(ts.factory.createIdentifier('globalThis'), ts.factory.createIdentifier('widgets'));
-			}
-		}
-
-		// 3. Inject UUID into widget calls
-		if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-			const isWidgetCall =
-				ts.isPropertyAccessExpression(node.expression.expression) &&
-				ts.isIdentifier(node.expression.expression.expression) &&
-				node.expression.expression.expression.text === 'globalThis' &&
-				ts.isIdentifier(node.expression.expression.name) &&
-				node.expression.expression.name.text === 'widgets';
-			if (isWidgetCall && node.arguments.length > 0 && ts.isObjectLiteralExpression(node.arguments[0])) {
-				const objectLiteral = node.arguments[0];
-				const hasUuid = objectLiteral.properties.some(
-					(prop) => ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === 'uuid'
-				);
-				if (!hasUuid) {
-					const uuidProperty = ts.factory.createPropertyAssignment('uuid', ts.factory.createStringLiteral(uuidv4()));
-					const updatedProperties = [uuidProperty, ...objectLiteral.properties];
-					const updatedObjectLiteral = ts.factory.updateObjectLiteralExpression(objectLiteral, updatedProperties);
-					return ts.factory.updateCallExpression(node, node.expression, node.typeArguments, [updatedObjectLiteral, ...node.arguments.slice(1)]);
-				}
-			}
-		}
-
-		return ts.visitEachChild(node, visitor, context);
-	};
-	return ts.visitNode(sourceFile, visitor) as ts.SourceFile;
+// ─── Compiler options used for fingerprinting ───────────────────────────
+const COMPILER_OPTIONS: ts.CompilerOptions = {
+  target: ts.ScriptTarget.ESNext,
+  module: ts.ModuleKind.ESNext,
+  moduleResolution: ts.ModuleResolutionKind.NodeJs,
+  allowJs: true,
+  checkJs: false,
+  skipLibCheck: true,
+  esModuleInterop: true,
 };
 
-// Transformer factory specifically for adding .js extensions to relative imports/exports
-const addJsExtensionTransformer: ts.TransformerFactory<ts.SourceFile> = (context) => (sourceFile) => {
-	const visitor = (node: ts.Node): ts.VisitResult<ts.Node> => {
-		if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
-			const specifier = node.moduleSpecifier.text;
-			if (specifier.startsWith('.') && !specifier.endsWith('.js') && !specifier.endsWith('.json')) {
-				// Avoid adding .js to .json
-				const newSpecifier = ts.factory.createStringLiteral(specifier + '.js');
-				if (ts.isImportDeclaration(node)) {
-					return ts.factory.updateImportDeclaration(node, node.modifiers, node.importClause, newSpecifier, node.assertClause);
-				} else {
-					return ts.factory.updateExportDeclaration(node, node.modifiers, node.isTypeOnly, node.exportClause, newSpecifier, node.assertClause);
-				}
-			}
-		}
-		return ts.visitEachChild(node, visitor, context);
-	};
-	return ts.visitNode(sourceFile, visitor) as ts.SourceFile;
+// ─── Compiler fingerprint — invalidates manifest when toolchain changes ─
+async function computeFingerprint(): Promise<string> {
+  const input = JSON.stringify({
+    ts: ts.version,
+    compilerOptions: COMPILER_OPTIONS,
+    aliases: compileAliases,
+    transformerVersion: TRANSFORMER_VERSION,
+  });
+  return createHash("sha256").update(input).digest("hex").slice(0, 16);
+}
+
+interface LoadedManifest {
+  collectionOrder?: Record<string, number>;
+  structureNodes?: unknown[];
+  entries: Map<string, ManifestEntry>;
+  fingerprint?: string;
+  version?: number;
+}
+
+// ─── Logger ──────────────────────────────────────────────────────────────
+// Quiet progress logs in automated test runners (vitest / bun test / CI unit).
+function isCompileQuiet(): boolean {
+  if ((globalThis as any).__SVELTY_QUIET__ === true) return true;
+  const env = typeof process !== "undefined" ? process.env : undefined;
+  if (!env) return false;
+  // Vitest sets VITEST="true"; also honor mode flags and argv fallbacks.
+  if (env.VITEST != null && env.VITEST !== "" && env.VITEST !== "false" && env.VITEST !== "0") {
+    return true;
+  }
+  if (env.TEST_MODE === "true" || env.BUN_TEST === "true" || env.NODE_ENV === "test") {
+    return true;
+  }
+  if (env.CI === "true" && env.COMPILE_VERBOSE !== "true") {
+    // CI unit jobs: quiet unless explicitly verbose
+    if (env.VITEST != null || env.npm_lifecycle_event?.includes("test")) return true;
+  }
+  try {
+    const argv = process.argv.join(" ");
+    if (/\bvitest\b/.test(argv) || /\.test\.[tj]sx?\b/.test(argv)) return true;
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
+const silentLogger: Logger = {
+  info: () => {},
+  success: () => {},
+  warn: () => {},
+  error: (msg, err) => console.error(`\x1b[34m[Compile]\x1b[0m \x1b[31m${msg}\x1b[0m`, err),
 };
 
-// Transformer factory for converting CommonJS globals to ES module equivalents
-const commonjsToEsModuleTransformer: ts.TransformerFactory<ts.SourceFile> = (context) => (sourceFile) => {
-	let needsFileURLToPath = false;
-	const visitor = (node: ts.Node): ts.VisitResult<ts.Node> => {
-		// Replace __filename with ES module equivalent
-		if (ts.isIdentifier(node) && node.text === '__filename') {
-			needsFileURLToPath = true;
-			// Create: fileURLToPath(import.meta.url)
-			return ts.factory.createCallExpression(ts.factory.createIdentifier('fileURLToPath'), undefined, [
-				ts.factory.createPropertyAccessExpression(
-					ts.factory.createMetaProperty(ts.SyntaxKind.ImportKeyword, ts.factory.createIdentifier('meta')),
-					'url'
-				)
-			]);
-		}
-
-		// Replace __dirname with ES module equivalent
-		if (ts.isIdentifier(node) && node.text === '__dirname') {
-			needsFileURLToPath = true;
-			return ts.factory.createCallExpression(ts.factory.createPropertyAccessExpression(ts.factory.createIdentifier('path'), 'dirname'), undefined, [
-				ts.factory.createCallExpression(ts.factory.createIdentifier('fileURLToPath'), undefined, [
-					ts.factory.createPropertyAccessExpression(
-						ts.factory.createMetaProperty(ts.SyntaxKind.ImportKeyword, ts.factory.createIdentifier('meta')),
-						'url'
-					)
-				])
-			]);
-		}
-		return ts.visitEachChild(node, visitor, context);
-	};
-
-	let transformedFile = ts.visitNode(sourceFile, visitor) as ts.SourceFile;
-	if (needsFileURLToPath) {
-		const urlImport = ts.factory.createImportDeclaration(
-			undefined,
-			ts.factory.createImportClause(
-				false,
-				undefined,
-				ts.factory.createNamedImports([ts.factory.createImportSpecifier(false, undefined, ts.factory.createIdentifier('fileURLToPath'))])
-			),
-			ts.factory.createStringLiteral('url')
-		);
-		const pathImport = ts.factory.createImportDeclaration(
-			undefined,
-			ts.factory.createImportClause(false, ts.factory.createIdentifier('path'), undefined),
-			ts.factory.createStringLiteral('path')
-		);
-		transformedFile = ts.factory.updateSourceFile(transformedFile, [urlImport, pathImport, ...transformedFile.statements]);
-	}
-	return transformedFile;
+const verboseLogger: Logger = {
+  info: (msg) => console.log(`\x1b[34m[Compile]\x1b[0m ${msg}`),
+  success: (msg) => console.log(`\x1b[34m[Compile]\x1b[0m \x1b[32m${msg}\x1b[0m`),
+  warn: (msg) => console.warn(`\x1b[34m[Compile]\x1b[0m \x1b[33m${msg}\x1b[0m`),
+  error: (msg, err) => console.error(`\x1b[34m[Compile]\x1b[0m \x1b[31m${msg}\x1b[0m`, err),
 };
 
-const schemaUuidTransformer =
-	(uuid: string): ts.TransformerFactory<ts.SourceFile> =>
-	(context) =>
-	(sourceFile) => {
-		const visitor = (node: ts.Node): ts.VisitResult<ts.Node> => {
-			if (ts.isObjectLiteralExpression(node)) {
-				const hasSchemaProperties = node.properties.some(
-					(prop) =>
-						ts.isPropertyAssignment(prop) &&
-						ts.isIdentifier(prop.name) &&
-						['fields', 'icon', 'status', 'revision', 'livePreview'].includes(prop.name.text)
-				);
-				if (hasSchemaProperties) {
-					const hasIdProperty = node.properties.some(
-						(prop) => ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === '_id'
-					);
-					if (!hasIdProperty) {
-						const idProperty = ts.factory.createPropertyAssignment('_id', ts.factory.createStringLiteral(uuid));
-						return ts.factory.updateObjectLiteralExpression(node, [idProperty, ...node.properties]);
-					}
-				}
-			}
-			return ts.visitEachChild(node, visitor, context);
-		};
-		return ts.visitNode(sourceFile, visitor) as ts.SourceFile;
-	};
-
-function processHashAndUUID(code: string, hash: string, targetJsPathRelative: string, uuid: string): string {
-	let processedCode = code;
-	processedCode = processedCode.replace(/(\s*\*\s*@file\s+)(.*)/, `$1compiledCollections/${targetJsPathRelative}`);
-	processedCode = processedCode.replace(/^\/\/\s*HASH:\s*[a-f0-9]+\s*$/gm, '').replace(/^\/\/\s*UUID:\s*[a-f0-9-]+\s*$/gm, '');
-	processedCode = processedCode.trimStart();
-	const warningComment = `// WARNING: This file is automatically generated. Any changes made here will be lost.\n// Please edit the original source file in the 'config/collections' directory instead.`;
-	const hashComment = `// HASH: ${hash}`;
-	const uuidComment = `// UUID: ${uuid}`;
-	return `${warningComment}\n${hashComment}\n${uuidComment}\n\n${processedCode}`;
+function resolveLogger(override?: Logger): Logger {
+  if (override) return override;
+  return isCompileQuiet() ? silentLogger : verboseLogger;
 }
 
-async function writeCompiledFile(filePath: string, code: string): Promise<void> {
-	await fs.mkdir(path.posix.dirname(filePath), { recursive: true });
-	await fs.writeFile(filePath, code);
+// ─── Normalize manifest paths (Windows-safe, relative keys) ─────────────
+function normalizeCompiledJsPath(compiledDir: string, jsPath: string): string {
+  const resolvedDir = path.resolve(compiledDir);
+  if (path.isAbsolute(jsPath)) return path.normalize(jsPath);
+
+  const normalized = jsPath.replace(/\\/g, "/");
+  const compiledDirName = path.basename(resolvedDir);
+  // Escape — the build dir name is filesystem-derived and could contain regex metacharacters
+  const escapedDirName = compiledDirName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const prefixPattern = new RegExp(`^\\.?/?${escapedDirName}/`);
+  const relativeInsideCompiled = normalized.replace(prefixPattern, "");
+
+  if (relativeInsideCompiled !== normalized) {
+    return path.resolve(resolvedDir, relativeInsideCompiled.replace(/\//g, path.sep));
+  }
+
+  return path.resolve(resolvedDir, jsPath);
 }
 
-function getContentHash(content: string): string {
-	let hash = 0;
-	for (let i = 0; i < content.length; i++) {
-		const char = content.charCodeAt(i);
-		hash = (hash << 5) - hash + char;
-		hash &= hash;
-	}
-	// Convert to hex and ensure it's always positive
-	return Math.abs(hash).toString(16);
+// ─── Manifest entry type guard ──────────────────────────────────────────
+function isManifestEntry(value: unknown): value is ManifestEntry {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "sourcePath" in value &&
+    "sourceHash" in value &&
+    typeof (value as ManifestEntry).sourcePath === "string" &&
+    typeof (value as ManifestEntry).sourceHash === "string"
+  );
 }
 
-// Helper function to extract Hash from JS file content
-function extractHashFromJs(content: string): string | null {
-	//regex to handle potential whitespace variations and hex format
-	const match = content.match(/^\/\/\s*HASH:\s*([a-f0-9]+)\s*$/m);
-	return match ? match[1] : null;
+/**
+ * Core compilation function.
+ */
+export async function compile(options: CompileOptions = {}): Promise<CompilationResult> {
+  const startTime = Date.now();
+  const logger = resolveLogger(options.logger);
+
+  if (options.tenantId !== undefined && !isValidTenantId(options.tenantId)) {
+    throw new Error(`Invalid tenant ID: ${options.tenantId}`);
+  }
+
+  // Resolve paths — with tenant-aware fallback
+  let resolvedFrom: CompilationResult["resolvedFrom"] = "tenant";
+  let userCollections = path.resolve(
+    options.userCollections || getCollectionsPath(options.tenantId),
+  );
+  let compiledCollections = path.resolve(
+    options.compiledCollections || getCompiledCollectionsPath(options.tenantId),
+  );
+
+  // Smart fallback: bi-directional
+  if (options.tenantId !== undefined && !options.userCollections) {
+    try {
+      const entries = await fs.readdir(userCollections, { withFileTypes: true });
+      const hasTsFiles = entries.some((e) => e.isFile() && e.name.endsWith(".ts"));
+      if (!hasTsFiles) {
+        const flatCollections = path.resolve(getCollectionsPath(undefined));
+        const flatEntries = await fs
+          .readdir(flatCollections, { withFileTypes: true })
+          .catch(() => []);
+        if (flatEntries.some((e) => e.isFile() && e.name.endsWith(".ts"))) {
+          logger.warn(
+            `[Compile] ⚠️  Multi-tenant mode: tenant path empty, falling back to flat ${flatCollections}`,
+          );
+          logger.warn(
+            `[Compile] ⚠️  Run migration to move collections to config/${options.tenantId}/collections/`,
+          );
+          userCollections = flatCollections;
+          compiledCollections = path.resolve(
+            options.compiledCollections || getCompiledCollectionsPath(options.tenantId),
+          );
+          resolvedFrom = "tenant-fallback";
+        }
+      }
+    } catch {
+      resolvedFrom = "tenant-fallback";
+    }
+  }
+
+  if ((options.tenantId === undefined || options.tenantId === null) && !options.userCollections) {
+    try {
+      const flatEntries = await fs
+        .readdir(userCollections, { withFileTypes: true })
+        .catch(() => []);
+      const hasFlatTsFiles = flatEntries.some((e) => e.isFile() && e.name.endsWith(".ts"));
+      if (!hasFlatTsFiles) {
+        const configDir = path.resolve(process.cwd(), "config");
+        const configEntries = await fs.readdir(configDir, { withFileTypes: true }).catch(() => []);
+        for (const entry of configEntries) {
+          if (!entry.isDirectory() || entry.name === "collections") continue;
+          const tenantColDir = path.join(configDir, entry.name, "collections");
+          try {
+            const tenantEntries = await fs.readdir(tenantColDir, { withFileTypes: true });
+            if (tenantEntries.some((e) => e.isFile() && e.name.endsWith(".ts"))) {
+              logger.warn(
+                `[Compile] ⚠️  Single-tenant mode: collections found in config/${entry.name}/collections/`,
+              );
+              userCollections = path.resolve(tenantColDir);
+              compiledCollections = path.resolve(
+                options.compiledCollections || getCompiledCollectionsPath(entry.name),
+              );
+              resolvedFrom = "flat-fallback";
+              break;
+            }
+          } catch {
+            /* skip */
+          }
+        }
+      } else {
+        resolvedFrom = "flat";
+      }
+    } catch {
+      /* skip */
+    }
+  }
+
+  if (options.tenantId === undefined && resolvedFrom !== "flat-fallback") {
+    resolvedFrom = "flat";
+  }
+
+  // Adaptive concurrency: from the shared hardware profile (75% of cores, floor 4)
+  const concurrencyLimit = options.concurrency || getHardwareProfile().compileConcurrency;
+
+  const result: CompilationResult = {
+    processed: 0,
+    skipped: 0,
+    errors: [],
+    duration: 0,
+    orphanedFiles: [],
+    schemaWarnings: [],
+    resolvedFrom,
+    changedJsPaths: [],
+    changedSourceFiles: [],
+    noOp: true,
+  };
+
+  // Compute fingerprint for cache invalidation
+  const fingerprint = await computeFingerprint();
+
+  try {
+    // 1. Ensure directories exist
+    await fs.mkdir(userCollections, { recursive: true });
+    await fs.mkdir(compiledCollections, { recursive: true });
+
+    // 2. Load manifest for change detection
+    const {
+      entries: manifest,
+      collectionOrder,
+      structureNodes,
+      fingerprint: existingFingerprint,
+    } = await loadManifest(compiledCollections);
+
+    // 2a. Fingerprint check — invalidate entire manifest if toolchain changed
+    if (existingFingerprint && existingFingerprint !== fingerprint) {
+      logger.warn(
+        `[Compile] Compiler fingerprint changed (was ${existingFingerprint.slice(0, 8)}… → ${fingerprint.slice(0, 8)}…). Full rebuild.`,
+      );
+      manifest.clear();
+    }
+
+    // 3. Discover source files (recursive walk)
+    let sourceFiles = await getTypescriptAndJavascriptFiles(userCollections);
+
+    // 2e. Exclude .d.ts files, filter benchmark fixtures
+    sourceFiles = sourceFiles.filter(
+      (rp) => !rp.endsWith(".d.ts") && !rp.endsWith(".d.mts") && !rp.endsWith(".d.cts"),
+    );
+
+    if (!isBenchmarkRuntime()) {
+      // Only compile test-collections if explicitly requested via options.userCollections
+      const isExplicitTestTarget = options.userCollections
+        ? options.userCollections.includes("test-collections")
+        : false;
+      sourceFiles = sourceFiles.filter(
+        (rp) =>
+          (isExplicitTestTarget || !isBenchmarkRelativePath(rp)) &&
+          !isBenchmarkArtifact(path.basename(rp)),
+      );
+    }
+
+    // 2e. Detect output-path collisions (foo.ts + foo/index.ts both → foo.js)
+    detectOutputCollisions(sourceFiles, userCollections, logger);
+
+    if (sourceFiles.length === 0) {
+      // 1a: Only clean orphaned on full builds (no targetFile)
+      if (!options.targetFile) {
+        await removeOrphanedFiles(manifest, new Set(), result);
+        await removeEmptyDirs(compiledCollections);
+      }
+      await saveManifest(
+        compiledCollections,
+        manifest,
+        collectionOrder,
+        structureNodes,
+        fingerprint,
+      );
+      result.duration = Date.now() - startTime;
+      result.noOp = true;
+      logger.info("Compilation completed: 0 files found");
+      return result;
+    }
+
+    // Create output directory structure mirroring source
+    await createOutputDirectories(sourceFiles, compiledCollections);
+
+    // Pre-compute a source-path lookup map for O(1) targetFile matching
+    const sourceFileMap = new Map<string, string>();
+    for (const rp of sourceFiles) {
+      sourceFileMap.set(path.normalize(path.join(userCollections, rp)), rp);
+    }
+
+    const processedJsPaths = new Set<string>();
+
+    // 2d: Build hash → manifest entry map with tenant-qualified keys
+    const tenantQualifier = options.tenantId ?? "global";
+    const hashToManifestEntry = new Map<string, { targetPath: string; entry: ManifestEntry }>();
+    for (const [jsPath, entry] of manifest) {
+      const key = `${tenantQualifier}:${entry.sourceHash}`;
+      if (!hashToManifestEntry.has(key)) {
+        hashToManifestEntry.set(key, { targetPath: jsPath, entry });
+      }
+    }
+
+    // ─── Worker pool: index-based cursor (O(1) dequeue) ──────────────────
+    let cursor = 0;
+
+    const worker = async () => {
+      while (cursor < sourceFiles.length) {
+        const idx = cursor++;
+        const relativePath = sourceFiles[idx];
+        if (!relativePath) break;
+
+        // Optional per-file filter
+        if (options.targetFile) {
+          const normTarget = path.normalize(options.targetFile);
+          const normFile = path.normalize(path.join(userCollections, relativePath));
+          if (!normFile.endsWith(normTarget) && !normTarget.endsWith(relativePath)) continue;
+        }
+
+        const sourcePath = path.join(userCollections, relativePath);
+        const relativeDir = path.dirname(relativePath);
+        const fileNameWithoutExt = path.basename(relativePath, path.extname(relativePath));
+        const targetPath = path.resolve(
+          compiledCollections,
+          relativeDir,
+          `${fileNameWithoutExt}.js`,
+        );
+
+        try {
+          const content = await fs.readFile(sourcePath, "utf8");
+          const sourceHash = await xxhash64(content);
+
+          // Quick skip: hash + tenant match + output exists + deps unchanged
+          const existing = manifest.get(targetPath);
+
+          // 1c: Normalize both sides with ?? null
+          const sameTenant = (existing?.tenantId ?? null) === (options.tenantId ?? null);
+
+          let outputExists = false;
+          // Only stat if hash matches — saves syscalls on the common recompile path
+          if (existing?.sourceHash === sourceHash && sameTenant) {
+            try {
+              await fs.access(targetPath);
+              outputExists = true;
+            } catch {
+              /* file not found */
+            }
+          }
+
+          // 2b: Dependency check — recompile if any imported helper changed
+          let depsChanged = false;
+          if (outputExists && existing?.deps?.length) {
+            for (const depRel of existing.deps) {
+              const depPath = path.join(userCollections, depRel);
+              try {
+                const depContent = await fs.readFile(depPath, "utf8");
+                const depHash = await xxhash64(depContent);
+                const depExisting = manifest.get(
+                  path.resolve(compiledCollections, path.dirname(relativePath), depRel),
+                );
+                // If the dep has a different hash than what we recorded (or no entry),
+                // it was recompiled in a previous run → this file needs recompile too
+                if (!depExisting || depExisting.sourceHash !== depHash) {
+                  depsChanged = true;
+                  break;
+                }
+              } catch {
+                /* dep may not exist yet — recompile to be safe */
+              }
+            }
+          }
+
+          if (outputExists && existing?.sourceHash === sourceHash && sameTenant && !depsChanged) {
+            result.skipped++;
+            processedJsPaths.add(targetPath);
+            continue;
+          }
+
+          // 4. Resolve stable ID from hash to handle renames gracefully
+          let stableId: string | undefined;
+          const hashKey = `${tenantQualifier}:${sourceHash}`;
+          const hashMatch = hashToManifestEntry.get(hashKey);
+          if (hashMatch && hashMatch.targetPath !== targetPath) {
+            const oldBaseName = path.basename(hashMatch.targetPath, ".js");
+            stableId = oldBaseName.toLowerCase().replace(/[^a-z0-9]/g, "");
+            logger.info(
+              `[Compile] Detected rename: ${path.basename(relativePath)} (was ${oldBaseName}) — preserving _id`,
+            );
+          }
+
+          // 2b: Extract dependencies from source
+          const deps = extractDependencies(content, relativePath, userCollections);
+
+          // 5. Transform & compile with single-pass composite transformer
+          const compositeTransformer = createCompositeTransformer(options.tenantId, stableId);
+          const compilation = ts.transpileModule(content, {
+            compilerOptions: COMPILER_OPTIONS,
+            transformers: { before: [compositeTransformer] },
+            fileName: sourcePath,
+          });
+
+          // Strip whitespace from compiled JS — machine-read, not human-read
+          const minified = compilation.outputText
+            .replace(/\/\*[\s\S]*?\*\//g, "") // block comments
+            .replace(/\/\/[^\n]*/g, "") // line comments
+            .replace(/^\s+|\s+$/gm, "") // leading/trailing whitespace per line
+            .replace(/\n{2,}/g, "\n") // blank lines
+            .replace(/[ \t]+/g, " "); // multiple spaces to one
+
+          assertLiveDataWriteAllowed(targetPath);
+          // Crash-safe: temp + rename (same helper as manifest)
+          await atomicWriteFile(targetPath, minified);
+
+          manifest.set(targetPath, {
+            sourcePath: relativePath,
+            sourceHash,
+            compiledAt: Date.now(),
+            tenantId: options.tenantId ?? undefined,
+            deps,
+          });
+
+          result.processed++;
+          result.changedJsPaths.push(targetPath);
+          result.changedSourceFiles.push(relativePath);
+          processedJsPaths.add(targetPath);
+          logger.info(`Compiled ${relativePath}`);
+        } catch (err: any) {
+          result.errors.push({ file: relativePath, error: err });
+          logger.error(`Failed to compile ${relativePath}`, err);
+
+          // 1b: Preserve last-good output — re-add to processed set so
+          // orphan cleanup doesn't delete the previously-valid compiled file
+          if (manifest.has(targetPath)) {
+            processedJsPaths.add(targetPath);
+          }
+        }
+      }
+    };
+
+    const poolSize = Math.min(concurrencyLimit, sourceFiles.length);
+    const workers = Array.from({ length: poolSize }, () => worker());
+    await Promise.all(workers);
+
+    // 5. Orphaned file cleanup — FULL BUILDS ONLY (1a)
+    if (!options.targetFile) {
+      await removeOrphanedFiles(manifest, processedJsPaths, result);
+    }
+
+    // 6. Empty directory cleanup
+    await removeEmptyDirs(compiledCollections);
+
+    // 7. Persist manifest (with fingerprint)
+    await saveManifest(compiledCollections, manifest, collectionOrder, structureNodes, fingerprint);
+
+    result.duration = Date.now() - startTime;
+    result.noOp =
+      result.processed === 0 && result.errors.length === 0 && result.orphanedFiles.length === 0;
+    logger.success?.(
+      `Compilation completed: ${result.processed} processed, ${result.skipped} skipped, ${result.orphanedFiles.length} orphaned (${result.duration}ms)`,
+    );
+
+    return result;
+  } catch (error: any) {
+    logger.error("Compilation failed", error);
+    throw error;
+  }
 }
 
-// Helper function to extract UUID from JS file content
-function extractUUIDFromJs(content: string): string | null {
-	// regex
-	const match = content.match(/^\/\/\s*UUID:\s*([a-f0-9-]+)\s*$/m);
-	return match ? match[1] : null;
+// ─── Dependency extraction ──────────────────────────────────────────────
+function extractDependencies(
+  content: string,
+  _relativePath: string,
+  userCollections: string,
+): string[] {
+  try {
+    const info = ts.preProcessFile(content, true, true);
+    const deps: string[] = [];
+    const seen = new Set<string>();
+    for (const ref of info.importedFiles) {
+      const depRel = path.relative(userCollections, ref.fileName).replace(/\\/g, "/");
+      if (depRel && !depRel.startsWith("..") && !seen.has(depRel)) {
+        seen.add(depRel);
+        deps.push(depRel);
+      }
+    }
+    return deps;
+  } catch {
+    return [];
+  }
+}
+
+// ─── Output collision detection ─────────────────────────────────────────
+function detectOutputCollisions(
+  sourceFiles: string[],
+  _userCollections: string,
+  logger: Logger,
+): void {
+  const targetMap = new Map<string, string[]>();
+  for (const rp of sourceFiles) {
+    const ext = path.extname(rp);
+    const target = rp.slice(0, rp.length - ext.length) + ".js";
+    const existing = targetMap.get(target);
+    if (existing) {
+      logger.warn(
+        `[Compile] ⚠️  Output collision: ${existing.join(", ")} both target ${target} — last write wins`,
+      );
+      existing.push(rp);
+    } else {
+      targetMap.set(target, [rp]);
+    }
+  }
+}
+
+// ─── Manifest load ──────────────────────────────────────────────────────
+async function loadManifest(dir: string): Promise<LoadedManifest> {
+  const manifestPath = path.join(dir, ".compilation-manifest.json");
+  const resolvedDir = path.resolve(dir);
+  try {
+    const raw = JSON.parse(await fs.readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    const collectionOrder =
+      raw[MANIFEST_ORDER_KEY] &&
+      typeof raw[MANIFEST_ORDER_KEY] === "object" &&
+      !Array.isArray(raw[MANIFEST_ORDER_KEY])
+        ? (raw[MANIFEST_ORDER_KEY] as Record<string, number>)
+        : undefined;
+    const structureNodes = Array.isArray(raw[MANIFEST_STRUCTURE_KEY])
+      ? raw[MANIFEST_STRUCTURE_KEY]
+      : undefined;
+    const fingerprint =
+      typeof raw[MANIFEST_FINGERPRINT_KEY] === "string"
+        ? (raw[MANIFEST_FINGERPRINT_KEY] as string)
+        : undefined;
+    const version =
+      typeof raw[MANIFEST_VERSION_KEY] === "number"
+        ? (raw[MANIFEST_VERSION_KEY] as number)
+        : undefined;
+
+    const entries = new Map<string, ManifestEntry>();
+    for (const [key, value] of Object.entries(raw)) {
+      if (
+        key === MANIFEST_ORDER_KEY ||
+        key === MANIFEST_STRUCTURE_KEY ||
+        key === MANIFEST_FINGERPRINT_KEY ||
+        key === MANIFEST_VERSION_KEY
+      )
+        continue;
+      if (!isManifestEntry(value)) continue;
+      entries.set(normalizeCompiledJsPath(resolvedDir, key), value);
+    }
+    return { entries, collectionOrder, structureNodes, fingerprint, version };
+  } catch {
+    return { entries: new Map() };
+  }
+}
+
+// ─── Manifest save (atomic write) ───────────────────────────────────────
+async function saveManifest(
+  dir: string,
+  manifest: Map<string, ManifestEntry>,
+  collectionOrder?: Record<string, number>,
+  structureNodes?: unknown[],
+  fingerprint?: string,
+) {
+  const manifestPath = path.join(dir, ".compilation-manifest.json");
+  const payload: Record<string, unknown> = Object.fromEntries(manifest);
+
+  if (fingerprint) payload[MANIFEST_FINGERPRINT_KEY] = fingerprint;
+  payload[MANIFEST_VERSION_KEY] = TRANSFORMER_VERSION;
+
+  // Preserve collectionOrder from previous run if not provided
+  if (collectionOrder && Object.keys(collectionOrder).length > 0) {
+    payload[MANIFEST_ORDER_KEY] = collectionOrder;
+  } else {
+    try {
+      const existing = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+      if (existing[MANIFEST_ORDER_KEY]) payload[MANIFEST_ORDER_KEY] = existing[MANIFEST_ORDER_KEY];
+    } catch {
+      /* no prior manifest */
+    }
+  }
+
+  // Preserve structureNodes from previous run if not provided
+  if (structureNodes?.length) {
+    payload[MANIFEST_STRUCTURE_KEY] = structureNodes;
+  } else {
+    try {
+      const existing = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+      if (existing[MANIFEST_STRUCTURE_KEY]) {
+        payload[MANIFEST_STRUCTURE_KEY] = existing[MANIFEST_STRUCTURE_KEY];
+      }
+    } catch {
+      /* no prior manifest */
+    }
+  }
+
+  assertLiveDataWriteAllowed(manifestPath);
+
+  // Windows-safe atomic write (EPERM on rename under parallel Playwright workers)
+  const { atomicWriteJson } = await import("../atomic-write.ts");
+  await atomicWriteJson(manifestPath, payload);
+}
+
+// ─── File discovery (recursive, excludes .d.ts) ─────────────────────────
+async function getTypescriptAndJavascriptFiles(dir: string): Promise<string[]> {
+  const files: string[] = [];
+
+  async function walk(currentDir: string) {
+    const entries = await fs.readdir(currentDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+      } else if (entry.isFile()) {
+        const name = entry.name;
+        // 2e: Exclude .d.ts files and only include .ts/.js
+        if (
+          (name.endsWith(".ts") || name.endsWith(".js")) &&
+          !name.endsWith(".d.ts") &&
+          !name.endsWith(".d.mts") &&
+          !name.endsWith(".d.cts")
+        ) {
+          files.push(path.relative(dir, fullPath));
+        }
+      }
+    }
+  }
+
+  await walk(dir);
+  return files;
+}
+
+// ─── Output directory creation (mirrors source tree) ────────────────────
+async function createOutputDirectories(files: string[], baseDir: string) {
+  const dirs = new Set(files.map((f) => path.dirname(path.join(baseDir, f))));
+  await Promise.all(Array.from(dirs, (d) => fs.mkdir(d, { recursive: true })));
+}
+
+// ─── Orphaned file cleanup ──────────────────────────────────────────────
+async function removeOrphanedFiles(
+  manifest: Map<string, ManifestEntry>,
+  processed: Set<string>,
+  result: CompilationResult,
+) {
+  for (const [jsPath] of manifest) {
+    if (!processed.has(jsPath)) {
+      try {
+        await fs.unlink(jsPath);
+      } catch {
+        /* race condition or already deleted */
+      }
+      result.orphanedFiles.push(jsPath);
+      manifest.delete(jsPath);
+    }
+  }
+}
+
+// ─── Empty directory cleanup (post-orphan sweep) ────────────────────────
+async function removeEmptyDirs(baseDir: string): Promise<void> {
+  try {
+    const entries = await fs.readdir(baseDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const fullPath = path.join(baseDir, entry.name);
+      await removeEmptyDirs(fullPath);
+      try {
+        if ((await fs.readdir(fullPath)).length === 0) {
+          await fs.rmdir(fullPath);
+        }
+      } catch {
+        /* skip unreadable */
+      }
+    }
+  } catch {
+    /* skip unreadable */
+  }
 }

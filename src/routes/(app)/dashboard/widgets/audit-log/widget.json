@@ -1,0 +1,18 @@
+{
+  "id": "audit-log",
+  "name": "Audit Log",
+  "description": "Monitor system activity and security events",
+  "icon": "mdi:history",
+  "version": "1.0.0",
+  "type": "dashboard-widget",
+  "author": "SveltyCMS",
+  "license": "freemium",
+  "price": 24.99,
+  "component": "index",
+  "defaultSize": {
+    "w": 1,
+    "h": 2
+  },
+  "category": "logs",
+  "sveltycms": ">=0.0.8"
+}

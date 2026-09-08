@@ -1,0 +1,1065 @@
+/**
+ * @file scripts/benchmark-matrix/index.ts
+ * @description Smart benchmark matrix orchestrator.
+ *
+ * Starts ONE server per database, seeds comprehensive data once,
+ * runs all benchmark tests against the shared server,
+ * shows per-test results inline with ETA, stops on first failure, evaluates results.
+ *
+ * Features:
+ * - clean, minimal terminal output with \r running indicators
+ * - ETA calculation using weighted heuristics
+ * - smart test grouping with ordered execution
+ * - fail-fast on first test failure
+ * - per-database report evaluation
+ *
+ * ### Benchmark modes (config isolation)
+ * - **Local** (`config/private.ts` exists): env-only via `BENCHMARK=true` — never reads or
+ *   writes the developer's `private.ts`. Uses isolated DB (`benchmark_shared` for SQLite).
+ *   Skips setup wizard; seeds via `/api/testing` only (same as `setupBenchmarkServer`).
+ * - **CI-fresh** (no `config/private.ts`, mirrors `.github/workflows/ci.yml` bench-core):
+ *   runs `setup-system.ts` wizard (writes `private.test.ts` under `TEST_MODE`).
+ *
+ * Usage:
+ *   COMPILE_ALL_ADAPTERS=true bun run build
+ *   bun run benchmark --db=sqlite
+ *   bun run scripts/benchmark-matrix/index.ts --db=sqlite,mongodb
+ */
+
+import { spawn, execSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { getBenchmarkTestEnv } from "../../src/utils/test-db-credentials";
+import {
+  getLocalSandboxMediaRel,
+  getLocalSandboxMediaRoot,
+  printBenchmarkIsolationBanner,
+  resolveBenchmarkProfile,
+} from "../../src/utils/benchmark-sandbox";
+import { getTestApiSecret } from "./config";
+
+/** After these tests the shared server is often unhealthy — force restart. */
+const DESTRUCTIVE_OR_STRESS_TESTS = new Set([
+  "concurrency-max",
+  "concurrency-race",
+  "concurrency-throughput",
+  "database-failover",
+  "chaos-resilience",
+  "circuit-breaker-failover",
+  "failure-propagation",
+  "data-residency-failover",
+  "graphql-stress",
+  "throttling-backoff-stress",
+  "media-upload-stress",
+  "large-payload-streaming",
+  "websocket-broadcast",
+]);
+
+/**
+ * Destructive tests that leave the server measurably degraded for the NEXT
+ * test — verified empirically across full 4-DB matrix runs (2026-08-23):
+ * `graphql-stress` → relational-performance (deep GraphQL queries 429/fail) and
+ * `large-payload-streaming` → migration-scale (bulk mutations fail). A post-run
+ * health/probe can't predict these (they break during the successor's own
+ * setup), so these two keep an UNCONDITIONAL restart. The other destructive
+ * tests are probed and only restart when the server actually failed.
+ */
+const ALWAYS_RESTART_AFTER = new Set(["graphql-stress", "large-payload-streaming"]);
+
+const DBS = ["sqlite", "mariadb", "postgresql", "mongodb"];
+// 🛡️ `--db=` with an EMPTY value (or unknown names) must not silently run zero
+// databases — normalize, drop empties, then fall back to the full set.
+const dbArg = process.argv.find((a) => a.startsWith("--db="));
+const filterRaw = dbArg ? dbArg.split("=")[1] : null;
+const filter = filterRaw ? filterRaw.toLowerCase().split(",").filter(Boolean) : null;
+const databases = filter && filter.length > 0 ? DBS.filter((d) => filter.includes(d)) : DBS;
+const CONTINUE_ON_ERROR =
+  process.argv.includes("--continue-on-error") || process.argv.includes("--continue");
+
+// Auto-discover all test files
+const benchmarksDir = path.resolve(process.cwd(), "tests/benchmarks");
+const testFiles = fs.existsSync(benchmarksDir)
+  ? fs
+      .readdirSync(benchmarksDir)
+      .filter((f) => f.endsWith(".test.ts"))
+      .sort()
+  : [];
+
+// Smart test ordering groups based on workload analysis
+const GROUPS = [
+  {
+    name: "Core HTTP Read",
+    parallel: true,
+    tests: [
+      "truth-latency",
+      "rest-api-performance",
+      "api-latency",
+      "auth-performance",
+      "failure-propagation",
+      "circuit-breaker-failover",
+      "chaos-resilience",
+    ],
+  },
+  {
+    name: "GraphQL + Cache",
+    parallel: true,
+    tests: [
+      "graphql-api-performance",
+      "graphql-stress",
+      "cache-performance",
+      "cache-hit-ratio",
+      "negative-cache",
+    ],
+  },
+  {
+    name: "Feature HTTP Read",
+    parallel: true,
+    tests: [
+      "admin-ux-vitality",
+      "multi-tenant-performance",
+      "openapi-performance",
+      "relational-performance",
+      "seo-performance",
+      "mixed-workload",
+      "realtime-performance",
+    ],
+  },
+  {
+    name: "SDK/Local Read",
+    parallel: true,
+    tests: [
+      "local-api-performance",
+      "entry-edit-hydration",
+      "widget-performance",
+      "etag-hash",
+      "ai-performance",
+      "telemetry-performance",
+    ],
+  },
+  {
+    name: "HTTP Write/Mutation",
+    parallel: false,
+    tests: [
+      "hooks-performance",
+      "production-day",
+      "data-residency-failover",
+      "temporal-integrity",
+      "client-journey",
+      "index-pressure",
+      "right-to-be-forgotten-audit",
+      "revision-stress",
+    ],
+  },
+  {
+    name: "SDK Write/Mutation",
+    parallel: false,
+    tests: [
+      "local-api-throughput",
+      "database-performance",
+      "transaction-acid",
+      "security-audit",
+      "behavioral-learning",
+      "cache-eviction-leak",
+      "cache-service",
+      "database-failover",
+    ],
+  },
+  {
+    name: "Filesystem + Stress",
+    parallel: false,
+    tests: [
+      "content-scan",
+      "content-incremental-reload",
+      "content-scale-stress",
+      "throttling-backoff-stress",
+      "state-machine-transition",
+      "media-performance",
+      "media-upload-stress",
+      "large-payload-streaming",
+      "migration-scale",
+      "concurrency-max",
+      "concurrency-race",
+      "concurrency-throughput",
+      "dev-dependency-load",
+      "edge-sync",
+      "websocket-broadcast",
+      "build-analysis",
+    ],
+  },
+];
+
+function getHistoricWeights(): Record<string, number> {
+  const jsonlPath = "tests/benchmarks/results/history.jsonl";
+  const weights: Record<string, number> = {};
+  if (!fs.existsSync(jsonlPath)) return weights;
+
+  try {
+    const raw = fs.readFileSync(jsonlPath, "utf8").trim().split("\n").filter(Boolean);
+    const entries = raw.map((line) => JSON.parse(line));
+
+    const groups: Record<string, number[]> = {};
+    for (const e of entries) {
+      if (e.testFile && e.wallClockMs && e.status === "SUCCESS") {
+        const baseName = path.basename(e.testFile).replace(".test.ts", "");
+        if (!groups[baseName]) groups[baseName] = [];
+        groups[baseName].push(e.wallClockMs);
+      }
+    }
+
+    for (const [testFile, times] of Object.entries(groups)) {
+      const avgSec = times.reduce((a, b) => a + b, 0) / times.length / 1000;
+      weights[testFile] = Math.max(avgSec, 1);
+    }
+  } catch {
+    // fallback
+  }
+  return weights;
+}
+
+// Tests to skip in matrix mode (not meaningful against a shared production server)
+const SKIP_IN_MATRIX = new Set([
+  "cold-start-phased", // Measures server boot time, meaningless against shared server
+  "setup-proxy", // Measures server boot + cold start, meaningless against shared server
+  "longevity-soak", // Runs for hours, not suitable for matrix
+  "memory-stability", // Runs for minutes measuring memory, not suitable for matrix
+  "throttling-backoff-stress", // Requires a dedicated RATE_LIMIT_MAX_REQUESTS=100 server (matrix uses 20000, 429 unreachable)
+  // ── Chaos-lab family ──
+  // These tests throw via requireTestInfrastructure() on production-mode servers:
+  // they need TEST_MODE synthetic failure injection (x-test-* headers, /api/testing
+  // actions). Running them against the honest production matrix server would either
+  // fail or measure nothing real — the guard is the intended behavior. They run in
+  // CI/standalone with TEST_MODE=true.
+  "failure-propagation",
+  "circuit-breaker-failover",
+  "chaos-resilience",
+  "data-residency-failover",
+  "database-failover",
+]);
+
+/**
+ * Estimated test durations (seconds) for ETA weighting.
+ * Used as fallback when fewer than 3 tests have completed,
+ * then actual averages take over.
+ */
+const TEST_WEIGHTS: Record<string, number> = {
+  // Core HTTP Read: ~12s avg
+  "truth-latency": 15,
+  "rest-api-performance": 5,
+  "api-latency": 3,
+  "auth-performance": 5,
+  "failure-propagation": 3,
+  "circuit-breaker-failover": 2,
+  "chaos-resilience": 60,
+  // GraphQL + Cache: ~10s avg
+  "graphql-api-performance": 10,
+  "graphql-stress": 10,
+  "cache-performance": 8,
+  "cache-hit-ratio": 10,
+  "negative-cache": 5,
+  // Feature HTTP Read: ~10s avg
+  "admin-ux-vitality": 10,
+  "multi-tenant-performance": 15,
+  "openapi-performance": 8,
+  "relational-performance": 12,
+  "seo-performance": 10,
+  "mixed-workload": 15,
+  "realtime-performance": 10,
+  // SDK/Local Read: ~5s avg
+  "local-api-performance": 5,
+  "entry-edit-hydration": 8,
+  "widget-performance": 10,
+  "etag-hash": 15,
+  "ai-performance": 5,
+  "telemetry-performance": 5,
+  // HTTP Write/Mutation: ~20s avg
+  "hooks-performance": 15,
+  "production-day": 20,
+  "data-residency-failover": 15,
+  "temporal-integrity": 10,
+  "client-journey": 15,
+  "index-pressure": 30,
+  "right-to-be-forgotten-audit": 15,
+  "revision-stress": 20,
+  // SDK Write/Mutation: ~20s avg
+  "local-api-throughput": 20,
+  "database-performance": 25,
+  "transaction-acid": 15,
+  "security-audit": 20,
+  "behavioral-learning": 10,
+  "cache-eviction-leak": 15,
+  "cache-service": 20,
+  "database-failover": 15,
+  // Filesystem + Stress: ~30s avg
+  "content-scan": 15,
+  "content-incremental-reload": 20,
+  "content-scale-stress": 20,
+  "throttling-backoff-stress": 15,
+  "state-machine-transition": 20,
+  "media-performance": 30,
+  "media-upload-stress": 25,
+  "large-payload-streaming": 20,
+  "migration-scale": 25,
+  "concurrency-max": 30,
+  "concurrency-race": 30,
+  "concurrency-throughput": 30,
+  "dev-dependency-load": 15,
+  "edge-sync": 10,
+  "websocket-broadcast": 20,
+  "build-analysis": 60,
+};
+
+function getTestName(file: string): string {
+  return file.replace(".test.ts", "");
+}
+
+function formatTime(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return `${m}m ${s}s`;
+}
+
+function isHealthReady(data: Record<string, unknown>): boolean {
+  const status = String(data.overallStatus ?? data.status ?? "").toUpperCase();
+  const db = data.database;
+  const dbOk = db === true || db === "connected";
+  const readyStates = new Set(["READY", "WARMED", "DEGRADED"]);
+  return readyStates.has(status) && dbOk;
+}
+
+async function waitForServerReady(url: string, maxAttempts = 90): Promise<boolean> {
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const r = await fetch(`${url}/api/system/health`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (!r.ok) continue;
+      const data = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+      if (isHealthReady(data)) return true;
+    } catch {
+      // retry
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return false;
+}
+
+function spawnTestProcess(
+  file: string,
+  serverEnv: Record<string, string>,
+  baseUrl: string,
+  runId: string,
+): Promise<{ code: number; durationMs: number; output: string }> {
+  return new Promise((resolve) => {
+    const testStartTime = performance.now();
+    const p = spawn("bun", ["test", `tests/benchmarks/${file}`, "--timeout", "300000"], {
+      stdio: ["inherit", "pipe", "pipe"],
+      shell: process.platform === "win32",
+      env: {
+        ...serverEnv,
+        API_BASE_URL: baseUrl,
+        BENCHMARK_MATRIX: "1",
+        BENCHMARK_RUN_ID: runId,
+        // 🏷️ Production-mode marker for the benchmark server (bun test overrides
+        // NODE_ENV/TEST_MODE in child processes, so this survives as the signal)
+        SVELTY_BENCHMARK_SERVER_MODE: serverEnv.NODE_ENV || "production",
+      } as Record<string, string>,
+    });
+
+    let output = "";
+    p.stdout.on("data", (d: Buffer) => {
+      output += d.toString();
+    });
+    p.stderr.on("data", (d: Buffer) => {
+      output += d.toString();
+    });
+
+    p.on("close", (code) => {
+      const durationMs = performance.now() - testStartTime;
+      resolve({
+        code: code ?? 1,
+        durationMs,
+        output,
+      });
+    });
+  });
+}
+
+function calculateGroupDuration(
+  groupFiles: string[],
+  historicWeights: Record<string, number>,
+  concurrency: number,
+): string {
+  let sum = 0;
+  for (const file of groupFiles) {
+    const name = getTestName(file);
+    sum += historicWeights[name] || TEST_WEIGHTS[name] || 10;
+  }
+  return formatTime(sum / concurrency);
+}
+
+function printProgressDashboard(opts: {
+  groupName: string;
+  groupDone: number;
+  groupTotal: number;
+  runningCount: number;
+  completedGlobal: number;
+  totalGlobal: number;
+  testEtaSeconds: number;
+  globalEtaSeconds: number;
+}) {
+  const width = 16;
+  const percent = Math.min(100, Math.max(0, (opts.completedGlobal / opts.totalGlobal) * 100));
+  const filled = Math.round((width * percent) / 100);
+  const bar = "\u2588".repeat(filled) + "\u2591".repeat(width - filled);
+  const active = opts.runningCount > 0 ? ` (${opts.runningCount} active)` : "";
+  const testEta = opts.runningCount > 0 ? ` | Test ETA: ${formatTime(opts.testEtaSeconds)}` : "";
+  const line1 = `  \u2192 Group [${opts.groupName}]: ${opts.groupDone}/${opts.groupTotal} passed${active}${testEta}`;
+  const line2 = `  \uD83D\uDCCA ${bar} ${Math.round(percent)}% | ${opts.completedGlobal}/${opts.totalGlobal} done | Total: ${formatTime(opts.globalEtaSeconds)}`;
+  process.stdout.write(`\r\x1B[K${line1}\n\x1B[K${line2}\x1B[1A`);
+}
+
+let globalRemainingFiles: string[] = [];
+const activeTestDurations = new Map<string, number>();
+
+function calculateGlobalRemainingSeconds(
+  runningTests: Set<string>,
+  historicWeights: Record<string, number>,
+  concurrency: number,
+): number {
+  let combinedWeightSeconds = 0;
+  for (const file of globalRemainingFiles) {
+    const name = getTestName(file);
+    combinedWeightSeconds += historicWeights[name] || TEST_WEIGHTS[name] || 10;
+  }
+  for (const file of runningTests) {
+    const name = getTestName(file);
+    const totalEst = historicWeights[name] || TEST_WEIGHTS[name] || 10;
+    const elapsed = (activeTestDurations.get(file) || 0) / 1000;
+    combinedWeightSeconds += Math.max(totalEst * 0.2, totalEst - elapsed);
+  }
+  return Math.max(0, combinedWeightSeconds / concurrency);
+}
+
+async function run() {
+  let totalFailed = 0;
+
+  const buildEntry = path.join(process.cwd(), "build", "index.js");
+  if (!fs.existsSync(buildEntry)) {
+    console.error("❌ build/index.js missing.");
+    console.error("   Run: COMPILE_ALL_ADAPTERS=true bun run build");
+    process.exit(1);
+  }
+
+  try {
+    const { spawnSync: sync } = await import("node:child_process");
+    // Prefer `bun` on PATH (Windows installs may not expose `bun.cmd` to spawnSync).
+    const verify = sync("bun", ["run", "scripts/verify-prod-build-backdoor.ts", "--mode=bench"], {
+      cwd: process.cwd(),
+      stdio: "pipe",
+      shell: process.platform === "win32",
+      env: process.env,
+    });
+    if (verify.status !== 0) {
+      console.error(verify.stderr?.toString() || verify.stdout?.toString());
+      console.error(
+        "❌ Benchmark build verification failed. Run: COMPILE_ALL_ADAPTERS=true bun run build",
+      );
+      process.exit(1);
+    }
+  } catch {
+    /* verify script optional in minimal env */
+  }
+
+  const profile = resolveBenchmarkProfile();
+  process.env.BENCHMARK_PROFILE = profile;
+  process.env.BENCHMARK = "true";
+
+  // Build ordered test list from smart groups
+  const allGroupedNames = new Set(GROUPS.flatMap((g) => g.tests));
+  const orderedTests: string[] = [];
+
+  for (const group of GROUPS) {
+    for (const testName of group.tests) {
+      const file = testFiles.find((f) => getTestName(f) === testName);
+      if (file && !orderedTests.includes(file)) {
+        orderedTests.push(file);
+      }
+    }
+  }
+
+  // Add any remaining ungrouped tests at the end
+  for (const file of testFiles) {
+    if (!allGroupedNames.has(getTestName(file))) {
+      orderedTests.push(file);
+    }
+  }
+
+  for (const db of databases) {
+    const useRedis = process.env.USE_REDIS === "true";
+    const dbLabel = useRedis ? `${db.toUpperCase()}+REDIS` : db.toUpperCase();
+    // Per-DB run id so finalizeReport does not mix sqlite+pg+mongo metrics
+    const BENCHMARK_RUN_ID = randomUUID();
+    console.log(`\n${"\u2501".repeat(70)}`);
+    console.log(`  ${dbLabel}: ${orderedTests.length} tests`);
+    console.log(`${"\u2501".repeat(70)}`);
+
+    // ── Phase 1: Start server ──
+    const port = 4173 + Math.floor(Math.random() * 500);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const apiSecret = getTestApiSecret();
+    const adminPassword = "Password123!";
+
+    printBenchmarkIsolationBanner(db);
+
+    // Always ensure media sandbox exists (local + ci-fresh — avoids ENOENT on first upload)
+    try {
+      fs.mkdirSync(getLocalSandboxMediaRoot(), { recursive: true });
+    } catch {
+      /* ignore */
+    }
+
+    const mediaFolderRel = getLocalSandboxMediaRel();
+    const serverEnv = {
+      ...getBenchmarkTestEnv(db, {
+        PORT: String(port),
+        API_BASE_URL: baseUrl,
+        ORIGIN: baseUrl,
+        HOST: "127.0.0.1",
+        // 🛡️ DB_PORT SAFETY: on hosts where a production Postgres owns :5432,
+        // the isolated test Postgres may run on :5433. Honor an EXPLICIT
+        // POSTGRES_TEST_PORT override; otherwise fall through to the canonical
+        // DB_PORTS.postgresql (5432) from getBenchmarkTestEnv — matching
+        // tests/docker-compose.yml and test-db-credentials.ts.
+        ...(db === "postgresql" && process.env.POSTGRES_TEST_PORT
+          ? { DB_PORT: process.env.POSTGRES_TEST_PORT }
+          : {}),
+        TEST_API_SECRET: apiSecret,
+        ADMIN_PASSWORD: adminPassword,
+        BENCHMARK_PROFILE: profile,
+        // Honour USE_REDIS=true for redis report variants (benchmark_*_redis.mdx)
+        USE_REDIS: process.env.USE_REDIS === "true" ? "true" : "false",
+        LOG_LEVEL: "fatal",
+        QUIET: "true",
+        // 🛡️ PRODUCTION PARITY: benchmark servers run NODE_ENV=production, no TEST_MODE.
+        // BENCHMARK is a harness marker only (env-only config, sandbox, setup force-complete).
+        NODE_ENV: "production",
+        BENCHMARK: "true",
+        // 🏢 Audit mode: BENCHMARK_AUDIT_MODE=compliance → AUDIT_CHAIN_SYNC=true,
+        // DISABLE_AUDIT_LOGS=false (enterprise compliance); default = production defaults.
+        BENCHMARK_AUDIT_MODE: process.env.BENCHMARK_AUDIT_MODE || "production",
+        AUDIT_CHAIN_SYNC: process.env.BENCHMARK_AUDIT_MODE === "compliance" ? "true" : "false",
+        DISABLE_AUDIT_LOGS: process.env.BENCHMARK_AUDIT_MODE === "compliance" ? "false" : "true",
+        // Deployment-tuned rate ceilings for load-testing (bucket machinery stays active)
+        RATE_LIMIT_MAX_REQUESTS: process.env.RATE_LIMIT_MAX_REQUESTS || "200000",
+        SECURITY_RATE_LIMIT_SCALE: process.env.SECURITY_RATE_LIMIT_SCALE || "100",
+        // Always point media at sandbox (ci-fresh wizard may leave mediaFolder missing)
+        MEDIA_FOLDER: mediaFolderRel,
+        ...(profile === "local" ? { BENCHMARK_LOCAL_SANDBOX: "1" } : {}),
+      }),
+    } as Record<string, string>;
+
+    let serverLogs = "";
+    /** True when the shared server child has exited (crash / kill). */
+    let serverExited = false;
+    const isBunRuntime = process.env.RUNTIME === "bun";
+    // Prefer index.bun.ts when RUNTIME=bun, index.cjs when Node (Yjs /ws on upgrade)
+    const serverEntry =
+      isBunRuntime && fs.existsSync(path.join(process.cwd(), "index.bun.ts"))
+        ? "index.bun.ts"
+        : fs.existsSync(path.join(process.cwd(), "index.cjs"))
+          ? "index.cjs"
+          : "build/index.js";
+    const runtimeExe = isBunRuntime ? "bun" : "node";
+
+    /**
+     * Rebuild if mid-run cleanup wiped production artifacts.
+     * MUST use COMPILE_ALL_ADAPTERS=true — plain `bun run build` strips /api/testing
+     * via testBackdoorStripperPlugin and breaks matrix seed/media.
+     */
+    const ensureBuildArtifacts = () => {
+      const handler = path.join(process.cwd(), "build", "handler.js");
+      const adapterEntry = path.join(process.cwd(), "build", "index.js");
+      const yjs = path.join(process.cwd(), "build", "yjs-sync-server.js");
+      const needsHandler = !fs.existsSync(handler);
+      const needsAdapter = !fs.existsSync(adapterEntry);
+      const needsYjs =
+        (serverEntry.endsWith("index.cjs") || serverEntry.endsWith("index.bun.ts")) &&
+        !fs.existsSync(yjs);
+      // Detect deploy-stripped builds (testing backdoor removed)
+      let stripped = false;
+      if (fs.existsSync(handler)) {
+        try {
+          const sample = fs.readFileSync(handler, "utf8");
+          stripped =
+            sample.includes("SVELTY_TEST_BACKDOOR_STRIPPED") ||
+            sample.includes("virtual:test-noop");
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!needsHandler && !needsAdapter && !needsYjs && !stripped) return;
+      process.stdout.write(
+        stripped
+          ? "  Rebuilding (restore testing harness; COMPILE_ALL_ADAPTERS)... "
+          : "  Rebuilding missing production artifacts (COMPILE_ALL_ADAPTERS)... ",
+      );
+      try {
+        execSync("bun run build", {
+          stdio: "pipe",
+          env: {
+            ...process.env,
+            COMPILE_ALL_ADAPTERS: "true",
+            NODE_ENV: "production",
+          },
+          timeout: 600_000,
+        } as any);
+        console.log("OK");
+      } catch (e: any) {
+        console.log("FAILED");
+        const note = e.stderr?.toString?.()?.slice(0, 400) || e.message;
+        console.error(`  Build recovery failed: ${note}`);
+        process.exit(1);
+      }
+    };
+
+    const startServer = () => {
+      ensureBuildArtifacts();
+      process.stdout.write(`  Starting server (${runtimeExe} ${serverEntry})... `);
+      serverExited = false;
+      const proc = spawn(runtimeExe, [serverEntry], {
+        env: serverEnv,
+        stdio: "pipe",
+        shell: false,
+      });
+      serverLogs = "";
+      const appendLog = (d: Buffer) => {
+        serverLogs += d.toString();
+        if (serverLogs.length > 50_000) serverLogs = serverLogs.slice(-40_000);
+      };
+      proc.stdout?.on("data", appendLog);
+      proc.stderr?.on("data", appendLog);
+      proc.on("exit", (code, signal) => {
+        serverExited = true;
+        serverLogs += `\n[matrix] server exited code=${code} signal=${signal}\n`;
+      });
+      proc.on("error", (err) => {
+        serverExited = true;
+        serverLogs += `\n[matrix] server spawn error: ${err.message}\n`;
+      });
+      return proc;
+    };
+
+    // ── Phase 1: Seed state (production mode — /api/testing is 403) ──
+    // Roles + admin + benchmark collections/entries MUST exist before the
+    // server boots so boot-time content initialization sees a complete state.
+    // Seeding runs via `bun test` (seed-runner) because plain `bun run` cannot
+    // execute `.svelte.ts` rune files ($derived) pulled in by CMS internals.
+    let setupOk = true;
+    const runPreSeed = async (): Promise<boolean> => {
+      const res = await spawnTestProcess(
+        "seed-runner.test.ts",
+        serverEnv,
+        baseUrl,
+        BENCHMARK_RUN_ID,
+      );
+      if (res.code !== 0) {
+        console.error(`  Seed runner output: ${res.output.slice(-800)}`);
+        return false;
+      }
+      return true;
+    };
+    process.stdout.write(`  Seeding state (bun test seed-runner)... `);
+    try {
+      setupOk = await runPreSeed();
+      console.log(setupOk ? "OK" : "FAILED");
+    } catch (e: unknown) {
+      setupOk = false;
+      console.log("FAILED");
+      console.error(`  Seed error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    let server = startServer();
+
+    let healthy = await waitForServerReady(baseUrl);
+    if (!healthy) {
+      console.log("FAILED");
+      console.error(`  Server at ${baseUrl} did not reach READY+database in 45s`);
+      console.error(`  Logs: ${serverLogs.slice(0, 500)}`);
+      try {
+        server.kill("SIGKILL");
+      } catch {
+        /* ignore */
+      }
+      totalFailed++;
+      console.error(`  Skipping remaining tests for ${dbLabel}; continuing with next DB…`);
+      continue;
+    }
+    console.log("OK");
+
+    /** MEDIA_FOLDER now comes from env (serverEnv) — no /api/testing in production mode. */
+
+    /** Kill + respawn shared matrix server (always). */
+    const forceRestartServer = async (reason: string) => {
+      process.stdout.write(`  Restarting server (${reason})... `);
+      try {
+        server.kill("SIGKILL");
+      } catch {
+        /* already dead */
+      }
+      // Wait until previous process is gone (avoids EADDRINUSE on Windows)
+      const deadDeadline = Date.now() + 5000;
+      while (!serverExited && Date.now() < deadDeadline) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      await new Promise((r) => setTimeout(r, 400));
+      server = startServer();
+      healthy = await waitForServerReady(baseUrl);
+      console.log(healthy ? "OK" : "FAILED");
+      if (!healthy) {
+        console.error(`  Server restart failed. Logs: ${serverLogs.slice(0, 800)}`);
+        throw new Error(`Server restart failed (${reason})`);
+      }
+      // Re-seed after cold restart (idempotent — /api/testing is 403 in
+      // production mode). Runs via `bun test` seed-runner (see Phase 1).
+      try {
+        if (!(await runPreSeed())) {
+          console.warn("  ⚠️  post-restart reseed failed");
+        }
+      } catch (e) {
+        console.warn(
+          `  ⚠️  post-restart reseed soft-failed: ${e instanceof Error ? e.message : e}`,
+        );
+      }
+    };
+
+    /** Restart when process died or health probe fails. */
+    const restartServerIfNeeded = async (reason: string) => {
+      if (!serverExited && (await waitForServerReady(baseUrl, 5))) return;
+      await forceRestartServer(serverExited ? `process-dead ${reason}` : reason);
+    };
+
+    // ── Phase 2: Post-boot verification ──
+    // Never process.exit here — one DB failure must not abort remaining DBs (e.g. mongo after postgres).
+    // State was seeded pre-boot via the seed-runner; each child test authenticates
+    // itself (real login) and resets the stable entry through the authenticated API.
+    console.log("  State pre-seeded; children authenticate with real sessions.");
+
+    if (!setupOk) {
+      try {
+        server.kill("SIGKILL");
+      } catch {
+        /* ignore */
+      }
+      totalFailed++;
+      console.error(`  Skipping remaining tests for ${dbLabel}; continuing with next DB…`);
+      continue;
+    }
+
+    // ── Phase 3: Run tests ──
+    let passed = 0;
+    let failed = 0;
+    let skipped = 0;
+    const startTime = Date.now();
+
+    // ETA tracking
+    let totalElapsedTime = 0;
+    let completedTests = 0;
+
+    // Load historic weights
+    const historicWeights = getHistoricWeights();
+
+    // Initialize global time tracker
+    globalRemainingFiles = orderedTests.filter((f) => !SKIP_IN_MATRIX.has(getTestName(f)));
+    const totalGlobalCount = globalRemainingFiles.length;
+
+    // Count skipped tests
+    for (const file of orderedTests) {
+      if (SKIP_IN_MATRIX.has(getTestName(file))) skipped++;
+    }
+
+    const runningTests = new Set<string>();
+
+    for (const group of GROUPS) {
+      const groupFiles = orderedTests.filter(
+        (f) => group.tests.includes(getTestName(f)) && !SKIP_IN_MATRIX.has(getTestName(f)),
+      );
+      if (groupFiles.length === 0) continue;
+
+      // Always serial against the shared server — parallel groups on
+      // MariaDB/Postgres/Mongo killed the process (process-dead storms).
+      const concurrency = 1;
+      const aboutTime = calculateGroupDuration(groupFiles, historicWeights, concurrency);
+
+      console.log(`\n  \u26A1 ${group.name} (${groupFiles.length} tests \u2248 ${aboutTime})`);
+      console.log(`  ${"\u2500".repeat(45)}`);
+
+      const groupQueue = [...groupFiles];
+      const groupTotalCount = groupFiles.length;
+      let groupPassedCount = 0;
+      const activePromises: Promise<void>[] = [];
+      activeTestDurations.clear();
+
+      // UI ticker (200ms refresh)
+      const UIInterval = setInterval(() => {
+        for (const file of runningTests) {
+          activeTestDurations.set(file, (activeTestDurations.get(file) || 0) + 200);
+        }
+        // Calculate test-level ETA for active tests
+        let testEtaSeconds = 0;
+        for (const file of runningTests) {
+          const name = getTestName(file);
+          const totalEst = historicWeights[name] || TEST_WEIGHTS[name] || 10;
+          const elapsed = (activeTestDurations.get(file) || 0) / 1000;
+          const remaining = Math.max(0, totalEst - elapsed);
+          if (testEtaSeconds === 0 || remaining < testEtaSeconds) testEtaSeconds = remaining;
+        }
+        const currentGlobalEta = calculateGlobalRemainingSeconds(
+          runningTests,
+          historicWeights,
+          concurrency,
+        );
+        printProgressDashboard({
+          groupName: group.name,
+          groupDone: groupPassedCount,
+          groupTotal: groupTotalCount,
+          runningCount: runningTests.size,
+          completedGlobal: completedTests,
+          totalGlobal: totalGlobalCount,
+          testEtaSeconds,
+          globalEtaSeconds: currentGlobalEta,
+        });
+      }, 200);
+
+      // 🛡️ try/finally: the dashboard interval must ALWAYS be cleared — even
+      // when the loop exits via an exception, it must not keep firing into stdout.
+      try {
+        while (groupQueue.length > 0 || activePromises.length > 0) {
+          while (activePromises.length < concurrency && groupQueue.length > 0) {
+            const file = groupQueue.shift()!;
+            globalRemainingFiles = globalRemainingFiles.filter((f) => f !== file);
+            runningTests.add(file);
+            activeTestDurations.set(file, 0);
+
+            const name = getTestName(file);
+
+            const testPromise = (async () => {
+              try {
+                // Health-gate before every test — kills ConnectionRefused cascades after server death
+                await restartServerIfNeeded(`before ${name}`);
+                if (DESTRUCTIVE_OR_STRESS_TESTS.has(name)) {
+                  // Full readiness wait, not a ~1s peek: a slow-but-alive server
+                  // (Mongo re-init after the post-stress restart) must not be
+                  // killed+respawned mid-warmup — that churn is what produces
+                  // intermittent ConnectionRefused flakes on the stress group.
+                  if (!(await waitForServerReady(baseUrl))) {
+                    await forceRestartServer(`pre-stress ${name}`);
+                  }
+                }
+
+                // 🛡️ CRASH-RETRY: a shared-server process dying MID-test is
+                // infrastructure, not a benchmark result. When the server exited
+                // during the attempt, restart it and re-run the test ONCE
+                // (bounded — a genuine failure still fails on the second try).
+                let attempt = 0;
+                let elapsedSum = 0;
+                let result;
+                for (;;) {
+                  result = await spawnTestProcess(file, serverEnv, baseUrl, BENCHMARK_RUN_ID);
+                  elapsedSum += result.durationMs;
+                  if (result.code === 0) break;
+                  if (attempt === 0 && serverExited) {
+                    attempt++;
+                    console.log(
+                      `  ↻ ${name} failed while the server was down — restarting and retrying once...`,
+                    );
+                    try {
+                      await forceRestartServer(`crash during ${name}`);
+                    } catch (re) {
+                      console.warn(
+                        `  ⚠️  crash-restart soft-failed: ${re instanceof Error ? re.message : re}`,
+                      );
+                      break;
+                    }
+                    continue;
+                  }
+                  break;
+                }
+
+                const { code, durationMs, output } = result;
+                runningTests.delete(file);
+                activeTestDurations.delete(file);
+                completedTests++;
+                totalElapsedTime += elapsedSum;
+
+                process.stdout.write("\r\x1B[K\n\x1B[K\x1B[1A");
+
+                const seqNum = groupPassedCount + 1;
+                const durationSec = (durationMs / 1000).toFixed(1);
+
+                if (code !== 0) {
+                  failed++;
+                  clearInterval(UIInterval);
+                  console.log(
+                    `  ${seqNum.toString().padEnd(2)} ${name.padEnd(35)} \u274C  FAILED (${durationSec}s)`,
+                  );
+                  const lines = output.split("\n").filter(Boolean);
+                  const tail = lines.slice(-20);
+                  console.log(`  ${"\u2500".repeat(55)}`);
+                  for (const line of tail) console.log(`  ${line}`);
+                  console.log(`  ${"\u2500".repeat(55)}`);
+                  if (CONTINUE_ON_ERROR) {
+                    try {
+                      await forceRestartServer(`after failure ${name}`);
+                    } catch (re) {
+                      console.warn(
+                        `  ⚠️  restart after failure soft-failed: ${re instanceof Error ? re.message : re}`,
+                      );
+                    }
+                  } else {
+                    server.kill("SIGKILL");
+                    process.exit(1);
+                  }
+                } else {
+                  groupPassedCount++;
+                  passed++;
+                  console.log(
+                    `  ${seqNum.toString().padEnd(2)} ${name.padEnd(35)} \u2705  ${durationSec}s`,
+                  );
+                  if (DESTRUCTIVE_OR_STRESS_TESTS.has(name)) {
+                    if (ALWAYS_RESTART_AFTER.has(name)) {
+                      // Verified empirically (full 4-DB runs, 2026-08-23): these
+                      // two measurably degrade the server for their successor
+                      // (graphql-stress → relational-performance deep queries;
+                      // large-payload-streaming → migration-scale bulk writes),
+                      // and the breakage surfaces during the successor's OWN
+                      // setup — too late for any post-stress probe to predict.
+                      // Restart unconditionally so the next test measures cleanly.
+                      try {
+                        await forceRestartServer(`after ${name}`);
+                      } catch (re) {
+                        console.warn(
+                          `  ⚠️  post-stress restart soft-failed: ${re instanceof Error ? re.message : re}`,
+                        );
+                      }
+                    } else {
+                      // The other destructive tests leave the server healthy —
+                      // their successors pass without a restart (verified across
+                      // runs). Skipping the ~12-16s boot saves ~20% of matrix
+                      // wall-time. The per-test pre-gate (restartServerIfNeeded)
+                      // + bounded crash-retry remain as the safety net, and the
+                      // matrix reports honestly if a successor ever breaks.
+                      console.log(`    ✓ server survived ${name} — restart skipped`);
+                    }
+                  }
+                }
+              } catch (e) {
+                runningTests.delete(file);
+                activeTestDurations.delete(file);
+                completedTests++;
+                failed++;
+                process.stdout.write("\r\x1B[K\n\x1B[K\x1B[1A");
+                console.log(
+                  `  ${name.padEnd(35)} \u274C  FAILED (orchestrator: ${e instanceof Error ? e.message : e})`,
+                );
+                if (!CONTINUE_ON_ERROR) {
+                  try {
+                    server.kill("SIGKILL");
+                  } catch {
+                    /* ignore */
+                  }
+                  process.exit(1);
+                }
+              }
+            })();
+
+            activePromises.push(testPromise);
+            testPromise.then(() => {
+              const idx = activePromises.indexOf(testPromise);
+              if (idx !== -1) activePromises.splice(idx, 1);
+            });
+          }
+
+          if (activePromises.length > 0) {
+            await Promise.race(activePromises);
+          }
+        }
+      } finally {
+        clearInterval(UIInterval);
+        process.stdout.write("\r\x1B[K\n\x1B[K\x1B[1A");
+      }
+    }
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+    // ── Phase 4: Finalize report (batch MDX write) ──
+    process.stdout.write(`  Finalizing report...`);
+    try {
+      process.env.DB_TYPE = db;
+      process.env.BENCHMARK_MATRIX = "1";
+      process.env.USE_REDIS = useRedis ? "true" : "false";
+      const { finalizeReport } = await import("../../tests/benchmarks/modules/benchmark-reporting");
+      await finalizeReport(BENCHMARK_RUN_ID);
+      process.stdout.write(" OK\n");
+    } catch (e: any) {
+      process.stdout.write(` ${e.message}\n`);
+    }
+
+    // ── Phase 5: Evaluate report ──
+    let reportedRegressions = false;
+    const reportPath = useRedis
+      ? `docs/project/benchmarks/benchmark_${db}_redis.mdx`
+      : `docs/project/benchmarks/benchmark_${db}.mdx`;
+    if (fs.existsSync(reportPath)) {
+      const content = fs.readFileSync(reportPath, "utf8");
+      const regressions: string[] = [];
+
+      // Look for \uD83D\uDD34 indicators in trend labels
+      const trendLines = content.split("\n").filter((l) => l.includes("### "));
+      for (const line of trendLines) {
+        const m = line.match(/### [^\s]+\s+(.+?)\s+[\u26AA\uD83D\uDFE2\uD83D\uDD34]/u);
+        const name = m?.[1]?.trim();
+        // Check for red indicators or negative percentages
+        if (line.includes("\uD83D\uDD34")) {
+          const pct = line.match(/[-+]\d+%/);
+          if (name && pct) regressions.push(`${name} ${pct[0]}`);
+        }
+      }
+
+      if (regressions.length) {
+        reportedRegressions = true;
+        console.log(`  \u26A0 Regressions detected:`);
+        for (const r of regressions) console.log(`       ${r}`);
+      }
+    }
+
+    // ── Summary ──
+    console.log(`  ${"\u2500".repeat(55)}`);
+    console.log(
+      `  ${db.toUpperCase()}: ${passed} passed, ${failed} failed${skipped > 0 ? `, ${skipped} skipped` : ""} in ${elapsed}s`,
+    );
+    if (fs.existsSync(reportPath)) {
+      const trend = reportedRegressions ? "Regressions found" : "All stable";
+      const reportName = useRedis ? `benchmark_${db}_redis.mdx` : `benchmark_${db}.mdx`;
+      console.log(`  Evaluated: ${reportName} \u2192 ${trend}`);
+    }
+
+    totalFailed += failed;
+
+    // Cleanup
+    server.kill("SIGTERM");
+    await new Promise((r) => setTimeout(r, 300));
+    server.kill("SIGKILL");
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  if (totalFailed > 0) {
+    console.log(`\n  Done. Completed with ${totalFailed} failures.`);
+    process.exit(1);
+  } else {
+    console.log(`\n  Done.`);
+  }
+}
+
+run();

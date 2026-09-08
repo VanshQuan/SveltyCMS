@@ -1,0 +1,76 @@
+---
+path: "docs/reference/architecture/transactional-outbox.mdx"
+title: "Transactional Outbox"
+description: "Atomic event emission with content mutations — polling, backoff, webhook fan-out."
+updated: "2026-08-21"
+---
+
+# Transactional Outbox
+
+SveltyCMS uses the **transactional outbox** pattern so domain events (webhooks, automations, internal pub/sub) are not lost when a write succeeds but side-effect delivery fails (or vice versa).
+
+## Flow
+
+1. **Write path** (collection create/update/delete) uses `persistWithOutbox`:
+   - The entity write is a **single atomic statement** (`INSERT`/`UPDATE`/`DELETE` — no BEGIN/COMMIT wrapper needed).
+   - The outbox emit is scheduled as a `queueMicrotask` **off the response path** — never awaited by the caller. (The old "one DB transaction for entity write + emit" wrapper was removed: single-statement writes are natively atomic, and coalesced buffering avoids serializing content writes 1:1 with outbox rows.)
+2. **Buffered (non-transactional) emits** — `emit()` / `enqueueBuffered()` outside a transaction push into an in-memory buffer. Persistence is a **trailing 25ms debounce** (reset on every emit) so a write burst becomes **one** `insertMany` after the burst, not interleaved with content INSERTs. A hard cap of 512 events forces a `setImmediate` flush — never a same-tick DB write. The event `_id` (UUID) is stamped at **emit time**.
+3. Event types: `entry:create` | `entry:update` | `entry:delete`.
+4. `afterMutation` invalidates cache and publishes `entryUpdated`; on the main create/update/delete path it passes `skipOutbox: true` (the outbox event was already emitted by `persistWithOutbox`). Callers that bypass `persistWithOutbox` fall back to the `afterMutation` emit.
+5. Background `outboxService.startPolling()` (hooks cold-start) runs `processBatch()` — which first flushes the emit buffer so milliseconds-old buffered events are included in the tick.
+6. Delivery: internal `pubSub` + optional `webhookService.trigger` for mapped event types.
+7. Success → `status: delivered`; failure → exponential backoff retry; after 5 attempts → `failed`.
+
+> [!NOTE]
+> `emit(..., { transaction })` remains supported for callers that manage their own transaction (e.g. the testing API `outbox-tx-rollback` action) — the event is written on the same connection and rolls back with the data change.
+
+`getPendingCount()` reports the true backlog: persisted `status: pending` rows **plus** events still sitting in the emit buffer.
+
+## Storage
+
+| Adapter                       | Table / collection                            |
+| :---------------------------- | :-------------------------------------------- |
+| SQLite / PostgreSQL / MariaDB | `svelty_outbox` (migrations + Drizzle schema) |
+| MongoDB                       | `svelty_outbox` model (`OutboxEvent`)         |
+
+## API
+
+```ts
+import { outboxService } from "@src/services/outbox";
+
+await outboxService.emit(
+  "entry:create",
+  "entry",
+  entryId,
+  { collection, data },
+  tenantId,
+  { transaction }, // optional — same DB transaction as the write
+);
+
+await outboxService.processBatch(50);
+await outboxService.cleanup(olderThanISO);
+```
+
+## Backoff
+
+`outboxBackoffMs(attempts)` → `1s, 2s, 4s, …` capped at 5 minutes, based on `updatedAt` after each failure. Pending events inside the window are skipped until ready.
+
+## Kill switches
+
+| Env                   | Effect              |
+| :-------------------- | :------------------ |
+| `DISABLE_OUTBOX=true` | Skip emit + polling |
+
+`DISABLE_OUTBOX` is the **only** service-level kill switch — ambient benchmark env flags (`BENCHMARK=true`) no longer disable outbox emits; they only prevent `hooks.server.ts` from starting the background poller during benchmark cold-start.
+
+## Tests
+
+- Unit: `tests/unit/services/outbox-service.test.ts`
+- Integration: `tests/integration/api/outbox-plugin-storage.test.ts`
+- Testing API: `outbox-emit`, `outbox-process-batch`, `outbox-tx-rollback`, …
+
+## Implementation
+
+- Service: `src/services/outbox/outbox-service.ts`
+- Boot: `hooks.server.ts` → `outboxService.startPolling(5000)`
+- Emit: `collections-namespace.ts` `persistWithOutbox` (+ `afterMutation` fallback)

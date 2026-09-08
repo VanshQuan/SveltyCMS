@@ -1,0 +1,18 @@
+{
+  "id": "disk",
+  "name": "Disk Usage",
+  "description": "High-performance disk usage monitoring with multi-disk support",
+  "icon": "mdi:disk",
+  "version": "1.0.0",
+  "type": "dashboard-widget",
+  "author": "SveltyCMS",
+  "license": "free",
+  "price": 0,
+  "component": "index",
+  "defaultSize": {
+    "w": 1,
+    "h": 2
+  },
+  "category": "monitoring",
+  "sveltycms": ">=0.0.8"
+}

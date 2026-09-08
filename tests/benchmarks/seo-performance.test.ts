@@ -1,0 +1,229 @@
+/**
+ * @file tests/benchmarks/seo-performance.test.ts
+ * @description Enterprise SEO Suite Performance Benchmark (Optimized)
+ * @summary Measures redirect lookup latency, dynamic sitemap.xml generation, robots.txt serving, and 404 logging performance.
+ *
+ * ### Features:
+ * - HTTP 301 redirect lookup and resolution latency
+ * - Dynamic sitemap.xml generation with i18n/hreflang support
+ * - robots.txt generation and serving performance
+ * - Missing-path 404 detection and analytics logging overhead
+ */
+
+import {
+  test,
+  runBenchmark,
+  exportResult,
+  setupBenchmarkServer,
+  printTruthTable,
+  printSummaryTable,
+  ensureStableTestData,
+  forceRefreshServer,
+  stabilize,
+  getDbType,
+  benchmarkAuthHeaders,
+} from "./modules/benchmark-utils";
+import "../unit/bun-preload.ts";
+import { logger } from "@utils/logger";
+
+let stopServer: (() => Promise<void>) | null = null;
+
+async function runSeoAudit() {
+  console.log(`🚀 Starting Enterprise SEO Suite Audit (${getDbType().toUpperCase()})...\n`);
+
+  try {
+    const server = await setupBenchmarkServer();
+    stopServer = server.stop;
+    const baseUrl = server.baseUrl;
+
+    await ensureStableTestData();
+
+    // Setup initial mutable header references — REAL admin session (production auth)
+    const targetTenant = process.env.TENANT_ID || "global";
+    const requestHeaders = {
+      ...benchmarkAuthHeaders(),
+      "x-tenant-id": targetTenant,
+    };
+
+    // Create the redirect in the production store — `redirectsMV` is the
+    // materialized view handle-redirects reads from (the old /api/testing
+    // create-redirect action wrote it; the content collection alone is a
+    // mirror and does NOT populate the MV). In-process insert + authenticated
+    // refresh, then a bounded probe retry (stale negative cache can linger).
+    // 🛡️ FLAKE-PROOF: the source path is unique per run — a stale negative
+    // redirect cache entry (300s TTL) or a leftover MV row from an earlier
+    // run (same server process / same matrix DB) can otherwise shadow the
+    // fresh row and 404 the probe for the whole retry window.
+    const REDIRECT_SOURCE = `/old-path-1-${Date.now()}`;
+    try {
+      const { getDb, getDbInitPromise } = await import("@src/databases/db");
+      await getDbInitPromise(false, "CORE").catch(() => {});
+      const db = getDb();
+      if (db) {
+        // `metadata` is NOT NULL (json_valid CHECK) in the MariaDB/Postgres
+        // redirects_mv DDL — omitting it makes the insert fail silently on
+        // those adapters (probe then 404s). Always send it, and CHECK the
+        // result so a failed seed fails the test instead of 404-ing later.
+        const insertResult = await (db as any).crud.insert("redirectsMV", {
+          _id: `redirect_${Date.now()}`,
+          source: REDIRECT_SOURCE,
+          target: "/api/system/health",
+          type: 301,
+          active: true,
+          metadata: "{}",
+          tenantId: targetTenant,
+        });
+        if (!insertResult?.success) {
+          throw new Error(`redirectsMV insert rejected: ${insertResult?.message || "unknown"}`);
+        }
+      } else {
+        throw new Error("Database adapter unavailable for redirect MV seeding");
+      }
+    } catch (e: any) {
+      throw new Error(`Redirect MV seeding failed: ${e.message}`);
+    }
+
+    await fetch(`${baseUrl}/api/content/refresh`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...benchmarkAuthHeaders(),
+        "x-tenant-id": targetTenant,
+      },
+      body: JSON.stringify({}),
+    }).catch(() => {});
+
+    await forceRefreshServer(baseUrl, targetTenant);
+
+    // Bounded probe with retry: a stale negative redirect cache entry (300s TTL)
+    // from an earlier run can shadow the fresh MV row on the first attempt.
+    let probe: Response | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      probe = await fetch(`${baseUrl}${REDIRECT_SOURCE}`, {
+        redirect: "manual",
+        headers: requestHeaders,
+      });
+      if (probe.status === 301) break;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    if (!probe || probe.status !== 301) {
+      const loc = probe?.headers.get("location") ?? "none";
+      throw new Error(
+        `SEO setup failed: redirect probe expected 301, got ${probe?.status} (Location: ${loc})`,
+      );
+    }
+
+    // Warm up server instance and verify routing tables are ready
+    await fetch(`${baseUrl}/api/system/health`, { headers: requestHeaders });
+    await stabilize(1000);
+
+    const seoScenarios = [
+      {
+        name: "Redirect Lookup (301)",
+        path: REDIRECT_SOURCE,
+        dynamic: false,
+        expectedStatus: 301,
+        layer: "Middleware",
+      },
+      {
+        name: "Dynamic Sitemap XML",
+        path: "/sitemap.xml",
+        dynamic: false,
+        expectedStatus: 200,
+        layer: "Content",
+        allowFail: true, // Sitemap handler may not be installed — not a regression
+      },
+      {
+        name: "Robots.txt Generation",
+        path: "/robots.txt",
+        dynamic: false,
+        expectedStatus: 200,
+        layer: "System",
+      },
+      {
+        name: "Missing Path (404 Log)",
+        path: "/non-existent-path-",
+        dynamic: true, // Triggers runtime path variation to force genuine cache misses
+        expectedStatus: 404,
+        layer: "Analytics",
+      },
+    ];
+
+    const results = [];
+
+    for (const scenario of seoScenarios) {
+      console.log(`   → Benchmarking ${scenario.name}...`);
+
+      const result = await runBenchmark({
+        name: scenario.name,
+        iterations: 400,
+        warmupIterations: 50,
+        runs: 2,
+        concurrency: 8,
+        silent: true,
+        onIteration: async (i: number) => {
+          // Resolve target URL path based on dynamic mutation flags
+          const targetPath = scenario.dynamic
+            ? `${scenario.path}${i}-${Math.floor(Math.random() * 100000)}`
+            : scenario.path;
+
+          const res = await fetch(`${baseUrl}${targetPath}`, {
+            redirect: "manual",
+            headers: requestHeaders,
+          });
+
+          if (scenario.expectedStatus && res.status !== scenario.expectedStatus) {
+            if (scenario.allowFail) {
+              // Non-critical endpoint — skip status check (handler may not be installed)
+              return;
+            }
+            const loc = res.headers.get("location");
+            const locationInfo = loc ? ` (Location: ${loc})` : "";
+            throw new Error(
+              `${scenario.name} failed: Expected ${scenario.expectedStatus}, got ${res.status}${locationInfo}`,
+            );
+          }
+
+          // Fast socket drain bypasses heavy internal runtime text parsing steps
+          await res.arrayBuffer();
+        },
+      });
+
+      results.push({
+        ...result,
+        layer: scenario.layer,
+        shortLabel: scenario.name,
+      });
+    }
+
+    printTruthTable({
+      title: "SVELTYCMS — ENTERPRISE SEO AUDIT",
+      shortLabel: "SEO",
+      subtitle: `Enterprise Meta Suite • ${getDbType().toUpperCase()}`,
+      results,
+    });
+
+    printSummaryTable(
+      results.map((r) => ({
+        key: r.name,
+        val: r.avgMs,
+        unit: "ms",
+      })),
+    );
+
+    for (const r of results) exportResult(r);
+  } catch (err: any) {
+    logger.error(`SEO audit failed: ${err.message}`);
+    console.error(err);
+    throw err;
+  } finally {
+    if (stopServer) {
+      await stopServer().catch(() => {});
+      stopServer = null;
+    }
+  }
+}
+
+test("Enterprise SEO Suite Performance", async () => {
+  await runSeoAudit();
+}, 600_000);

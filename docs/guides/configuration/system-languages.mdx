@@ -1,0 +1,133 @@
+---
+path: "docs/guides/configuration/system-languages.mdx"
+title: "System Languages (Paraglide)"
+description: "English and German ship by default. Add more admin UI languages via the setup wizard or project.inlang/settings.json, then machine-translate with bun translate."
+order: 11
+icon: "mdi:translate"
+author: "SveltyCMS Team"
+created: "2026-09-08"
+updated: "2026-09-08"
+tags:
+  - "i18n"
+  - "paraglide"
+  - "inlang"
+  - "setup"
+  - "rtl"
+---
+
+# System Languages (Admin UI)
+
+SveltyCMS splits **system language** (admin chrome: menus, buttons, setup) from **content language** (collection fields). Content languages are any ISO 639-1 code at runtime. System languages use the same ISO picker; **English and German ship compiled**. Extra system locales are written to Inlang and **machine-translated first** — they are a draft until someone reviews them (Fink or a GitHub PR). Until a catalog exists, the UI stays in English and still sets `html lang` / `dir` (RTL included).
+
+> [!NOTE]
+> Content localization (`translated: true` fields) is separate. This page is only the **admin UI** language (`systemLanguage`). See [Language Architecture](../../reference/architecture/language-architecture.mdx).
+
+---
+
+## What ships by default
+
+| Locale | Role                                                               |
+| :----- | :----------------------------------------------------------------- |
+| `en`   | Source catalog (`src/messages/en.json`) and Paraglide `baseLocale` |
+| `de`   | Bundled translation (`src/messages/de.json`)                       |
+
+RTL layout uses `getTextDirection()` in `@utils/string` (`ar`, `he`, `fa`, `ur`, …). Selecting Arabic as a system language sets `html dir="rtl"` even before a catalog is compiled.
+
+---
+
+## Add a language in System Settings (after install)
+
+**Config → System Settings → Languages & Localization** (`/config/system-settings?group=languages`):
+
+1. Add any ISO 639-1 code to **System Languages** (same chip + search UI as content languages). RTL codes show an **RTL** badge.
+2. Set **Default System Language** if needed.
+3. **Save**. The page writes `project.inlang/settings.json`, creates `src/messages/{locale}.json` if missing, then runs **`bun translate`** and **`bun run paraglide`**.
+4. Switch language from the sidebar. Leave the dev server running so Vite picks up `src/paraglide/`.
+
+See [System Settings](./system-settings.mdx#languages-localization).
+
+## Add a language in Setup
+
+On first-run **System configuration**, add ISO codes to **System Languages**. Completing setup runs the same Inlang write + machine-translate path.
+
+---
+
+## Add a language by hand (Git / community)
+
+```json
+// project.inlang/settings.json
+{
+  "baseLocale": "en",
+  "locales": ["en", "de", "fr"],
+  "sourceLanguageTag": "en",
+  "languageTags": ["en", "de", "fr"]
+}
+```
+
+Then:
+
+```bash
+bun translate          # machine-fill src/messages/fr.json from English
+bun run paraglide      # compile src/paraglide/
+```
+
+`bun translate` fills missing keys with a **machine** translation (or leaves English if the service is unavailable). That is not the same as a human-reviewed pack. Treat new catalogs as a draft:
+
+1. Review `src/messages/{locale}.json` (terminology, length, formal/informal).
+2. Open a PR, or edit in [Fink](https://fink.inlang.com/github.com/SveltyCMS/SveltyCMS).
+3. Ship the reviewed file in git so the next build does not depend on the translate service.
+
+Catalogs live in **`src/messages/{locale}.json`** — not under `src/paraglide/` (that folder is generated).
+
+---
+
+## Workstream status (P0–P4)
+
+Not implemented as a finished pack. Current order and snapshot: [Roadmap — System language P0–P4](../../project/roadmap-2026.mdx#system-language-p0-p4).
+
+| Pri | Item                                           | Now                   |
+| :-- | :--------------------------------------------- | :-------------------- |
+| P0  | Key remaining admin chrome + hardcoded-copy CI | Open                  |
+| P1  | FR, ES, IT, NL, PL + AR (reviewed)             | Open (`en`/`de` only) |
+| P2  | No compile cliff after Settings save           | Partial (toast only)  |
+| P3  | Admin + content translation cockpit            | Open                  |
+| P4  | Buyer-facing UWG copy                          | Partial               |
+
+**Non-goals:** do not switch to i18next; do not advertise dozens of picker codes while P0 is open.
+
+## When the admin catalog is stable (planned)
+
+Today EN/DE ship compiled; extra locales are added one-by-one. Once **admin chrome is fully keyed in Paraglide** (no leftover English in the GUI), the same pipeline can fill **many locales in one pass**:
+
+1. Add the target ISO codes to `project.inlang/settings.json` `locales` / `languageTags` (or via System Settings).
+2. `bun translate` — machine-fill every missing key in every new `src/messages/{locale}.json`.
+3. `bun run paraglide`.
+4. The [SveltyCMS Fink project](https://fink.inlang.com/github.com/SveltyCMS/SveltyCMS) is the community review surface: translators correct machine drafts in the browser; changes land as git PRs on `src/messages/`.
+
+Machine output is the **seed**. Fink + git is the **lektorat**. EN/DE stay the maintained source pair; other locales improve in the open as the product stabilizes.
+
+Tracked on the [2026 roadmap](../../project/roadmap-2026.mdx).
+
+---
+
+## How messages are used in the admin UI
+
+```svelte
+<script lang="ts">
+	import { button_save, button_cancel } from '@src/paraglide/messages';
+</script>
+
+<button type="button">{button_save()}</button>
+<button type="button">{button_cancel()}</button>
+```
+
+Until a catalog is compiled, uncompiled locales keep **English copy** and still apply **lang + dir** (RTL included).
+
+---
+
+## Related
+
+- [Setup Wizard](./setup-wizard.mdx) — system vs content language chips
+- [System Settings](./system-settings.mdx) — Localization group
+- [Language Architecture](../../reference/architecture/language-architecture.mdx)
+- [README — System Localization](../../../README.md)

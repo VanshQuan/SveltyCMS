@@ -1,160 +1,141 @@
 /**
  * @file src/routes/api/graphql/resolvers/users.ts
  * @description GraphQL type definitions and resolvers for user-related queries.
- *
- * This module provides:
- * - Dynamic generation of GraphQL type definitions based on User type
- * - Resolver function to fetch user data from the database, scoped to the current tenant
- *
- * Features:
- * - Automatic mapping of TypeScript types to GraphQL types
- * - Dynamic generation of User type definition
- * - Integration with database adapter for user data retrieval
- * - Error handling and logging
- *
- * Usage:
- * - Used in the main GraphQL setup to include user-related schema and resolver
- * - Allows querying of user data through the GraphQL API
  */
 
-import { getPrivateSettingSync } from '@src/services/settingsService';
-import type { ISODateString, BaseEntity } from '@src/databases/dbInterface';
-// System Logger
-import { logger } from '@utils/logger.server';
-
-// Permissions
-
-// Types
-import type { DatabaseAdapter } from '@src/databases/dbInterface';
-import type { User } from '@src/databases/auth/types';
+import type { User } from "@src/databases/auth/types";
+import type { DatabaseAdapter, ISODateString, DatabaseId } from "@src/databases/db-interface";
+import { isMultiTenantEnabled } from "@utils/tenant";
+import { logger } from "@utils/logger";
+import { hasPermissionWithRoles } from "@src/databases/auth/permissions";
+import type { PublicationFilter } from "@src/utils/security/publication-policy";
 
 // GraphQL types
 type GraphQLValue = string | number | boolean | Date | object | GraphQLValue[];
 
 // Helper function to map TypeScript types to GraphQL types
 function mapTypeToGraphQLType(value: GraphQLValue): string {
-	if (Array.isArray(value)) {
-		return `[${mapTypeToGraphQLType(value[0])}]`;
-	}
-	switch (typeof value) {
-		case 'string':
-			return 'String';
-		case 'boolean':
-			return 'Boolean';
-		case 'number':
-			return Number.isInteger(value) ? 'Int' : 'Float';
-		case 'object':
-			return value instanceof Date ? 'String' : 'JSON';
-		default:
-			return 'String';
-	}
+  if (Array.isArray(value)) {
+    return `[${mapTypeToGraphQLType(value[0])}]`;
+  }
+  switch (typeof value) {
+    case "string":
+      return "String";
+    case "boolean":
+      return "Boolean";
+    case "number":
+      return Number.isInteger(value) ? "Int" : "Float";
+    case "object":
+      return value instanceof Date ? "String" : "JSON";
+    default:
+      return "String";
+  }
 }
 
 // Helper function to generate GraphQL type definitions from a TypeScript type
-function generateGraphQLTypeDefsFromType<T extends Record<string, GraphQLValue>>(type: T, typeID: string): string {
-	const fields = Object.entries(type)
-		.map(([key, value]) => `${key}: ${mapTypeToGraphQLType(value)}`)
-		.join('\n');
+function generateGraphQLTypeDefsFromType<T extends Record<string, GraphQLValue>>(
+  type: T,
+  typeID: string,
+): string {
+  const fields = Object.entries(type)
+    .map(([key, value]) => `${key}: ${mapTypeToGraphQLType(value)}`)
+    .join("\n");
 
-	return `
+  return `
         type ${typeID} {
             ${fields}
         }
     `;
 }
 
-// Use a partial User object to define the types
-const userTypeSample: Partial<User> = {
-	_id: '',
-	email: '',
-	tenantId: '', // Add tenantId for multi-tenancy
-	password: '',
-	role: '',
-	username: '',
-	avatar: '',
-	lastAuthMethod: '',
-	lastActiveAt: new Date().toISOString() as ISODateString,
-	expiresAt: new Date().toISOString() as ISODateString,
-	isRegistered: false,
-	blocked: false,
-	resetRequestedAt: new Date().toISOString() as ISODateString,
-	resetToken: '',
-	failedAttempts: 0,
-	lockoutUntil: new Date().toISOString() as ISODateString,
-	is2FAEnabled: false,
-	permissions: []
+// Use a sanitized User object to define the GraphQL type.
+// Sensitive fields (password, resetToken, failedAttempts, lockoutUntil)
+// are excluded so they never appear in GraphQL introspection or responses.
+const userTypeSample: Partial<Record<keyof User, unknown>> = {
+  _id: "" as DatabaseId,
+  email: "",
+  tenantId: "" as DatabaseId,
+  role: "",
+  username: "",
+  avatar: "",
+  lastAuthMethod: "",
+  lastActiveAt: new Date().toISOString() as ISODateString,
+  isRegistered: false,
+  blocked: false,
+  is2FAEnabled: false,
+  permissions: [],
 };
 
 // TypeDefs
 export function userTypeDefs() {
-	return generateGraphQLTypeDefsFromType(userTypeSample as Record<string, GraphQLValue>, 'User');
+  return generateGraphQLTypeDefsFromType(userTypeSample as Record<string, GraphQLValue>, "User");
 }
 
-// GraphQL context type
 interface GraphQLContext {
-	user?: User;
-	tenantId?: string;
+  tenantId?: string | null;
+  user?: User;
+  /** Publication visibility of the request (resolved in +server.ts context). */
+  publicationFilter?: PublicationFilter;
 }
 
-// User entity type with tenantId support for query building
-interface UserEntity extends BaseEntity {
-	email?: string;
-	tenantId?: string;
-}
-
-// Resolvers with pagination support
+// Resolvers with pagination support and validation
 export function userResolvers(dbAdapter: DatabaseAdapter) {
-	if (!dbAdapter) {
-		logger.error('Database adapter is not initialized');
-		throw new Error('Database adapter is not initialized');
-	}
-	const fetchWithPagination = async (contentTypes: string, pagination: { page: number; limit: number }, context: GraphQLContext) => {
-		// Authentication is handled by hooks.server.ts
-		if (!context.user) {
-			throw new Error('Authentication required');
-		}
+  if (!dbAdapter) {
+    throw new Error("Database adapter is not initialized");
+  }
 
-		if (getPrivateSettingSync('MULTI_TENANT') && !context.tenantId) {
-			logger.error('GraphQL: Tenant ID is missing from context in a multi-tenant setup.');
-			throw new Error('Internal Server Error: Tenant context is missing.');
-		}
+  return {
+    users: async (
+      _: unknown,
+      args: { pagination?: { page?: number; limit?: number } },
+      context: GraphQLContext,
+    ) => {
+      if (!context.user) {
+        throw new Error("Authentication required");
+      }
 
-		const { page = 1, limit = 10 } = pagination || {};
+      // 🛡️ HARDENING: RBAC parity with REST — /api/user requires `user:read`.
+      // GraphQL previously exposed the tenant directory to ANY logged-in user
+      // (admin/editor) because it only checked `context.user` presence.
+      if (!hasPermissionWithRoles(context.user, "user:read")) {
+        throw new Error("Forbidden: insufficient permissions");
+      }
 
-		try {
-			// --- MULTI-TENANCY: Scope the query by tenantId ---
-			const query: Partial<UserEntity> = {};
-			if (getPrivateSettingSync('MULTI_TENANT')) {
-				query.tenantId = context.tenantId;
-			}
+      const { page = 1, limit = 10 } = args.pagination || {};
 
-			// Use query builder pattern consistent with REST API
-			const queryBuilder = dbAdapter
-				.queryBuilder<UserEntity>(contentTypes)
-				.where(query)
-				.sort('updatedAt', 'desc')
-				.paginate({ page, pageSize: limit });
-			const result = await queryBuilder.execute();
-			if (!result.success) {
-				throw new Error(`Database query failed: ${result.error?.message || 'Unknown error'}`);
-			}
+      try {
+        // Build filter for multi-tenant support
+        const filter: Record<string, unknown> = {};
+        if (isMultiTenantEnabled() && context.tenantId) {
+          filter.tenantId = context.tenantId;
+        }
 
-			logger.info(`Fetched ${contentTypes}`, { count: result.data.length, tenantId: context.tenantId });
-			return result.data;
-		} catch (error) {
-			logger.error(`Error fetching data for ${contentTypes}:`, { error, tenantId: context.tenantId });
-			throw Error(`Failed to fetch data for ${contentTypes}`);
-		}
-	};
+        // Use auth.getAllUsers instead of queryBuilder for proper model access
+        const result = await dbAdapter.auth.getAllUsers({
+          filter,
+          sort: { updatedAt: "desc" },
+          offset: (page - 1) * limit,
+          limit,
+        });
 
-	return {
-		users: async (_: unknown, args: { pagination: { page: number; limit: number } }, context: GraphQLContext) =>
-			await fetchWithPagination('auth_users', args.pagination, context),
-		me: async (_: unknown, __: unknown, context: GraphQLContext) => {
-			if (!context.user) {
-				throw new Error('Authentication required');
-			}
-			return context.user;
-		}
-	};
+        if (!result.success) {
+          throw new Error(result.error?.message || "Query failed");
+        }
+
+        return result.data || [];
+      } catch (error) {
+        logger.error("Error fetching users:", {
+          error: error instanceof Error ? error.message : String(error),
+          tenantId: context.tenantId,
+        });
+        throw new Error("Failed to fetch users");
+      }
+    },
+    me: async (_: unknown, __: unknown, context: GraphQLContext) => {
+      if (!context.user) {
+        throw new Error("Authentication required");
+      }
+      return context.user;
+    },
+  };
 }

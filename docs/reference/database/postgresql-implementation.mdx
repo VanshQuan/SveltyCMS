@@ -1,0 +1,310 @@
+---
+path: "docs/reference/database/postgresql-implementation.mdx"
+title: "PostgreSQL Implementation"
+description: "PostgreSQL adapter implementation using Drizzle ORM for SveltyCMS."
+order: 4
+icon: "mdi:elephant"
+author: "SveltyCMS Team"
+created: "2026-02-04"
+updated: "2026-08-21"
+tags:
+  - "database"
+  - "postgresql"
+  - "drizzle"
+  - "production"
+---
+
+# PostgreSQL Implementation
+
+> [!NOTE]
+> PostgreSQL support is **production-ready**. All adapter modules (Auth, CRUD, Content, Media, System, Widgets, Themes, Batch, Transactions, Performance, Cache, Collections, Multi-Tenancy) are fully implemented with Drizzle ORM.
+
+## Overview
+
+SveltyCMS supports PostgreSQL as an alternative to MongoDB and MariaDB through the database adapter pattern. The PostgreSQL adapter uses **Drizzle ORM** with the `postgres.js` driver for optimal performance and type safety.
+
+## Architecture
+
+The PostgreSQL adapter follows a modular pattern, leveraging Drizzle ORM for schema-agnostic operations and raw SQL for initial schema setup.
+
+```mermaid
+graph TD
+    A[SveltyCMS Core] --> B(IDBAdapter Interface)
+    B --> C{PostgreSQLAdapter}
+    C --> D[Drizzle ORM]
+    C --> E[Migrations]
+    D --> F[(PostgreSQL DB)]
+    E --> F
+    C --> G[Schema Definitions]
+```
+
+### File Structure
+
+```
+src/databases/postgresql/
+├── postgres-adapter.ts      # Concrete adapter (entry point)
+├── adapter-core.ts          # Connection, pool, date normalization, registry
+├── fts-adapter.ts           # Full-text search (ILIKE + tsvector paths)
+├── schema.ts                # Drizzle ORM schema definitions
+└── transaction-module.ts    # Drizzle transaction wrapper
+```
+
+## Schema Initialization (Boot Bootstrap)
+
+Unlike MongoDB which is schema-less, PostgreSQL requires table definitions. SveltyCMS renders the system schema at boot directly from the single declarative source of truth (`src/databases/system-schema-spec.ts`) via `src/databases/core/system-schema-bootstrap.ts` — there are no per-engine migration files to keep in sync, so the three relational engines can never drift.
+
+```
+sequenceDiagram
+    participant S as Setup Wizard / System Init
+    participant A as PostgreSQLAdapter
+    participant B as Schema Bootstrap (core)
+    participant D as PostgreSQL DB
+
+    S->>A: connect()
+    A->>B: bootstrapSystemSchema("postgresql", sql)
+    B->>D: CREATE TABLE IF NOT EXISTS ...
+    D-->>B: Tables Created/Verified
+    B-->>A: { success: true }
+    A-->>S: Ready
+```
+
+### Connection Pool Configuration (2026-07 Optimization)
+
+SveltyCMS configures the `postgres.js` driver with production-tuned connection pool settings. These can be overridden via environment variables or connection config object:
+
+| Setting                       | Default     | Env Var Override           | Purpose                                                                                                                                                                  |
+| ----------------------------- | ----------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `max`                         | 100         | `DATABASE_MAX_CONNECTIONS` | Maximum connections in the pool (capped at PostgreSQL's default `max_connections = 100` to avoid pool exhaustion / `too many clients`; raise via env for larger servers) |
+| `connect_timeout`             | 10s         | —                          | 3× faster failure detection on unreachable hosts                                                                                                                         |
+| `idle_timeout`                | 300s        | —                          | Pooled connections stay warm 5× longer; reduces SSL handshake overhead                                                                                                   |
+| `max_lifetime`                | 60 min      | —                          | Halves pool recreation overhead vs. previous 30 min default                                                                                                              |
+| `keepalive`                   | true        | —                          | Prevents silent connection drops from cloud NAT/proxies/firewalls                                                                                                        |
+| `keepaliveInitialDelayMillis` | 10000       | —                          | Starts keepalive pings after 10s idle                                                                                                                                    |
+| `pipeline`                    | true        | —                          | Postgres.js query pipelining; batches concurrent queries into single TCP round-trips (up to 3× throughput on parallel workloads)                                         |
+| `prepare`                     | true        | `DATABASE_PREPARE=false`   | Server-side prepared statements; disable for PgBouncer transaction mode                                                                                                  |
+| `statement_timeout`           | 30s         | —                          | Safety limit for individual queries                                                                                                                                      |
+| `application_name`            | `sveltycms` | —                          | Identifies the CMS in `pg_stat_activity`                                                                                                                                 |
+
+### Connection Configuration
+
+PostgreSQL connections are configured in `config/private.ts` or during the setup wizard:
+
+```ts
+// Configuration Object
+{
+    type: 'postgresql',
+    host: 'localhost',
+    port: '5432',
+    name: 'sveltycms',
+    user: 'postgres',
+    password: 'your_password'
+}
+```
+
+## Drizzle Schema
+
+The PostgreSQL schema mirrors the CMS data model but is optimized for relational performance.
+
+### Key Implementation Details
+
+| Feature             | Implementation                                                            |
+| ------------------- | ------------------------------------------------------------------------- |
+| **Primary Key**     | `varchar(36)` (UUID compatible strings)                                   |
+| **Timestamps**      | `timestamp()` with ISODateString conversion                               |
+| **JSON fields**     | `jsonb()` for binary JSON with GIN indexing                               |
+| **Multi-Tenancy**   | `tenantId` indexed columns on all tables                                  |
+| **Connection Pool** | Keepalive (10s), pipeline (batch), idle 300s, lifetime 60min, timeout 10s |
+
+## Current Implementation Status
+
+### ✅ All Modules Implemented
+
+| Module          | Status      | Notes                                                |
+| --------------- | ----------- | ---------------------------------------------------- |
+| `auth.*`        | ✅ Complete | Users, sessions, tokens, roles with compound indexes |
+| `crud.*`        | ✅ Complete | Full CRUD with query builder and batch operations    |
+| `content.*`     | ✅ Complete | Nodes, drafts, revisions with JSONB data storage     |
+| `media.*`       | ✅ Complete | File metadata, folders, thumbnails                   |
+| `batch.*`       | ✅ Complete | Transactional batch operations                       |
+| `performance.*` | ✅ Complete | Latency tracking and health monitoring               |
+
+| `tenants.*` | ✅ Complete | Full CRUD (create, getById, update, delete, list) |
+| `cleanupExpired` | ✅ Complete | TTL-equivalent cleanup for sessions/tokens |
+| `versioning` | ✅ Complete | Atomic `getVersion` and `incrementVersion` |
+
+### PostgreSQL-Specific Optimizations
+
+- **JSONB** (not JSON): All 20 metadata columns use binary JSONB with efficient containment operators (`@>`, `?`, `?|`)
+- **GIN Indexes**: 5 GIN indexes on high-query JSONB columns (`content_nodes.data`, `content_nodes.metadata`, `media_items.metadata`, `roles.permissions`, `auth_users.roleIds`)
+- **Trigram Search**: High-performance `ilike` searching for media filenames using `pg_trgm` GIN indexes (`media_items_filename_trgm_idx`).
+
+- **`gen_random_uuid()`**: Native UUID generation via pgcrypto extension
+- **Tenants Table**: Full multi-tenancy with quota, usage, and settings JSONB columns
+- **Website Tokens**: `website_tokens` via shared `relational-system.ts` — SHA-256 hash at rest, unique index on `token`, compound `{ tenantId, name }`, parallel list+count. See [Credential Storage](./database-methods.mdx#-credential-storage-website-tokens--api-keys).
+- **Raw `findById`**: Tagged-template prepared SELECT (stable SQL text → postgres.js statement cache) — FIND ONE ~1.3–1.5k RPS.
+- **Raw `INSERT` fast path (no-read-back)**: One-statement insert via a flat `unsafe(text, values, { prepare: true })` template (postgres.js 3.x removed `sql.join` — the earlier implementation silently fell back to Drizzle on every insert, ~225 RPS). Quotes identifiers (unquoted camelCase folds to lowercase) and binds dates/objects as strings (describe-phase Bind quirk). The returned row is **synthesized** from the prepared values + Drizzle column defaults (`status 'draft'`, `isDeleted false`, timestamps, NULLs) instead of `RETURNING *` — exact parity for CMS tables (no triggers/generated columns; the Drizzle def mirrors the DDL) and it removes the row materialization + jsonb parse from the write round trip. Measured: 217 → **~290–310 RPS** on a loaded host (+21% same-run); raw SQL alone ~413 (92% of the 450 RPS 1c ceiling).
+- **Raw multi-VALUES `insertMany`**: one prepared statement per chunk (union column set; `undefined` values bind as literal `DEFAULT` to keep the prepared bind count exact) — BULK INSERT (100) **87 → 233 RPS (+168%)** vs the old Drizzle `.returning()` path.
+- **Targeted column UPDATE**: `rawUpdateReturning` builds `SET` only for prepared keys. Shared `prepareUpdateValues()` never writes `createdAt` and omits an empty `data={}` blob on partial updates.
+- **Prepared JSON/array binds**: `bindPgParam()` serializes objects and arrays as JSON text; JSON/jsonb columns use `$n::jsonb` so postgres.js does not emit PG array literals `{…}` (those force a describe-phase recompile).
+
+## Development Guide
+
+To extend the PostgreSQL adapter:
+
+### 1. Schema Updates
+
+Modify `src/databases/postgresql/schema.ts`. For schema shape changes that affect fresh installs, update the shared declarative spec `src/databases/system-schema-spec.ts` once — the boot bootstrap (`src/databases/core/system-schema-bootstrap.ts`) renders it for all three SQL engines. The spec↔schema.ts drift guard lives in `tests/unit/databases/schema-spec-parity.test.ts`.
+
+### 2. Implementing Methods
+
+Implement methods in `src/databases/postgresql/adapter/index.ts`. Use the `wrap()` helper for consistent error handling and logging.
+
+```
+public readonly crud = {
+  findOne: async (collection: string, query: Record<string, unknown>) => {
+    return this.wrap(async () => {
+      const table = this.getTable(collection);
+      const where = this.mapQuery(table, query);
+      const result = await this.db!.select().from(table).where(where).limit(1);
+      return result[0] || null;
+    }, 'CRUD_FIND_ONE_FAILED');
+  }
+};
+```
+
+## Performance Benchmarks
+
+The PostgreSQL adapter is optimized for relational efficiency and JSONB search performance. For detailed performance metrics and comparisons, please refer to the [Performance Benchmarks](/docs/project/benchmarks/index) document.
+
+### Shared list / count contract (SqlAdapterCore)
+
+PostgreSQL inherits `findPage` and `count({ mode })` from `SqlAdapterCore`:
+
+| Feature          | Implementation                                                           |
+| ---------------- | ------------------------------------------------------------------------ |
+| `findPage`       | `limit + 1` hasMore; optional total                                      |
+| `count` estimate | `SELECT GREATEST(reltuples::bigint, 0) FROM pg_class WHERE relname = $1` |
+| Count cache      | 30s L1 via `createCountCachedCrud` (all engines)                         |
+
+**Measured (2026-08-04, Docker PG, no Redis):** FIND PAGE **1.006 ms** vs legacy LIST+COUNT **4.845 ms** (~**4.8×**); COUNT CACHED **0.024 ms** vs exact **2.160 ms** (~**90×**). See [Performance Architecture](./performance-architecture.mdx#product-layer-list--count-equal-on-all-engines).
+
+Key PostgreSQL highlights:
+
+- **JSONB with GIN Indexing**: 0.063 ms NATIVE UPSERT, 0.083 ms FIND MANY, 1.201 ms FIND ONE.
+- **Partial Indexes**: Optimized performance for active sessions and tokens.
+- **Connection Health**: Robust pooling via `postgres.js` with integrated health checks.
+
+### Key Optimizations
+
+- **JSONB with GIN Indexing**: All 20 metadata columns use PostgreSQL's binary `jsonb` type with 5 GIN indexes for sub-5ms search on complex containment queries.
+- **Partial Indexes**: Only index active sessions and unconsumed tokens — reduces index size and speeds up common auth queries.
+- **Connection Health**: Optimized pooling via `postgres.js` with health checks, reconnection, keepalive, and query pipelining for up to 3× throughput on parallel workloads.
+- **TTL-Equivalent Cleanup**: `cleanupExpiredData()` method purges expired sessions and consumed tokens (equivalent to MongoDB's TTL indexes).
+- **Tamper-Evident Logs**: Relational structure with transactional integrity for cryptographic audit log chaining.
+
+---
+
+- [Drizzle ORM Documentation](https://orm.drizzle.team/)
+- [postgres.js GitHub](https://github.com/porsager/postgres)
+- [MariaDB Implementation](./mariadb-implementation.mdx)
+
+---
+
+## 🚀 Production Scaling with PgBouncer (Enterprise)
+
+For high-concurrency Postgres deployments or managed databases with connection limits (RDS, Azure, Cloud SQL), SveltyCMS recommends deploying **PgBouncer** as a connection proxy layer. This follows the same pattern used at scale by Instagram, OpenAI, and other Postgres-heavy platforms.
+
+### Why PgBouncer
+
+- **Connection Multiplexing**: PgBouncer sits between your app instances and Postgres, pooling hundreds of lightweight client connections onto a small pool of real Postgres backend connections. This prevents "too many clients" errors on managed DBs (often limited to 50-200 connections).
+- **Lower Latency**: App connections to PgBouncer are cheap (Unix socket or localhost). Real Postgres connection setup (~50ms) is avoided on every request — PgBouncer reuses existing backend connections.
+- **Reduced Postgres CPU**: Fewer Postgres backend processes mean fewer context switches and less memory pressure in Postgres's multi-process model.
+- **Horizontal Scaling**: Adding more app instances doesn't require increasing Postgres `max_connections` — they all share PgBouncer's pool.
+
+### Deployment Pattern
+
+```mermaid
+graph LR
+    A[App Instance 1] --> B[PgBouncer]
+    C[App Instance 2] --> B
+    D[App Instance N] --> B
+    B --> E[(PostgreSQL)]
+```
+
+Deploy PgBouncer as a **sidecar** on each app instance (localhost:6432) or as a **central proxy** behind a lightweight load balancer. The sidecar pattern minimizes network latency.
+
+### Recommended Configuration
+
+Create `/etc/pgbouncer/pgbouncer.ini`:
+
+```ini
+[databases]
+sveltycms = host=127.0.0.1 port=5432 dbname=sveltycms
+
+[pgbouncer]
+listen_addr = 127.0.0.1
+listen_port = 6432
+auth_type = md5
+auth_file = /etc/pgbouncer/userlist.txt
+
+;; Transaction pooling — best efficiency for web workloads.
+;; Connections are returned to the pool immediately after each transaction.
+pool_mode = transaction
+
+;; Conservative defaults. Tune based on CPU cores and workload.
+default_pool_size = 25
+max_client_conn = 500
+
+;; Cleanup between client uses (prevents session state leakage)
+server_reset_query = DISCARD ALL
+
+;; Logging for observability
+log_connections = 1
+log_disconnections = 1
+stats_period = 60
+```
+
+### SveltyCMS Integration
+
+When using PgBouncer in **transaction mode**, set the following in your environment or `config/private.ts`:
+
+```bash
+# Point the app to PgBouncer instead of direct Postgres
+DB_HOST=127.0.0.1
+DB_PORT=6432
+
+# Required: Disable server-side prepared statements when behind PgBouncer
+# (PgBouncer tx mode cannot guarantee the same backend connection between
+# prepare and execute, causing "prepared statement does not exist" errors)
+DATABASE_PREPARE=false
+```
+
+The adapter automatically detects `DATABASE_PREPARE=false` and sets `prepare: false` in the `postgres.js` driver. This trades the ~40% parse/plan win from server-side prepared statements for seamless PgBouncer compatibility. The query planner cache in Postgres still provides significant optimization.
+
+> [!WARNING]
+> **Session State Limitations**: Transaction pooling does NOT preserve session-level state (`SET` statements, temporary tables, `LISTEN`/`NOTIFY`, certain cursor types, advisory locks). SveltyCMS does not depend on any of these — all state is managed at the application layer via our cache, auth sessions, and LocalCMS SDK.
+
+### Monitoring
+
+Check PgBouncer health via its admin console:
+
+```bash
+psql -h 127.0.0.1 -p 6432 -U pgbouncer pgbouncer
+> SHOW POOLS;
+> SHOW STATS;
+> SHOW CLIENTS;
+```
+
+SveltyCMS's built-in `ConnectionPoolOptions` and `getConnectionPoolStats()` work transparently whether connecting directly or through PgBouncer. For production, monitor:
+
+- `cl_waiting` (should stay near 0 — increase `default_pool_size` if growing)
+- `avg_wait_time` (should be < 1ms)
+- Postgres `active` connections (should be stable, not climbing)
+
+---
+
+## Related
+
+- [Database Architecture](./index.mdx)
+- [Performance Benchmarks](../../project/benchmarks/index.mdx)
+- [Architecture Overview](../index.mdx)

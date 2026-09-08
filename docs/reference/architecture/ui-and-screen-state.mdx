@@ -1,0 +1,358 @@
+---
+path: "docs/reference/architecture/ui-and-screen-state.mdx"
+title: "UI & Screen State Architecture"
+description: "Technical documentation of the SveltyCMS UI visibility, screen size management, and 6-region admin theme layout shell — built with Svelte 5 runes."
+order: 35
+icon: "mdi:monitor-screenshot"
+author: "SveltyCMS Team"
+created: "2025-12-26"
+updated: "2026-07-31"
+tags:
+  - "architecture"
+  - "state-management"
+  - "svelte5"
+  - "runes"
+  - "ui"
+  - "responsive"
+  - "admin-theme"
+---
+
+# UI & Screen State Architecture
+
+SveltyCMS leverages a modern, class-based singleton pattern powered by **Svelte 5 Runes** to manage global UI visibility and responsive screen states. This architecture provides high-performance, direct-access reactivity with minimal overhead.
+
+---
+
+## 🏗️ Core Architecture
+
+The system is divided into two specialized stores, exported as singleton instances from `@src/stores/`:
+
+1.  **`screen`** (`screen-size-store.svelte.ts`): Manages responsive breakpoints, window dimensions, and accessibility preferences.
+2.  **`ui`** (`ui-store.svelte.ts`): Manages the visibility of layout components, sidebars, and route-specific UI contexts.
+
+### Design Principles
+
+- **Singleton Pattern**: Ensures a single source of truth accessible across the entire application.
+- **Direct Access**: Eliminates `.value` wrappers or intermediate helper functions for maximum performance.
+- **Rune-Driven**: Uses `$state` and `$derived` for precise, granular DOM updates.
+- **SSR Safety**: Guards against server-side execution of browser-only APIs (window, matchMedia).
+
+---
+
+## 📱 Screen Size Store (`screen`)
+
+The `screen` store tracks the browser's viewport and accessibility settings.
+
+### Reactive Properties
+
+| Property               | Type         | Description                                      |
+| :--------------------- | :----------- | :----------------------------------------------- |
+| `width`                | `number`     | Current window inner width.                      |
+| `height`               | `number`     | Current window inner height.                     |
+| `size`                 | `ScreenSize` | Enum value: `XS`, `SM`, `MD`, `LG`, `XL`, `XXL`. |
+| `isMobile`             | `boolean`    | `true` if size is `XS` or `SM`.                  |
+| `isDesktop`            | `boolean`    | `true` if size is `LG`, `XL`, or `XXL`.          |
+| `prefersReducedMotion` | `boolean`    | Reflects the user's OS-level motion preference.  |
+
+### Performance Implementation
+
+The store uses `requestAnimationFrame` to debounce resize events, ensuring that layout recalculations only occur when the browser is ready to paint:
+
+```typescript
+// Internal resize handler
+private handleResize = () => {
+    if (!this.ticking) {
+        window.requestAnimationFrame(() => {
+            this.width = window.innerWidth;
+            this.height = window.innerHeight;
+            this.ticking = false;
+        });
+        this.ticking = true;
+    }
+};
+```
+
+---
+
+## 🎨 UI State Store (`ui`)
+
+The `ui` store manages the complex visibility matrix of the SveltyCMS interface.
+
+### UI Visibility States
+
+Sidebars and headers can be in one of three states:
+
+- `hidden`: Completely removed from the layout.
+- `collapsed`: Minimized (e.g., icon-only sidebar).
+- `full`: Fully expanded.
+
+### Core API
+
+#### `ui.state`
+
+Directly access the visibility of all six layout regions:
+
+| Key            | Type             | Default  | Description                                |
+| -------------- | ---------------- | -------- | ------------------------------------------ |
+| `leftSidebar`  | `full \| hidden` | `full`   | Main navigation sidebar                    |
+| `rightSidebar` | `full \| hidden` | `hidden` | Entry inspector panel                      |
+| `pageheader`   | `full \| hidden` | `full`   | Collection breadcrumb bar                  |
+| `pagefooter`   | `full \| hidden` | `hidden` | Entry metadata footer                      |
+| `header`       | `full \| hidden` | `hidden` | Global top toolbar (`global-toolbar` slot) |
+| `footer`       | `full \| hidden` | `hidden` | Global bottom bar (`global-footer` slot)   |
+
+Each region is independently toggleable and persisted to DB per-theme via `config.adminTheme.layoutState`.
+
+#### `ui.toggle(element, visibility)`
+
+Manually override the state of a UI element. Manual toggles activate a **600ms override timer** to prevent automatic layout shifts from interfering with user interactions.
+
+#### `ui.stickyActionContent`
+
+A Svelte 5 `Snippet` reference used by the `<StickyActions>` wrapper component. Pages set this via `<StickyActions><button>Save</button></StickyActions>`, and `+layout.svelte` renders it into a sticky bar at the bottom of the viewport when `theme.features.stickyActionBar` is enabled. Automatically cleared on page destroy.
+
+#### `ui.setRouteContext(ctx)`
+
+Specialized routes (like the Image Editor or Collection Builder) notify the store to apply optimized layout presets.
+
+```
+// Example: Activating Collection Builder layout
+ui.setRouteContext({ isCollectionBuilder: true });
+```
+
+---
+
+## 🚀 Performance Gains
+
+The Svelte 5 refactoring of these stores resulted in significant system improvements:
+
+### 1. Zero Indirection
+
+By removing backward compatibility wrappers and the legacy `.value` pattern, the application achieves direct property access. This eliminates an entire layer of proxy property lookup for every reactive check in every component.
+
+### 2. Reduced Memory Footprint
+
+The removal of transient wrapper objects and closure-based subscribers reduced store-related memory allocations by an estimated **15-20%**.
+
+### 3. Minimized Bundle Size
+
+Deleting over **400 lines** of legacy boilerplate and compatibility logic reduced the minified bundle size by ~1.2KB.
+
+---
+
+## 📖 Usage Examples
+
+### Component Template (New Pattern)
+
+```
+{#if ui.state.leftSidebar === 'full'}
+	<div transition:slide>...</div>
+{/if}
+
+<button onclick={() => ui.toggle('leftSidebar', screen.isDesktop ? 'full' : 'collapsed')}> Toggle </button>
+```
+
+### Layout Logic
+
+```
+import { screen } from "@stores/screen-size-store.svelte";
+import { ui } from "@stores/UIStore.svelte";
+
+// Derived logic in scripts
+const isCompact = $derived(screen.isMobile || ui.state.leftSidebar === "collapsed");
+```
+
+---
+
+## 📱 Floating Navigation (`FloatingNav`)
+
+The `FloatingNav` component (`src/components/system/floating-nav.svelte`) provides a **draggable radial navigation menu** designed for mobile viewports. It renders as a floating action button (FAB) that users can drag to any screen edge, tap to open a radial menu of quick-access links, and use for rapid navigation without the sidebar.
+
+### When It Renders
+
+`FloatingNav` is conditionally rendered in `src/routes/(app)/+layout.svelte` based on `screen.isMobile`:
+
+```svelte
+{#if screen.isMobile}
+  <Portal>
+    <FloatingNav />
+  </Portal>
+{/if}
+```
+
+> [!IMPORTANT]
+> The `screen` store requires `screen.mount()` to be called during client-side initialization (in the root `+layout.svelte` `onMount`). Without this call, `screen.width` retains its SSR default of `1024`, making `isMobile` permanently `false`.
+
+### Features
+
+| Feature                      | Description                                                                                                                                                            |
+| :--------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Draggable FAB**            | Users can drag the button anywhere; it snaps to the nearest edge on release                                                                                            |
+| **Radial Menu**              | Tap to open a circular menu of navigation endpoints with SVG connector lines                                                                                           |
+| **System defaults**          | First-run shortcuts: Home, Dashboard, User, Config, Media, Settings (`floatingNavStore`)                                                                               |
+| **PageTitle star sync**      | Star on any `PageTitle` enables/disables a system route or adds a custom favorite — same per-user store as the radial                                                  |
+| **Per-user prefs**           | Stored under `floatingNav_prefs:v1:<userId>` in `localStorage` (legacy `floatingNav_pins` / `floatingNav_favorites` migrated once)                                     |
+| **Custom favorite color**    | Starred pages pass `navColor` (a `NAV_FAVORITE_COLORS` literal) so the spoke keeps the page's accent; unknown classes fall back to `bg-amber-500` (Tailwind JIT guard) |
+| **Cross-tab sync**           | `storage` events apply the same user's prefs in every other open tab (equality-guarded against feedback loops)                                                         |
+| **Empty-safe fixed anchors** | Home (center) + Settings always remain — clearing all custom items never empties the menu or divides by zero                                                           |
+| **Position Persistence**     | Button position is saved per-route in `localStorage` under the `navigation` key                                                                                        |
+| **Role-Based Filtering**     | Menu items are filtered based on user role (admin vs editor)                                                                                                           |
+| **Reduced Motion**           | Respects `prefers-reduced-motion` — disables animations when enabled                                                                                                   |
+| **Accessibility**            | Full keyboard support (Enter/Space to toggle, Escape to close, Tab for focus)                                                                                          |
+| **Haptic Feedback**          | Uses `navigator.vibrate()` for tactile open/close feedback on supported devices                                                                                        |
+
+### Available Endpoints
+
+System catalog lives in `src/stores/floating-nav-store.svelte.ts`. Users toggle most of these via the PageTitle star. **Home** and **Settings** are fixed (always on).
+
+| Label                | ID                  | Path                        | Icon                             | Admin Only | Fixed |
+| :------------------- | :------------------ | :-------------------------- | :------------------------------- | :--------- | :---- |
+| Home                 | `home`              | `/`                         | `solar:home-bold`                | No         | Yes   |
+| Dashboard            | `dashboard`         | `/dashboard`                | `mdi:view-dashboard`             | No         | No    |
+| User Profile         | `user`              | `/user`                     | `radix-icons:avatar`             | No         | No    |
+| Collection Builder   | `collectionbuilder` | `/config/collectionbuilder` | `fluent-mdl2:build-definition`   | Yes        | No    |
+| GraphQL Explorer     | `graphql`           | `/api/graphql` (external)   | `teenyicons:graphql-outline`     | No         | No    |
+| System Configuration | `config`            | `/config`                   | `mynaui:config`                  | No         | No    |
+| Access Management    | `access`            | `/config/access-management` | `mdi:shield-account`             | No         | No    |
+| Marketplace          | `marketplace`       | Extensions Marketplace tab  | `icon-park-outline:shopping-bag` | No         | No    |
+| Media Gallery        | `media`             | `/mediagallery`             | `mdi:image-multiple`             | No         | No    |
+| System Settings      | `settings`          | `/config/system-settings`   | `mdi:cog`                        | No         | Yes   |
+
+Custom routes (collections, plugins, etc.) can be starred as favorites; they appear as additional spokes on the radial.
+
+---
+
+## 🔍 Global Search (Command Palette) {#global-search-command-palette}
+
+Gin/Coffee-style unified search overlay for admin pages, collections, actions, and plugins.
+
+### Architecture
+
+```
+┌──────────────────────────────────────────────────────┐
+│  ui.isCommandBarVisible (+ isSearchVisible alias)    │
+│  └─ toggled by: Alt+G, Mod+K; Escape to close        │
+├──────────────────────────────────────────────────────┤
+│  CommandPalette (command-palette.svelte)             │
+│  ├─ Single elevated card (light/dark, WCAG focus)    │
+│  ├─ Prefix filters: c / m / e / u / p / > /path      │
+│  ├─ Recents (localStorage, tenant+user scoped)       │
+│  ├─ Context boost from current route                 │
+│  ├─ Keyboard: ↑↓ Enter Esc Tab trap; 1–9 jump        │
+│  └─ Paraglide titles/descriptions for static pages   │
+├──────────────────────────────────────────────────────┤
+│  command-palette.ts + global-search-index.svelte.ts  │
+│  ├─ Static admin catalog + live collections          │
+│  ├─ Plugin-extensible via addToGlobalSearchIndex()   │
+│  └─ Semantic/API enrichment when query length ≥ 2    │
+└──────────────────────────────────────────────────────┘
+```
+
+### Opening Global Search
+
+| Method         | Shortcut | Description                              |
+| :------------- | :------- | :--------------------------------------- |
+| **Primary**    | `Mod+K`  | Toggle palette (Ctrl+K / ⌘K)             |
+| **Gin/Coffee** | `Alt+G`  | Same toggle on Windows, Linux, and macOS |
+| **Escape**     | `Escape` | Close palette and restore focus          |
+
+### Search Strategy
+
+1. **Local catalog** (static pages, collections, plugins, recents, context)
+2. **Weighted fuzzy score** (current-locale title > EN keywords > path > multi-locale `matchTerms` + context boost)
+3. **Multi-locale matchTerms** — Paraglide strings for **all** configured locales (`en`, `de`, `hi`, …) are harvested into a match bag. Display title/description stay **current UI language**; typing **EN** (e.g. `user`) still finds **Benutzerprofil** / Hindi labels because EN keywords, EN fallbacks, and `/user` path tokens always stay in the bag.
+4. **Server enrichment** via `searchGlobalIndex` when the query is ≥ 2 characters
+5. Results are sectioned (Recent · Suggested · Pages · Collections · Actions)
+
+### i18n contract (Paraglide + search)
+
+| Layer            | Behavior                                                                                                                |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| **Display**      | `titleKey` / `descriptionKey` resolved for **current** admin locale                                                     |
+| **Match**        | `matchTerms` = all locale titles/descriptions + stable EN `keywords` + path segments                                    |
+| **Navigate**     | Always stable admin path (`/user`, `/dashboard`) — never localized URLs                                                 |
+| **New language** | Add locale in `project.inlang` → `bun run translate` → `bun run paraglide` → harvest picks up new strings automatically |
+
+### Plugin Integration
+
+Plugins can register their own search entries at initialization:
+
+```typescript
+import { addToGlobalSearchIndex } from "@utils/global-search-index";
+
+addToGlobalSearchIndex({
+  title: "My Plugin",
+  description: "Does something amazing",
+  keywords: ["plugin", "amazing"],
+  triggers: { "Open My Plugin": { path: "/config/my-plugin" } },
+});
+```
+
+---
+
+## ⌨️ Hotkey Reference
+
+All admin hotkeys are registered via `src/utils/hotkeys.ts` using `registerHotkey()`. The `Mod` key normalizes to `Ctrl` on Windows/Linux and `⌘ Meta` on macOS.
+
+### Global Hotkeys (Root Layout)
+
+| Shortcut | Action                  | Registered In           |
+| :------- | :---------------------- | :---------------------- |
+| `?`      | Open Accessibility Help | `+layout.svelte` (root) |
+| `Alt+T`  | Toggle Dark Mode        | `+layout.svelte` (root) |
+
+### Admin Hotkeys (App Layout)
+
+| Shortcut | Action                                 | Registered In          |
+| :------- | :------------------------------------- | :--------------------- |
+| `Mod+K`  | Toggle Global Search (Command Palette) | `(app)/+layout.svelte` |
+| `Alt+G`  | Same toggle (Gin/Coffee-style, all OS) | `(app)/+layout.svelte` |
+| `Mod+S`  | Global Save                            | `(app)/+layout.svelte` |
+| `Escape` | Close Global Search + restore focus    | `(app)/+layout.svelte` |
+
+> **Note:** `Alt+S` was removed (2026-07). `Mod+K` and `Alt+G` open the same unified palette — see [Global Search](#global-search-command-palette).
+
+### Context-Specific Hotkeys
+
+| Shortcut      | Action                | Context                       |
+| :------------ | :-------------------- | :---------------------------- |
+| `Delete`      | Delete selected items | Entry lists, media gallery    |
+| `Mod+Z`       | Undo                  | Image editor                  |
+| `Mod+Shift+Z` | Redo                  | Image editor                  |
+| `Mod+D`       | Duplicate field       | Collection Builder (BuzzForm) |
+| `Mod+Enter`   | Advance / Confirm     | Steppers, modals              |
+| `Mod+F`       | Focus search input    | Media Gallery                 |
+| `Mod+A`       | Select all            | Entry lists                   |
+| `Mod+O`       | Open Media Library    | Upload widget                 |
+
+### Adding New Hotkeys
+
+```typescript
+import { registerHotkey } from "@src/utils/hotkeys";
+import { onMount } from "svelte";
+
+onMount(() => {
+  registerHotkey("mod+s", () => handleSave(), "Save changes");
+});
+```
+
+> [!NOTE]
+> Hotkeys automatically skip events from `INPUT`, `TEXTAREA`, `SELECT`, and `contenteditable` elements. Cleanup is automatic via `onDestroy`.
+
+---
+
+## 🔍 Related Documentation
+
+- **[State Management](./state-management.mdx)** - System lifecycle and health architecture.
+- **[Global Loading Store](./global-loading-store.mdx)** - Concurrent loading state management.
+- **[Code Structure](./code-structure.mdx)** - Project folder organization.
+- **[Admin Theme Settings](../../guides/configuration/admin-theme-settings.mdx)** - User guide for the 6-region theme shell.
+- **[Hover Preloading](./hover-preloading.mdx)** - Predictive preloading architecture.
+
+---
+
+## Related
+
+- [Architecture Overview](./index.mdx)
+- [Security Overview](../security/index.mdx)
+- [State Management](./state-management.mdx)

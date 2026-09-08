@@ -1,77 +1,105 @@
 <!--
 @file src/routes/setup/+page.svelte
-@description Professional multi-step setup wizard for SveltyCMS.
-@refactor This component is now a "coordinator" that uses the "Service Store" pattern.
-All API logic and state (isLoading, errorMessage, etc.)
-are now handled by `setupStore.svelte.ts`. This component just
-calls store methods and wires store state to child components.
+@component
+**Professional multi-step setup wizard for SveltyCMS**
 -->
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
-	import { goto } from '$app/navigation';
-
+	import Button from '@components/ui/button.svelte';
 	// Stores
-	import { setupStore } from '@stores/setupStore.svelte';
-	import { systemLanguage } from '@stores/store.svelte';
 
-	// Child Layout Components
-	import SetupHeader from './SetupHeader.svelte';
-	import SetupStepper from './SetupStepper.svelte';
-	import SetupCardHeader from './SetupCardHeader.svelte';
-	import SetupNavigation from './SetupNavigation.svelte';
-
-	// Step Content Components
-	import WelcomeModal from './WelcomeModal.svelte';
-	import DatabaseConfig from './DatabaseConfig.svelte';
-	import AdminConfig from './AdminConfig.svelte';
-	import SystemConfig from './SystemConfig.svelte';
-	import EmailConfig from './EmailConfig.svelte';
-	import ReviewConfig from './ReviewConfig.svelte';
-
-	// Skeleton
-	import { getModalStore, type ModalSettings, Modal } from '@skeletonlabs/skeleton';
-	import type { ModalComponent } from '@skeletonlabs/skeleton';
-	import { Toast, getToastStore } from '@skeletonlabs/skeleton';
-
+	// Native UI Components v4
+	// NOTE: <DialogManager /> is mounted once in the ROOT layout (src/routes/+layout.svelte).
+	// It renders from the shared global `modalState`, so mounting a second instance here made
+	// every setup-wizard modal render twice, pixel-aligned — the top copy swallowed the click
+	// and the lower copy was inert. Do not re-add it. See dialog-manager.svelte for the guard.
 	// ParaglideJS
-	import * as m from '@src/paraglide/messages';
-	import { getLocale } from '@src/paraglide/runtime';
-
+	import {
+		label_database,
+		label_host,
+		label_port,
+		label_user,
+		setup_db_test_details_hide,
+		setup_db_test_details_show,
+		setup_db_test_engine,
+		setup_db_test_latency,
+		setup_db_test_user,
+		setup_legend_completed,
+		setup_legend_current,
+		setup_legend_pending,
+		setup_step_admin,
+		setup_step_admin_desc,
+		setup_step_complete,
+		setup_step_complete_desc,
+		setup_step_database,
+		setup_step_database_desc,
+		setup_step_email,
+		setup_step_email_desc,
+		setup_step_system,
+		setup_step_system_desc
+	} from '@src/paraglide/messages';
+	import { locales as availableLocales, getLocale } from '@src/paraglide/runtime';
+	import { systemLanguage } from '@src/stores/locale-store.svelte';
+	import { applySystemLanguage, mergeSystemLanguages } from '@utils/system-locale';
+	import { setupStore } from '@src/stores/setup-store.svelte.ts';
 	// Utils
-	import { getLanguageName } from '@utils/languageUtils';
-	import { setGlobalToastStore } from '@utils/toast';
-	import { locales as availableLocales } from '@src/paraglide/runtime';
+	import { getLanguageName } from '@utils/language-utils';
+	import { modalState } from '@utils/modal.svelte';
+	// Utils
+	import { showConfirm } from '@utils/modal.svelte';
+	import { adminPage } from '@utils/admin-transitions';
+	// Using iconify-icon web component
+	import { onMount, tick } from 'svelte';
+	import AdminConfig from './admin-config.svelte';
+	import DatabaseConfig from './database-config.svelte';
+	import EmailConfig from './email-config.svelte';
+	import ReviewConfig from './review-config.svelte';
+	import SetupCardHeader from './setup-card-header.svelte';
+	import SetupHeader from './setup-header.svelte';
+	import SetupNavigation from './setup-navigation.svelte';
+	import SystemConfig from './system-config.svelte';
+	// Step Content Components
+	import WelcomeModal from './welcome-modal.svelte';
+	import Stepper from '@components/ui/stepper.svelte';
+	import VersionCheck from '@src/components/version-check.svelte';
+	import { logger } from '@src/utils/logger.ts';
 
 	// --- 1. STATE MANAGEMENT (Wired to Store) ---
-	const wizard = setupStore.wizard; // Get direct rune access
-	const { load: loadStore, clear: clearStore, setupPersistence: setupPersistenceFn, validateStep, seedDatabase, completeSetup } = setupStore;
+	let { data: _data } = $props();
+	// Stores
+	const wizard = setupStore.wizard;
+	const { load: loadStore, clear: clearStore, setupPersistence: setupPersistenceFn, validateStep, completeSetup } = setupStore;
 
-	// --- 2. TYPE DEFINITIONS ---
-	interface StepDef {
-		label: string;
-		shortDesc: string;
-	}
-
-	// --- 3. LOCAL UI STATE (Page-specific UI) ---
+	// --- 1. COMPONENT IMPORTS ---
 	let showDbPassword = $state(false);
-	let showAdminPassword = $state(false);
-	let showConfirmPassword = $state(false);
-	let initialDataSnapshot = $state<string>('');
-	let isLangOpen = $state(false);
-	let langSearch = $state('');
+	let initialDataSnapshot = $state('');
 	let currentLanguageTag = $state(getLocale());
 
-	// --- 4. LIFECYCLE HOOKS ---
-	const modalComponentRegistry: Record<string, ModalComponent> = {
-		welcomeModal: { ref: WelcomeModal }
-	};
-	const modalStore = getModalStore();
+	// Asynchronously probe local Redis only when reaching Step 2 (System Config).
+	// Guard: use highestStepReached >= 1 (not dbTestPassed) because clearDbTestError() resets
+	// dbTestPassed on every Next click — it's always false by the time we reach step 2.
+	// highestStepReached >= 1 means the user legitimately advanced past step 0 (DB accepted).
+	$effect(() => {
+		if (wizard.currentStep === 2 && wizard.highestStepReached >= 1 && !wizard.redisAvailable) {
+			setupStore.probeRedis();
+		}
+	});
 
+	// --- 4. LIFECYCLE HOOKS ---
 	onMount(() => {
-		setGlobalToastStore(getToastStore());
-		loadStore();
+		// --- Fresh Start Logic ---
+		// We clear the store on first entry to the setup wizard in a new session
+		// to ensure a clean slate, but allow data persistence across refreshes.
+		const isSetupActive = sessionStorage.getItem('sveltycms_setup_active');
+		if (!isSetupActive) {
+			logger.info('[Setup] Fresh start detected. Clearing previous data.');
+			clearStore();
+			sessionStorage.setItem('sveltycms_setup_active', 'true');
+		} else {
+			logger.info('[Setup] Existing session detected. Loading saved data.');
+			loadStore();
+		}
+
 		initialDataSnapshot = JSON.stringify(wizard);
-		document.addEventListener('click', outsideLang);
 		setupPersistenceFn();
 
 		const welcomeShown = sessionStorage.getItem('sveltycms_welcome_modal_shown');
@@ -87,316 +115,431 @@ calls store methods and wires store state to child components.
 		const handleBeforeUnload = (e: BeforeUnloadEvent) => {
 			if (hasUnsavedChanges() && !wizard.isSubmitting) {
 				e.preventDefault();
-				e.returnValue = '';
-				return '';
 			}
 		};
 		window.addEventListener('beforeunload', handleBeforeUnload);
 
+		// Clean up the URL if it has the "from" parameter
+		if (window.location.search.includes('from=')) {
+			const url = new URL(window.location.href);
+			url.searchParams.delete('from');
+			window.history.replaceState({}, '', url.pathname);
+		}
+
+		// ✨ SMART SETUP TRANSITION
+		// Listen for the custom HMR event from Vite when setup is complete
+		if (import.meta.hot) {
+			import.meta.hot.on('svelty:setup-complete', (data) => {
+				logger.info('[Setup] HMR Signal: Setup Complete!', data);
+				wizard.isSubmitting = true; // Show loading state
+				wizard.successMessage = 'System Initialized! Transitioning to CMS...';
+
+				// Force a smooth transition after a short delay to let the server stabilize
+				setTimeout(() => {
+					window.location.href = '/';
+				}, 1500);
+			});
+		}
+
 		return () => {
 			window.removeEventListener('beforeunload', handleBeforeUnload);
-			document.removeEventListener('click', outsideLang);
 		};
 	});
 
-	onDestroy(() => {
-		document.removeEventListener('click', outsideLang);
-	});
-
 	function showWelcomeModal() {
-		const modal: ModalSettings = { type: 'component', component: 'welcomeModal' };
-		modalStore.trigger(modal);
+		modalState.trigger(WelcomeModal);
 	}
 
 	// --- 5. DERIVED STATE (Page-Specific) ---
 	const hasUnsavedChanges = $derived(() => {
-		if (!initialDataSnapshot) return false;
+		if (!initialDataSnapshot) {
+			return false;
+		}
 		return JSON.stringify(wizard) !== initialDataSnapshot;
 	});
-	const systemLanguages = $derived.by<string[]>(() => {
-		return [...availableLocales].sort((a: string, b: string) => getLanguageName(a, 'en').localeCompare(getLanguageName(b, 'en')));
+	const systemLanguages = $derived.by(() => {
+		return mergeSystemLanguages(wizard.systemSettings.systemLanguages, availableLocales).sort((a: string, b: string) =>
+			getLanguageName(a, 'en').localeCompare(getLanguageName(b, 'en'))
+		);
 	});
 	const isFullUri = $derived(() => {
 		return wizard.dbConfig.host.includes('mongodb://') || wizard.dbConfig.host.includes('mongodb+srv://');
 	});
 
 	// STEPPER CONFIG
-	const steps = $derived<StepDef[]>([
-		{ label: m.setup_step_database(), shortDesc: m.setup_step_database_desc() },
-		{ label: m.setup_step_admin(), shortDesc: m.setup_step_admin_desc() },
-		{ label: m.setup_step_system(), shortDesc: m.setup_step_system_desc() },
-		{
-			label: m.setup_step_email ? m.setup_step_email() : 'Email (Optional)',
-			shortDesc: m.setup_step_email_desc ? m.setup_step_email_desc() : 'Configure SMTP'
-		},
-		{ label: m.setup_step_complete(), shortDesc: m.setup_step_complete_desc() }
+	const steps = $derived([
+		{ label: setup_step_database(), shortDesc: setup_step_database_desc() },
+		{ label: setup_step_admin(), shortDesc: setup_step_admin_desc() },
+		{ label: setup_step_system(), shortDesc: setup_step_system_desc() },
+		{ label: setup_step_email(), shortDesc: setup_step_email_desc() },
+		{ label: setup_step_complete(), shortDesc: setup_step_complete_desc() }
 	]);
-	const totalSteps = $derived<number>(steps.length);
+	const totalSteps = $derived(steps.length);
 	const legendItems = [
-		{ key: 'completed', label: m.setup_legend_completed(), content: '✓' },
-		{ key: 'current', label: m.setup_legend_current(), content: '●' },
-		{ key: 'pending', label: m.setup_legend_pending(), content: '•' }
+		{ key: 'completed', label: setup_legend_completed(), content: '✓' },
+		{ key: 'current', label: setup_legend_current(), content: '●' },
+		{ key: 'pending', label: setup_legend_pending(), content: '•' }
 	];
 
 	// --- 6. CORE LOGIC & API CALLS (Now delegated to store) ---
-	// svelte-ignore non_reactive_update
-	let dbConfigComponent: any = null; // Still needed to call installDatabaseDriver
+	let dbConfigComponent: {
+		installDatabaseDriver: (type: string) => Promise<void>;
+	} | null = $state(null);
+
+	async function focusStepContent() {
+		await tick();
+		const stepContent = document.getElementById('step-content');
+		if (stepContent) {
+			// preventScroll: step transitions must not trigger a smooth-scroll
+			// chase (async Redis detection / expandable CDN settings can change
+			// the step height right after focus → visible layout reflow).
+			stepContent.focus({ preventScroll: true });
+		}
+	}
+
+	async function selectSetupStep(index: number) {
+		if (setupStore.stepClickable[index] || index === wizard.currentStep) {
+			wizard.currentStep = index;
+			await focusStepContent();
+		}
+	}
 
 	async function nextStep() {
-		if (!setupStore.canProceed) return;
-		if (wizard.currentStep === 0) {
-			// Call install driver on the component instance (if it exists)
-			if (dbConfigComponent && typeof (dbConfigComponent as any).installDatabaseDriver === 'function') {
-				await (dbConfigComponent as any).installDatabaseDriver(wizard.dbConfig.type);
+		if (!setupStore.canProceed) {
+			if (wizard.currentStep === 2 && wizard.systemSettings.useRedis && !setupStore.wizard.redisTestPassed) {
+				import('@src/stores/toast.svelte.ts').then(({ toast }) => {
+					toast.error('Please test your Redis connection before proceeding.');
+				});
 			}
-			// Seed the database via the store
-			await seedDatabase();
+			return;
 		}
-		if (wizard.currentStep === 1 || wizard.currentStep === 2) {
-			if (!validateStep(wizard.currentStep, true)) return;
+		if (wizard.currentStep === 0) {
+			if (dbConfigComponent && typeof dbConfigComponent.installDatabaseDriver === 'function') {
+				await dbConfigComponent.installDatabaseDriver(wizard.dbConfig.type);
+			}
+			// Seeding is now triggered automatically by the store when the test passes.
+			// If it's already in progress or done, we just move to the next step.
+		}
+		if ((wizard.currentStep === 1 || wizard.currentStep === 2) && !validateStep(wizard.currentStep, true)) {
+			return;
 		}
 		if (wizard.currentStep < totalSteps - 1) {
 			wizard.currentStep++;
 			if (wizard.currentStep > wizard.highestStepReached) {
 				wizard.highestStepReached = wizard.currentStep;
 			}
+			await focusStepContent();
 		}
-		// Clear local page errors
 		setupStore.clearDbTestError();
 	}
 
-	function prevStep() {
+	async function prevStep() {
 		if (wizard.currentStep > 0) {
 			wizard.currentStep--;
 			wizard.errorMessage = '';
+			await focusStepContent();
 		}
 	}
 
 	async function handleCompleteSetup() {
-		const success = await completeSetup((redirectPath: string) => {
-			// This callback handles the redirect after store is cleared
-			initialDataSnapshot = JSON.stringify(wizard); // Prevent unsaved changes warning
-			goto(redirectPath);
-		});
-		if (success) {
-			initialDataSnapshot = JSON.stringify(wizard); // Also update snapshot immediately
+		logger.info('[SetupPage] 🏁 handleCompleteSetup triggered');
+		try {
+			const success = await completeSetup((redirectPath: string) => {
+				logger.info('[SetupPage] ✅ Setup successful, redirecting to:', redirectPath);
+				initialDataSnapshot = JSON.stringify(wizard);
+				window.location.href = redirectPath;
+			});
+			logger.info('[SetupPage] completeSetup result:', success);
+			if (success) {
+				initialDataSnapshot = JSON.stringify(wizard);
+			}
+		} catch (err) {
+			logger.error('[SetupPage] ❌ handleCompleteSetup failed:', err);
 		}
 	}
 
 	// --- 7. UI HANDLERS ---
-	function selectLanguage(event: CustomEvent<string>) {
-		const lang = event.detail;
-		systemLanguage.set(lang as typeof systemLanguage.value);
-		currentLanguageTag = lang as typeof currentLanguageTag;
-		isLangOpen = false;
-		langSearch = '';
-	}
-
-	function outsideLang(e: MouseEvent) {
-		const t = e.target as HTMLElement;
-		if (!t.closest('.language-selector')) {
-			isLangOpen = false;
-			langSearch = '';
-		}
+	function selectLanguage(lang: string) {
+		systemLanguage.set(lang);
+		currentLanguageTag = lang;
+		applySystemLanguage(lang);
 	}
 </script>
 
-<svelte:head>
-	<title>SveltyCMS Setup</title>
-	<style>
-		:global(.setup-page .toast-container) {
-			position: fixed !important;
-			bottom: 1.5rem !important;
-			right: 1.5rem !important;
-			left: auto !important;
-			top: auto !important;
-			transform: none !important;
-			z-index: 9999 !important;
-		}
-		:global(.setup-page .toast) {
-			transform: none !important;
-			animation: none !important;
-		}
-	</style>
-</svelte:head>
+<svelte:head><title>SveltyCMS Setup</title></svelte:head>
 
-<div class="bg-surface-50-900 min-h-screen w-full transition-colors">
-	<Modal components={modalComponentRegistry} />
-	<Toast />
-	<div class="mx-auto max-w-[1600px] px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-		<!-- ✅ NEW: Component for Header -->
-		<SetupHeader
-			siteName={wizard.systemSettings.siteName}
-			{systemLanguages}
-			{currentLanguageTag}
-			bind:isLangOpen
-			bind:langSearch
-			on:selectLanguage={selectLanguage}
-			on:toggleLang={() => (isLangOpen = !isLangOpen)}
-			on:reset={() => {
-				if (typeof window !== 'undefined' && !confirm('Clear all setup data?')) return;
-				clearStore();
-			}}
-		/>
-
-		<!-- Main Content with Left Side Steps -->
-		<div class="flex flex-col gap-4 lg:flex-row lg:gap-6">
-			<!-- ✅ NEW: Component for Stepper -->
-			<SetupStepper
-				{steps}
-				currentStep={wizard.currentStep}
-				stepCompleted={setupStore.stepCompleted}
-				stepClickable={setupStore.stepClickable}
-				{legendItems}
-				on:selectStep={(e) => (wizard.currentStep = e.detail)}
+<div class="flex h-dvh min-h-0 flex-col overflow-clip bg-(--admin-bg-page) transition-colors">
+	<!-- Top Navigation Bar -->
+	<header class="z-30 shrink-0 border-b border-(--admin-border-default) bg-(--admin-bg-card)">
+		<div class="px-4 py-0">
+			<SetupHeader
+				siteName={wizard.systemSettings.siteName}
+				{systemLanguages}
+				{currentLanguageTag}
+				onselectLanguage={selectLanguage}
 			/>
+		</div>
+	</header>
 
-			<!-- Main Card (Right Side) -->
-			<div class="flex flex-1 flex-col rounded-xl border border-surface-200 bg-white shadow-xl dark:border-white dark:bg-surface-800">
-				<!-- ✅ NEW: Component for Card Header -->
-				<SetupCardHeader
-					currentStep={wizard.currentStep}
+	<div class="flex min-h-0 flex-1 overflow-clip">
+		<!-- Left Sidebar: shared Stepper + legend (desktop) -->
+		<aside class="hidden h-full w-64 shrink-0 flex-col overflow-hidden border-e border-(--admin-border-default) bg-(--admin-bg-card) lg:flex xl:w-72">
+			<div class="flex h-full min-h-0 flex-1 flex-col overflow-hidden p-4">
+				<div class="min-h-0 flex-1 overflow-x-hidden pe-1">
+					<Stepper
+						{steps}
+						currentStep={wizard.currentStep}
+						completedSteps={setupStore.stepCompleted}
+						stepClickable={setupStore.stepClickable}
+						orientation="vertical"
+						variant="setup"
+						onStepClick={selectSetupStep}
+					/>
+				</div>
+				<div class="mt-auto shrink-0 border-t border-surface-500/30 pt-6 dark:border-surface-500/40">
+					<h4 class="mb-4 w-full text-center text-sm font-semibold tracking-tight text-surface-600 dark:text-surface-400">
+						Legend
+					</h4>
+					<div class="flex items-end justify-between gap-4">
+						<ul class="space-y-2 text-xs">
+							{#each legendItems as item (item.key)}
+								<li class="grid grid-cols-[1.4rem_auto] items-center gap-x-3">
+									<div
+										class="flex h-5 w-5 items-center justify-center rounded-full font-semibold leading-none
+										{item.key === 'completed'
+											? ' bg-tertiary-500 dark:bg-primary-500 text-white'
+											: item.key === 'current'
+												? 'bg-error-500 text-white shadow-sm'
+												: 'bg-surface-200 text-surface-600 ring-1 ring-surface-300 dark:bg-surface-700 dark:text-surface-300 dark:ring-surface-600'}"
+									>
+										<span class="text-[0.65rem]">{item.content}</span>
+									</div>
+									<span class="text-surface-600 dark:text-surface-400">{item.label}</span>
+								</li>
+							{/each}
+						</ul>
+						<div class="flex shrink-0 items-center"><VersionCheck /></div>
+					</div>
+				</div>
+			</div>
+		</aside>
+
+		<!-- Main: in-flow footer (shrink-0) below the single scroll container —
+			 Redis / multi-tenant expand scrolls inside step-content and cannot reflow
+			 the navigation. overflow-clip (not hidden) so browser focus-scrolling
+			 can never drag the footer. -->
+		<main class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-clip bg-surface-500/10 dark:bg-surface-900">
+			<!-- Mobile Stepper (shared UI Stepper) -->
+			<div class="z-10 shrink-0 border-b border-(--admin-border-default) bg-(--admin-bg-card) p-4 lg:hidden">
+				<Stepper
 					{steps}
-					on:reset={() => {
-						if (typeof window !== 'undefined' && !confirm('Clear all setup data?')) return;
-						clearStore();
-					}}
+					currentStep={wizard.currentStep}
+					completedSteps={setupStore.stepCompleted}
+					stepClickable={setupStore.stepClickable}
+					orientation="horizontal"
+					variant="setup"
+					mobileTruncate={true}
+					onStepClick={selectSetupStep}
 				/>
+			</div>
 
-				<!-- Card Content -->
-				<div class="p-4 sm:p-6 lg:p-8">
-					{#if wizard.currentStep === 0}
-						<DatabaseConfig
-							bind:dbConfig={wizard.dbConfig}
-							validationErrors={wizard.validationErrors}
-							isLoading={wizard.isLoading}
-							bind:showDbPassword
-							toggleDbPassword={() => (showDbPassword = !showDbPassword)}
-							testDatabaseConnection={setupStore.testDatabaseConnection}
-							dbConfigChangedSinceTest={setupStore.dbConfigChangedSinceTest}
-							clearDbTestError={setupStore.clearDbTestError}
-							bind:this={dbConfigComponent}
-						/>
-					{:else if wizard.currentStep === 1}
-						<AdminConfig
-							bind:adminUser={wizard.adminUser}
-							validationErrors={wizard.validationErrors}
-							passwordRequirements={setupStore.passwordRequirements}
-							bind:showAdminPassword
-							bind:showConfirmPassword
-							toggleAdminPassword={() => (showAdminPassword = !showAdminPassword)}
-							toggleConfirmPassword={() => (showConfirmPassword = !showConfirmPassword)}
-							checkPasswordRequirements={() => {
-								/* now handled by derived rune */
+			<!-- Scrollable step content; the footer is a normal flex sibling below,
+				 so content growth (Redis / demo-mode expand) scrolls here internally
+				 and can never shift or cover the navigation -->
+			<div
+				class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto scroll-smooth p-2 pb-6 [overflow-anchor:none]"
+				id="step-content"
+				tabindex="-1"
+			>
+				<div class="mx-auto max-w-8xl">
+					<div class="mb-4">
+						<SetupCardHeader
+							currentStep={wizard.currentStep}
+							{steps}
+							onreset={() => {
+								showConfirm({
+									title: 'Reset Setup Data',
+									body: 'Are you sure you want to clear all setup data? This cannot be undone.',
+									onConfirm: () => clearStore()
+								});
 							}}
 						/>
-					{:else if wizard.currentStep === 2}
-						<SystemConfig bind:systemSettings={wizard.systemSettings} validationErrors={wizard.validationErrors} />
-					{:else if wizard.currentStep === 3}
-						<EmailConfig />
-					{:else if wizard.currentStep === 4}
-						<ReviewConfig dbConfig={wizard.dbConfig} adminUser={wizard.adminUser} systemSettings={wizard.systemSettings} />
-					{/if}
+					</div>
 
-					<!-- ✅ Status Messages (Now reads from store) -->
-					{#if (wizard.successMessage || wizard.errorMessage) && wizard.lastDbTestResult}
-						<div
-							class="mt-4 flex flex-col rounded-md border-l-4 p-0 text-sm"
-							class:border-primary-400={!!wizard.successMessage}
-							class:border-error-400={!!wizard.errorMessage}
-						>
+				{#key wizard.currentStep}
+					<div
+						class="rounded-xl border border-(--admin-border-default) bg-(--admin-bg-card) p-6 shadow-sm"
+						in:adminPage={{ duration: 200, rise: 6 }}
+					>
+						{#if wizard.currentStep === 0}
+							<DatabaseConfig
+								bind:dbConfig={wizard.dbConfig}
+								validationErrors={wizard.validationErrors}
+								isLoading={wizard.isLoading}
+								bind:showDbPassword
+								toggleDbPassword={() => (showDbPassword = !showDbPassword)}
+								testDatabaseConnection={setupStore.testDatabaseConnection}
+								dbConfigChangedSinceTest={setupStore.dbConfigChangedSinceTest}
+								clearDbTestError={() => {
+									wizard.lastDbTestResult = null;
+									wizard.errorMessage = '';
+								}}
+								bind:this={dbConfigComponent}
+							/>
+						{:else if wizard.currentStep === 1}
+							<AdminConfig
+								bind:adminUser={wizard.adminUser}
+								validationErrors={wizard.validationErrors}
+								passwordRequirements={setupStore.passwordRequirements}
+								checkPasswordRequirements={() => {
+									/* now handled by derived rune */
+								}}
+								onnext={nextStep}
+							/>
+						{:else if wizard.currentStep === 2}
+							<SystemConfig
+								bind:systemSettings={wizard.systemSettings}
+								redisAvailable={wizard.redisAvailable}
+								validationErrors={wizard.validationErrors}
+							/>
+						{:else if wizard.currentStep === 3}
+							<EmailConfig />
+						{:else if wizard.currentStep === 4}
+							<ReviewConfig
+								dbConfig={wizard.dbConfig}
+								adminUser={wizard.adminUser}
+								systemSettings={wizard.systemSettings}
+								emailSettings={wizard.emailSettings}
+							/>
+						{/if}
+
+						{#if (wizard.successMessage || wizard.errorMessage) && wizard.lastDbTestResult && !setupStore.dbConfigChangedSinceTest}
 							<div
-								class="flex items-center gap-2 px-3.5 py-3"
-								class:bg-primary-50={!!wizard.successMessage}
-								class:text-green-800={!!wizard.successMessage}
-								class:bg-red-50={!!wizard.errorMessage}
-								class:text-error-600={!!wizard.errorMessage}
+								class="mt-6 flex flex-col rounded border-s-4 p-0 text-sm overflow-hidden"
+								class:border-primary-500={!!wizard.successMessage}
+								class:border-error-500={!!wizard.errorMessage}
+								aria-live="polite"
+								aria-atomic="true"
 							>
-								<svg class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									{#if wizard.successMessage}
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-									{:else}
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-									{/if}
-								</svg>
-								<div class="flex-1">{wizard.successMessage || wizard.errorMessage}</div>
-								<button type="button" class="btn-sm flex shrink-0 items-center gap-1" onclick={() => (wizard.showDbDetails = !wizard.showDbDetails)}>
-									<iconify-icon icon={wizard.showDbDetails ? 'mdi:chevron-up' : 'mdi:chevron-down'} class="h-4 w-4"></iconify-icon>
-									<span class="hidden sm:inline">{wizard.showDbDetails ? m.setup_db_test_details_hide() : m.setup_db_test_details_show()}</span>
-								</button>
-								<button
-									type="button"
-									class="btn-icon btn-sm h-6 w-6 shrink-0 rounded hover:bg-surface-200/60 dark:hover:bg-surface-600/60"
-									aria-label="Close message"
-									onclick={setupStore.clearDbTestError}
+								<div
+									class="flex items-center gap-2 px-4 py-3 {wizard.successMessage
+										? 'bg-success-500/10 text-primary-600 dark:text-primary-400'
+										: ''} {wizard.errorMessage
+										? 'bg-error-500/10 text-error-600 dark:text-error-400'
+										: ''}"
 								>
-									<iconify-icon icon="mdi:close" class="h-4 w-4"></iconify-icon>
-								</button>
-							</div>
-							{#if wizard.showDbDetails && wizard.lastDbTestResult}
-								<div class="border-t border-surface-200 bg-surface-50 text-xs dark:border-surface-600 dark:bg-surface-700">
-									<div class="grid grid-cols-2 gap-x-4 gap-y-2 p-3 sm:grid-cols-6">
-										<div class="sm:col-span-1">
-											<span class="font-semibold">{m.setup_db_test_latency()}:</span>
-											<span class="text-terrary-500 dark:text-primary-500">{wizard.lastDbTestResult.latencyMs ?? '—'} ms</span>
-										</div>
-										<div class="sm:col-span-1">
-											<span class="font-semibold">{m.setup_db_test_engine()}:</span>
-											<span class="text-terrary-500 dark:text-primary-500">{wizard.dbConfig.type}</span>
-										</div>
-										<div class="sm:col-span-1">
-											<span class="font-semibold">{m.label_host()}:</span>
-											<span class="text-terrary-500 dark:text-primary-500">{wizard.dbConfig.host}</span>
-										</div>
-										{#if !isFullUri}
-											<div class="sm:col-span-1">
-												<span class="font-semibold">{m.label_port()}:</span>
-												<span class="text-terrary-500 dark:text-primary-500">{wizard.dbConfig.port}</span>
-											</div>
+									<svg class="h-5 w-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										{#if wizard.successMessage}
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+										{:else}
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
 										{/if}
-										<div class="sm:col-span-1">
-											<span class="font-semibold">{m.label_database()}:</span>
-											<span class="text-terrary-500 dark:text-primary-500">{wizard.dbConfig.name}</span>
-										</div>
-										{#if wizard.dbConfig.user}
-											<div class="sm:col-span-1">
-												<span class="font-semibold">{m.label_user?.() || m.setup_db_test_user()}:</span>
-												<span class="text-terrary-500 dark:text-primary-500">{wizard.dbConfig.user}</span>
-											</div>
-										{/if}
-										{#if wizard.lastDbTestResult.classification}
-											<div class="sm:col-span-2">
-												<span class="font-semibold">Code:</span>
-												<span class="text-terrary-500 dark:text-primary-500">{wizard.lastDbTestResult.classification}</span>
-											</div>
+									</svg>
+									<div class="flex-1">
+										{#if wizard.errorMessage}
+											<span class="font-bold">Connection Failed</span>{#if wizard.showDbDetails}: <span class="font-normal">{wizard.errorMessage}</span>{/if}
+										{:else}
+											{wizard.successMessage}
 										{/if}
 									</div>
-									{#if !wizard.lastDbTestResult.success}
-										<div class="border-t border-surface-200 p-3 dark:border-surface-600">
-											{#if wizard.lastDbTestResult.userFriendly}
-												<div class="mb-2 font-semibold text-error-600">Error:</div>
-												<div class="mb-3 rounded bg-red-50 p-2 text-sm text-error-700 dark:bg-error-900/20 dark:text-white">
-													{wizard.lastDbTestResult.userFriendly}
+									<div class="flex gap-2">
+										<Button variant="outline"
+											type="button"
+											onclick={() => (wizard.showDbDetails = !wizard.showDbDetails)}
+										 size="sm" class="text-surface-900 dark:text-surface-50 flex items-center gap-1">
+											<iconify-icon icon={wizard.showDbDetails ? 'mdi:chevron-up' : 'mdi:chevron-down'} class="h-4 w-4"></iconify-icon>
+											<span class="hidden sm:inline">{wizard.showDbDetails ? setup_db_test_details_hide() : setup_db_test_details_show()}</span>
+										</Button>
+										<Button variant="outline"
+												type="button"
+												aria-label="Close message"
+												onclick={setupStore.clearDbTestError}
+												rounded
+											 size="sm" class="p-0! min-w-0 h-7 w-7">
+											<iconify-icon icon="mdi:close" size="16" class="dark:text-white"></iconify-icon>
+										</Button>
+									</div>
+								</div>
+								{#if wizard.showDbDetails && wizard.lastDbTestResult}
+									<div class="border-t border-surface-500/30 bg-secondary-500/50 text-xs dark:border-surface-500/40 dark:bg-surface-900/50">
+										<div class="grid grid-cols-2 gap-x-4 gap-y-2 p-4 sm:grid-cols-3 lg:grid-cols-6">
+											<div class="flex flex-col">
+												<span class="font-semibold text-surface-500 uppercase text-[10px] tracking-wider">{setup_db_test_latency()}:</span>
+												<span class="text-tertiary-500 dark:text-primary-500 font-bold">{wizard.lastDbTestResult.latencyMs ?? '—'} ms</span>
+											</div>
+											<div class="flex flex-col">
+												<span class="font-semibold text-surface-500 uppercase text-[10px] tracking-wider">{setup_db_test_engine()}:</span>
+												<span class="text-tertiary-500 dark:text-primary-500 font-bold">{wizard.dbConfig.type}</span>
+											</div>
+											<div class="flex flex-col">
+												<span class="font-semibold text-surface-500 uppercase text-[10px] tracking-wider">{label_host()}:</span>
+												<span class="text-tertiary-500 dark:text-primary-500 font-bold truncate" title={wizard.dbConfig.host}>{wizard.dbConfig.host}</span>
+											</div>
+											{#if !isFullUri}
+												<div class="flex flex-col">
+													<span class="font-semibold text-surface-500 uppercase text-[10px] tracking-wider">{label_port()}:</span>
+													<span class="text-tertiary-500 dark:text-primary-500 font-bold">{wizard.dbConfig.port}</span>
+												</div>
+											{/if}
+											<div class="flex flex-col">
+												<span class="font-semibold text-surface-500 uppercase text-[10px] tracking-wider">{label_database()}:</span>
+												<span class="text-tertiary-500 dark:text-primary-500 font-bold truncate" title={wizard.dbConfig.name}>{wizard.dbConfig.name}</span>
+											</div>
+											{#if wizard.dbConfig.user}
+												<div class="flex flex-col">
+													<span class="font-semibold text-surface-500 uppercase text-[10px] tracking-wider">{label_user?.() || setup_db_test_user()}:</span>
+													<span class="text-tertiary-500 dark:text-primary-500 font-bold truncate" title={wizard.dbConfig.user}>{wizard.dbConfig.user}</span>
 												</div>
 											{/if}
 										</div>
-									{/if}
-								</div>
-							{/if}
+										{#if !wizard.lastDbTestResult.success && wizard.lastDbTestResult.hint}
+											<div class="border-t border-surface-500/30 p-4 dark:border-surface-500/40 bg-warning-500/30 dark:bg-warning-900/10">
+												<div class="flex items-center gap-2 font-bold text-warning-600 dark:text-warning-400 mb-2">
+													<iconify-icon icon="mdi:lightbulb-outline" class="text-lg"></iconify-icon>
+													<span class="uppercase tracking-widest text-[10px]">Troubleshooting Suggestions</span>
+												</div>
+												<div class="space-y-2">
+													{#each wizard.lastDbTestResult.hint.split('\n') as step (step)}
+														<div class="flex gap-2 text-surface-600 dark:text-surface-400">
+															<span class="shrink-0 text-warning-500">•</span>
+															<span>{step.replace(/^\d+\.\s*/, '')}</span>
+														</div>
+													{/each}
+												</div>
+											</div>
+										{/if}
+									</div>
+								{/if}
+							</div>
+						{/if}
 						</div>
-					{/if}
+					{/key}
+					</div>
 				</div>
-				<!-- ✅ NEW: Component for Navigation (wired to store state) -->
-				<SetupNavigation
-					currentStep={wizard.currentStep}
-					{totalSteps}
-					canProceed={setupStore.canProceed}
-					isLoading={wizard.isLoading || wizard.isSubmitting}
-					on:prev={prevStep}
-					on:next={nextStep}
-					on:complete={handleCompleteSetup}
-				/>
-			</div>
-		</div>
+
+				<!-- Navigation Footer — in-flow flex child (shrink-0). The step content
+					 above is the only scroll container, so expand/collapse (Redis,
+					 multi-tenant) can never reflow or reposition the navigation.
+					 An absolute footer here was dragged by <main>'s focus-scroll
+					 (overflow:hidden still scrolls programmatically) — that was the
+					 “navigation jumps in height” bug. -->
+			<footer
+				class="z-20 shrink-0 border-t border-(--admin-border-default)/50 bg-(--admin-bg-card) shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]"
+			>
+				<div class="mx-auto max-w-6xl">
+					<SetupNavigation
+						currentStep={wizard.currentStep}
+						{totalSteps}
+						canProceed={setupStore.canProceed}
+						isLoading={wizard.isLoading || wizard.isSubmitting}
+						isSeeding={wizard.isSeeding}
+						seedingProgress={wizard.seedingProgress}
+						onprev={prevStep}
+						onnext={nextStep}
+						oncomplete={handleCompleteSetup}
+					/>
+				</div>
+			</footer>
+		</main>
 	</div>
 </div>

@@ -1,0 +1,19 @@
+{
+  "ignorePatterns": ["src/types/**"],
+  "rules": {
+    "eslint/no-restricted-imports": [
+      "warn",
+      {
+        "paths": [
+          {
+            "name": "$app/forms",
+            "message": "Use SvelteKit 5 Server Functions instead of $app/forms"
+          }
+        ]
+      }
+    ],
+    "unicorn/explicit-timer-delay": "error",
+    "eslint/no-unreachable-loop": "error",
+    "unicorn/no-confusing-array-with": "error"
+  }
+}

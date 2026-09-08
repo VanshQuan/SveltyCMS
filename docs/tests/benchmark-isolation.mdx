@@ -1,0 +1,191 @@
+---
+path: "docs/tests/benchmark-isolation.mdx"
+title: "Benchmark & Test Collection Isolation"
+description: "Filesystem and GraphQL boundaries between user live collection data and benchmark/test fixtures."
+author: "SveltyCMS Team"
+created: "2026-06-23"
+updated: "2026-06-29"
+tags:
+  - "testing"
+  - "benchmarks"
+  - "isolation"
+  - "collections"
+---
+
+# Benchmark & Test Collection Isolation
+
+SveltyCMS separates **user live collection data** from **benchmark and test fixtures** at three layers: physical paths on disk, compile/runtime scanning, and GraphQL schema registration. This prevents benchmark runs from polluting `config/collections/` or bloating the GraphQL schema with 150+ mock types.
+
+> [!IMPORTANT]
+> **Source of truth:** `src/utils/benchmark-paths.ts` and `src/routes/setup/preset-collections.server.ts`. Matrix cleanup: `scripts/benchmark-matrix/index.ts` (`ConfigSafeguard`).
+
+## Path Contract
+
+| Purpose                       | TypeScript source                      | Compiled output                          |
+| :---------------------------- | :------------------------------------- | :--------------------------------------- |
+| **User live data**            | `config/collections/*.ts` (root only)  | `.compiledCollections/*.js` (root only)  |
+| **Benchmark / test fixtures** | `config/collections/test/<workspace>/` | `.compiledCollections/test/<workspace>/` |
+
+### Workspaces
+
+Benchmark modules use named workspaces under `test/`:
+
+| Workspace     | Test file                                                      | Purpose                                |
+| :------------ | :------------------------------------------------------------- | :------------------------------------- |
+| `scan`        | `tests/benchmarks/content-scan.test.ts`                        | Self-healing scanner (150+ mock files) |
+| `stress`      | `tests/benchmarks/content-scale-stress.test.ts`                | 1,000-file scale stress                |
+| `incremental` | `tests/benchmarks/content-incremental-reload.test.ts`          | Surgical vs full reload                |
+| `integration` | `tests/integration/harness.ts` + `bun test tests/integration/` | CI / local integration fixture         |
+
+### API helpers
+
+```typescript
+import {
+  getBenchmarkWorkspace,
+  prepareBenchmarkCompiledWorkspace,
+  cleanupBenchmarkCompiledWorkspace,
+  cleanupAllBenchmarkWorkspaces,
+} from "@utils/benchmark-paths";
+```
+
+`tests/benchmarks/modules/benchmark-utils.ts` re-exports these helpers and runs `cleanupAllBenchmarkWorkspaces()` in `afterAll` (except when `BENCHMARK_MATRIX=1`, where the matrix orchestrator owns cleanup).
+
+## Three-Layer Isolation
+
+### 1. Physical (disk)
+
+- **Bootstrap** (`engine.server.ts`): `bench_*`, `mock_*`, and `test_*` slugs regenerate under `config/collections/test/`, not the root.
+- **Benchmark filesystem tests** write only under `.compiledCollections/test/<workspace>/`.
+- **Setup wizard** (`writePresetCollectionFiles` with `replaceAll: true`): purges stale/benchmark debris before writing blog presets (`posts.ts`, `authors.ts`, `categories.ts`).
+
+### 2. Compile & runtime scan
+
+- **`compile.ts`**: Outside benchmark runtime (`BENCHMARK=true`), skips `test/` sources and `isBenchmarkArtifact()` files — dev builds do not compile fixtures into the live tree.
+- **`scanCompiledCollections`**: Skips benchmark artifacts when `!isBenchmarkRuntime()`.
+- **Dev reconciler** (`scan-files.server.ts`): Same skip outside benchmark mode.
+
+### 3. GraphQL logical filter
+
+- **`isMockScanCollection()`**: Always excluded from GraphQL schema — even when `BENCHMARK=true`. Prevents matrix HTTP 500 from registering 150+ `mock_collection_*` types.
+- **`bench_*` / `test_*`**: Excluded in normal operation; included in `BENCHMARK=true` for relational audits (`BenchmarkStable`, `benchmark_authors`).
+- **`allCollections` query**: Applies the same filter; returns full set only in benchmark mode (minus mock scan debris).
+
+## Benchmark Data: API vs Filesystem
+
+| Benchmark type                      | Collection source                                                                   | Touches user paths?                  |
+| :---------------------------------- | :---------------------------------------------------------------------------------- | :----------------------------------- |
+| Relational, REST, GraphQL API       | `seedBenchmarkState()` in-process LocalCMS (pre-boot) + authenticated API mutations | No — DB + in-memory store only       |
+| Content scan / stress / incremental | Isolated `.compiledCollections/test/` fixtures                                      | No — workspace only                  |
+| Matrix server boot                  | Reads user root **if present**; purges leaks first                                  | Purge only — never writes user files |
+
+## Matrix Lifecycle
+
+1. **Pre-audit** (`index.ts`): `purgeBenchmarkCollectionArtifacts()` before any server starts.
+2. **Per-DB audit** (`runner.ts`): Purge again before `startServer()`.
+3. **Child tests**: `API_BASE_URL` points at matrix server; `setupBenchmarkServer()` does not spawn a second server.
+4. **Exit / SIGINT** (`ConfigSafeguard.restore()`): Removes `config/private.test.ts` and purges benchmark artifacts.
+
+```bash
+# Single benchmark via matrix (isolated temp DB + purge)
+bun run scripts/benchmark-matrix/index.ts --db=sqlite --only=relational --no-build
+```
+
+## Purge & Detection
+
+`purgeBenchmarkCollectionArtifacts()` in `preset-collections.server.ts`:
+
+1. Wipes entire `config/collections/test/` and `.compiledCollections/test/`
+2. Removes legacy root dirs (`nested/`, `batch_bench/`)
+3. Deletes benchmark artifacts at root (`bench_*`, `Mock Collection *`, `BenchmarkStable.ts`, etc.)
+4. Optional `wipeAllSource: true` on setup completion — full root wipe before preset install
+
+`isBenchmarkArtifact(fileName)` — filesystem debris patterns.  
+`isMockScanCollection(id, name)` — GraphQL exclusion for scan/stress mocks.
+
+## Environment Flags (unified via `isBenchmarkRuntime()`)
+
+GraphQL `registerCollections()`, content scanners, and `compile.ts` all gate on **`isBenchmarkRuntime()`** — a single canonical flag:
+
+| Variable         | Typical source                                               | Grants                                                                                                                                      |
+| :--------------- | :----------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------ |
+| `BENCHMARK=true` | `benchmark-utils.ts`, matrix server env, run-core-benchmarks | **Nothing on the request path** — harness marker only (env-only config, sandbox isolation, setup force-complete, collection-fixture layout) |
+
+`TEST_MODE=true` is the separate test-harness token (integration/E2E/unit) — it does not enable benchmark-mode collection scanning. The legacy tokens `BENCHMARK_MODE`, `BENCHMARK_STABLE`, and `SVELTY_BENCHMARK_SUITE` were removed; `BENCHMARK` is the one name. `BENCHMARK_RECORD` (MDX reporting) and `BENCHMARK_DEBUG` (verbose logging) remain distinct feature flags.
+
+`BENCHMARK_MATRIX=1` — child defers workspace cleanup to matrix orchestrator.
+
+## The Three Runtime Modes
+
+SveltyCMS has exactly **three** runtime modes:
+
+### 1. Production (default) — `NODE_ENV=production`, no harness flags
+
+Real deployments. `AUDIT_CHAIN_SYNC=false`, `DISABLE_AUDIT_LOGS=true` (public-config defaults — async/off audit pipeline for max write throughput).
+
+### 2. Production + Enterprise Compliance — benchmark mode
+
+`NODE_ENV=production`, `BENCHMARK=true` (marker only), **`BENCHMARK_AUDIT_MODE=compliance`** → `AUDIT_CHAIN_SYNC=true`, `DISABLE_AUDIT_LOGS=false`. The synchronous SHA-256 audit chain runs on every mutation, exactly like a regulated enterprise deployment.
+
+**Everything else is identical between modes 1 and 2:** real session cookies (login → `__Host-auth_sessions`), real RBAC, real WAF + adaptive rate limiting, real CSRF, real background services (watchdog, scheduler, outbox, job queue, behavioral learner), production cookie/security headers. `x-test-secret` grants **nothing**; `/api/testing` is 403 and stripped from production builds.
+
+Benchmark servers are deployment-tuned like a load-testing environment:
+
+| Env                                | Default | Meaning                                                                                                                         |
+| :--------------------------------- | :------ | :------------------------------------------------------------------------------------------------------------------------------ |
+| `RATE_LIMIT_MAX_REQUESTS`          | `20000` | Per-IP mutation ceiling (production default is 100). Bucket machinery, adaptive multiplier, 429s and headers stay fully active. |
+| `RATE_LIMIT_COMMERCE_MAX_REQUESTS` | `20000` | Dedicated `/api/commerce` lane ceiling (production default is 40% of the general cap). Isolated from admin API buckets.         |
+| `SECURITY_RATE_LIMIT_SCALE`        | `100`   | WAF per-IP point ceiling multiplier (production default is 1). Consume, adaptive cost and 429s stay fully active.               |
+| `BENCHMARK_NO_REDIS`               | `1`     | Disables Redis L2 cache connect (standard matrix). Set `0` + `USE_REDIS=true` to benchmark the real Redis path.                 |
+
+### 3. E2E / Integration Testing — `TEST_MODE=true` (+ `PLAYWRIGHT_TEST`)
+
+The only mode where `x-test-secret` + `/api/testing` work (timing-safe secret + `assertTestingApiAllowed`). Used by `tests/e2e`, `tests/integration`, and the setup wizard. Never enabled in production builds.
+
+> [!NOTE]
+> Benchmark servers are spawned with `TEST_MODE` explicitly cleared (`TEST_MODE: ""` in `setupBenchmarkServer()`), so test bypasses can never leak into benchmark runs — even if the runner process has `TEST_MODE` set.
+
+Standalone `bun test tests/benchmarks/*` sets `BENCHMARK=true` (but **never** `TEST_MODE`) in `benchmark-utils.ts` so GraphQL and scanners stay aligned.
+
+## One-Time Cleanup (polluted dev tree)
+
+If an older benchmark run left `Mock Collection *.js` or `bench_*` files at the **root** of `config/collections/` or `.compiledCollections/`:
+
+```bash
+# Purge filesystem + SQLite debris; preserves user files like posts.ts / authors.ts
+bun -e "import { purgeBenchmarkCollectionArtifacts } from './src/routes/setup/preset-collections.server.ts'; console.log('Removed:', await purgeBenchmarkCollectionArtifacts())"
+
+# Inspect SQLite pollution (collection_* tables + content_nodes)
+bun scripts/inspect-mock-collections.ts
+```
+
+`purgeBenchmarkCollectionArtifacts()` also runs `purgeBenchmarkDatabaseArtifacts()` — drops stale `collection_*` tables and `content_nodes` rows (mock scan debris always; benchmark presets only on user/healing DBs, not `benchmark_shared.sqlite`).
+
+Or complete setup with the blog preset (`replaceAll: true`) — that wipes stale root files before writing the three preset collections.
+
+After cleanup, regenerate types if needed: `bun x svelte-kit sync`.
+
+## Resolved gaps
+
+| Item                              | Status                                                                    |
+| :-------------------------------- | :------------------------------------------------------------------------ |
+| `compile.ts` benchmark filter     | Done — skips `test/` + `isBenchmarkArtifact` when `!isBenchmarkRuntime()` |
+| `mock_collection_*` detection     | Done — `isBenchmarkArtifact` + `isMockScanCollection`                     |
+| `ConfigSafeguard` ad-hoc matching | Done — only `purgeBenchmarkCollectionArtifacts()`                         |
+| Env var split GraphQL vs scanners | Done — `isBenchmarkRuntime()` everywhere                                  |
+| Docs outdated claims              | Updated — this file + `docs/tests/index.mdx`                              |
+
+## Troubleshooting
+
+| Symptom                        | Likely cause                               | Fix                                                                      |
+| :----------------------------- | :----------------------------------------- | :----------------------------------------------------------------------- |
+| 158+ collections in GraphQL    | Mock files at `.compiledCollections/` root | `purgeBenchmarkCollectionArtifacts()` or complete setup with blog preset |
+| Matrix relational HTTP 500     | Mock scan types registered in GraphQL      | Rebuild + run matrix (pre-purge + `isMockScanCollection` filter)         |
+| `Mock Collection *.js` in root | Old `content-scan` run before isolation    | Delete root mocks; future runs use `test/scan/`                          |
+| Unknown collection `redirects` | Redirect-manager plugin (DB-only)          | Expected — not a wizard preset file                                      |
+
+## Related
+
+- [Testing Index](./index.mdx)
+- [CI Performance Metrics](./ci-performance-metrics.mdx)
+- [Black-Box Testing](./black-box-testing.mdx)
+- [Performance Benchmarks](../project/benchmarks/index.mdx)

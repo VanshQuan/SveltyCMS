@@ -1,0 +1,503 @@
+/**
+ * @file tests/unit/api/auth-2fa.test.ts
+ * @description Whitebox unit tests for 2FA Authentication API endpoints
+ */
+
+const { describe, it, expect, vi, beforeEach } = (globalThis as any).vi
+  ? (globalThis as any)
+  : await import("vitest");
+import { createMockRequestEvent } from "../utils/mock-event";
+import { createMockUser, createDbAdapterStub } from "../utils/mock-factories";
+
+// Mock all dependencies
+vi.mock("@src/databases/db", () => {
+  const dbAdapter = {
+    ...createDbAdapterStub(),
+    auth: {
+      authInterface: {},
+      validateSession: vi.fn(),
+      getUserById: vi.fn(),
+      updateUserAttributes: vi.fn().mockResolvedValue({ success: true }),
+      createSessionCookie: vi
+        .fn()
+        .mockReturnValue({ name: "session", value: "val", attributes: {} }),
+      login: vi.fn(),
+    },
+    collections: {
+      list: vi.fn(),
+      find: vi.fn(),
+      findById: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      search: vi.fn(),
+    },
+    media: {
+      find: vi.fn(),
+      findById: vi.fn(),
+      upload: vi.fn(),
+      delete: vi.fn(),
+    },
+    widgets: {
+      list: vi.fn(),
+      activate: vi.fn(),
+      deactivate: vi.fn(),
+    },
+    system: {
+      getHealth: vi.fn(),
+      reinitialize: vi.fn(),
+    },
+  };
+  return {
+    dbAdapter: dbAdapter,
+    auth: dbAdapter.auth,
+    getDbInitPromise: vi.fn().mockResolvedValue(undefined),
+    getAuth: vi.fn().mockReturnValue(dbAdapter.auth),
+    isDbConnected: vi.fn().mockReturnValue(true),
+  };
+});
+
+vi.mock("@src/databases/auth/two-factor-auth", () => {
+  const twoFactorAuthService = {
+    verify2FA: vi.fn(),
+    initiate2FASetup: vi.fn(),
+    complete2FASetup: vi.fn(),
+    disable2FA: vi.fn(),
+    get2FAStatus: vi.fn(),
+    regenerateBackupCodes: vi.fn(),
+  };
+  return {
+    getDefaultTwoFactorAuthService: vi.fn(() => twoFactorAuthService),
+    TwoFactorAuthService: vi.fn().mockImplementation(function () {
+      return twoFactorAuthService;
+    }),
+  };
+});
+
+vi.mock("@utils/tenant", () => ({
+  isMultiTenantEnabled: vi.fn().mockReturnValue(false),
+  getTenantIdFromHostname: vi.fn().mockReturnValue(null),
+}));
+
+vi.mock("@utils/api-handler", () => ({
+  apiHandler: (fn: any) => fn,
+}));
+
+vi.mock("@src/databases/auth", () => ({
+  verifyPassword: vi.fn().mockResolvedValue(true),
+  hashPassword: vi.fn().mockResolvedValue("hashed"),
+  getAllPermissions: vi.fn().mockReturnValue([]),
+  checkPermissions: vi.fn().mockReturnValue(true),
+  validateUserPermission: vi.fn().mockReturnValue(true),
+}));
+
+// Deterministic pending-2FA tokens: the real HMAC round-trip (sign + verify,
+// expiry, tamper/wrong-user rejection) is covered by
+// tests/unit/security/login-hardening.test.ts. Here we only need the handler
+// contract — verify2FA must REQUIRE a token bound to the claimed userId.
+vi.mock("@src/utils/server/pending-2fa-token.server", () => ({
+  PENDING_2FA_TTL_MS: 5 * 60 * 1000,
+  signPending2faToken: (userId: string) => `test-pending2fa:${userId}`,
+  verifyPending2faToken: (token?: string | null, userId?: string) =>
+    token === `test-pending2fa:${userId}`,
+}));
+
+vi.mock("@utils/security", () => ({
+  verifyPassword: vi.fn().mockResolvedValue(true),
+  hashPassword: vi.fn().mockResolvedValue("hashed"),
+}));
+
+// Removed unused auth import
+import { _handler as dispatcher } from "@src/routes/api/[...path]/+server";
+import { dbAdapter as mockDbAdapter } from "@src/databases/db";
+
+const POST_SETUP = (event: any) => dispatcher(event);
+const POST_VERIFY_SETUP = (event: any) => dispatcher(event);
+const POST_VERIFY = (event: any) => dispatcher(event);
+const POST_DISABLE = (event: any) => dispatcher(event);
+const GET_BACKUP_CODES = (event: any) => dispatcher(event);
+const POST_BACKUP_CODES = (event: any) => dispatcher(event);
+
+// Thin wrapper around shared createMockRequestEvent
+const createMockEvent = (
+  body: any = {},
+  user: any = null,
+  tenantId: string | null | undefined = "t1",
+  action: string = "verify",
+  options: {
+    headers?: Record<string, string>;
+    cookies?: Record<string, string>;
+    method?: string;
+  } = {},
+) => {
+  const method =
+    options.method ||
+    (action === "backup-codes" && Object.keys(body).length === 0 ? "GET" : "POST");
+  return createMockRequestEvent({
+    method,
+    path: `auth/2fa/${action}`,
+    body,
+    user,
+    tenantId: tenantId === undefined ? "t1" : tenantId,
+    dbAdapter: mockDbAdapter,
+    headers: options.headers,
+    cookies: options.cookies,
+  });
+};
+
+describe("2FA API Unit Tests", () => {
+  let mockTwoFactorService: any;
+  let mockIsMultiTenantEnabled: any;
+  let mockVerifyPassword: any;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+
+    const { getDefaultTwoFactorAuthService } = await import("@src/databases/auth/two-factor-auth");
+    mockTwoFactorService = getDefaultTwoFactorAuthService({} as any);
+
+    const { isMultiTenantEnabled } = await import("@utils/tenant");
+    mockIsMultiTenantEnabled = isMultiTenantEnabled;
+    mockIsMultiTenantEnabled.mockReturnValue(false);
+
+    const { verifyPassword } = await import("@src/databases/auth");
+    mockVerifyPassword = verifyPassword;
+  });
+
+  describe("POST /api/auth/2fa/verify", () => {
+    // 🛡️ HARDENING: verify is the login-completion step — it must require a
+    // signed pending-2FA token bound to the claimed userId (pen-test High #2).
+    it("should reject a verify attempt without a pending-2FA token", async () => {
+      const event = createMockEvent(
+        { userId: "user-1", code: "123456" },
+        createMockUser({ _id: "user-1", is2FAEnabled: true } as any),
+        undefined,
+        "verify",
+        {
+          headers: { "X-CSRF-Token": "mock-csrf-token" },
+          cookies: { csrf_token: "mock-csrf-token" },
+        },
+      );
+      await expect(POST_VERIFY(event)).rejects.toThrow("Session expired. Please sign in again.");
+      expect(mockTwoFactorService.verify2FA).not.toHaveBeenCalled();
+    });
+
+    it("should reject a token bound to a different user", async () => {
+      const event = createMockEvent(
+        { userId: "user-1", code: "123456", pending2faToken: "test-pending2fa:attacker" },
+        createMockUser({ _id: "user-1", is2FAEnabled: true } as any),
+        undefined,
+        "verify",
+        {
+          headers: { "X-CSRF-Token": "mock-csrf-token" },
+          cookies: { csrf_token: "mock-csrf-token" },
+        },
+      );
+      await expect(POST_VERIFY(event)).rejects.toThrow("Session expired. Please sign in again.");
+      expect(mockTwoFactorService.verify2FA).not.toHaveBeenCalled();
+    });
+
+    it("should verify TOTP code successfully", async () => {
+      mockTwoFactorService.verify2FA.mockResolvedValue({
+        success: true,
+        data: { user: { _id: "user-1" } },
+      });
+      (mockDbAdapter.auth as any).getUserById = vi.fn().mockResolvedValue({
+        success: true,
+        data: createMockUser({ _id: "user-1", is2FAEnabled: true } as any),
+      });
+      (mockDbAdapter.auth as any).createSession = vi.fn().mockResolvedValue({
+        success: true,
+        data: { _id: "sess-1", user_id: "user-1" },
+      });
+
+      const event = createMockEvent(
+        { userId: "user-1", code: "123456", pending2faToken: "test-pending2fa:user-1" },
+        createMockUser({ _id: "user-1", is2FAEnabled: true } as any),
+        undefined,
+        "verify",
+        {
+          headers: { "X-CSRF-Token": "mock-csrf-token" },
+          cookies: { csrf_token: "mock-csrf-token" },
+        },
+      );
+      const response = await POST_VERIFY(event);
+      const result = await response!.json();
+
+      expect(result.success).toBe(true);
+      expect(mockTwoFactorService.verify2FA).toHaveBeenCalledWith(
+        "user-1",
+        "123456",
+        "t1",
+        undefined,
+      );
+    });
+
+    it("should verify backup code successfully", async () => {
+      mockTwoFactorService.verify2FA.mockResolvedValue({
+        success: true,
+        data: { user: { _id: "user-1" } },
+      });
+      (mockDbAdapter.auth as any).getUserById = vi.fn().mockResolvedValue({
+        success: true,
+        data: createMockUser({ _id: "user-1", is2FAEnabled: true } as any),
+      });
+      (mockDbAdapter.auth as any).createSession = vi.fn().mockResolvedValue({
+        success: true,
+        data: { _id: "sess-1", user_id: "user-1" },
+      });
+
+      const event = createMockEvent(
+        { userId: "user-1", code: "backup-123", pending2faToken: "test-pending2fa:user-1" },
+        createMockUser({ _id: "user-1", is2FAEnabled: true } as any),
+        undefined,
+        "verify",
+        {
+          headers: { "X-CSRF-Token": "mock-csrf-token" },
+          cookies: { csrf_token: "mock-csrf-token" },
+        },
+      );
+      const response = await POST_VERIFY(event);
+      const result = await response!.json();
+
+      expect(result.success).toBe(true);
+    });
+
+    it("should return success: false for invalid code", async () => {
+      mockTwoFactorService.verify2FA.mockResolvedValue({
+        success: false,
+        message: "Invalid code",
+      });
+
+      const event = createMockEvent(
+        { userId: "user-1", code: "000000", pending2faToken: "test-pending2fa:user-1" },
+        createMockUser({ _id: "user-1", is2FAEnabled: true } as any),
+        undefined,
+        "verify",
+        {
+          headers: { "X-CSRF-Token": "mock-csrf-token" },
+          cookies: { csrf_token: "mock-csrf-token" },
+        },
+      );
+      await expect(POST_VERIFY(event)).rejects.toThrow("Invalid code");
+    });
+
+    it("should throw TENANT_REQUIRED in multi-tenant mode without tenant context", async () => {
+      mockIsMultiTenantEnabled.mockReturnValue(true);
+
+      const event = createMockEvent(
+        { userId: "user-1", code: "123456", pending2faToken: "test-pending2fa:user-1" },
+        createMockUser({ _id: "user-1" }),
+        undefined,
+        "verify",
+        {
+          headers: { "X-CSRF-Token": "mock-csrf-token" },
+          cookies: { csrf_token: "mock-csrf-token" },
+        },
+      );
+
+      // Override tenantId for this specific test to be undefined
+      (event.locals as any).tenantId = undefined;
+
+      await expect(POST_VERIFY(event)).rejects.toThrow("Tenant ID required");
+    });
+
+    it("should use locals.tenantId in multi-tenant mode", async () => {
+      mockIsMultiTenantEnabled.mockReturnValue(true);
+      mockTwoFactorService.verify2FA.mockResolvedValue({ success: true });
+      (mockDbAdapter.auth as any).getUserById = vi.fn().mockResolvedValue({
+        success: true,
+        data: createMockUser({ _id: "user-1" }),
+      });
+      (mockDbAdapter.auth as any).createSession = vi.fn().mockResolvedValue({
+        success: true,
+        data: { _id: "sess-1", user_id: "user-1" },
+      });
+
+      const event = createMockEvent(
+        { userId: "user-1", code: "123456", pending2faToken: "test-pending2fa:user-1" },
+        createMockUser({ _id: "user-1" }),
+        "tenant-1",
+        "verify",
+        {
+          headers: { "X-CSRF-Token": "mock-csrf-token" },
+          cookies: { csrf_token: "mock-csrf-token" },
+        },
+      );
+      await POST_VERIFY(event);
+
+      expect(mockTwoFactorService.verify2FA).toHaveBeenCalledWith(
+        "user-1",
+        "123456",
+        "tenant-1",
+        undefined,
+      );
+    });
+  });
+
+  describe("POST /api/auth/2fa/setup", () => {
+    it("should initiate setup for authenticated user", async () => {
+      const user = createMockUser({ _id: "user-1", email: "test@example.com" });
+      mockTwoFactorService.initiate2FASetup.mockResolvedValue({
+        success: true,
+        data: {
+          qrCode: "qr-data",
+          secret: "secret",
+        },
+      });
+
+      const event = createMockEvent({}, user, undefined, "setup", {
+        headers: { "X-CSRF-Token": "mock-csrf-token" },
+        cookies: { csrf_token: "mock-csrf-token" },
+      });
+      const response = await POST_SETUP(event);
+      const result = await response!.json();
+
+      expect(result.success).toBe(true);
+      expect(result.data.secret).toBe("secret");
+    });
+
+    it("should throw UNAUTHORIZED for unauthenticated user", async () => {
+      const event = createMockEvent({}, null, "t1", "setup");
+      await expect(POST_SETUP(event)).rejects.toThrow("Authentication required");
+    });
+
+    it("should return success: false if user already has 2FA enabled during setup", async () => {
+      const user = createMockUser({ _id: "user-1", is2FAEnabled: true } as any);
+      mockTwoFactorService.initiate2FASetup.mockResolvedValue({
+        success: false,
+        message: "2FA is already enabled",
+        error: { code: "ALREADY_ENABLED", message: "2FA is already enabled" },
+      } as any);
+      const event = createMockEvent({}, user, undefined, "setup", {
+        headers: { "X-CSRF-Token": "mock-csrf-token" },
+        cookies: { csrf_token: "mock-csrf-token" },
+      });
+      const response = await POST_SETUP(event);
+      const result = await response!.json();
+      expect(result.success).toBe(false);
+      expect(result.message).toBe("2FA is already enabled");
+    });
+  });
+
+  describe("POST /api/auth/2fa/verify-setup", () => {
+    it("should complete setup with valid code", async () => {
+      const user = createMockUser({ _id: "user-1" });
+      mockTwoFactorService.complete2FASetup.mockResolvedValue(true);
+
+      const event = createMockEvent(
+        { code: "123456", secret: "JBSWY3DPEHPK3PXP" },
+        user,
+        undefined,
+        "verify-setup",
+        {
+          headers: { "X-CSRF-Token": "mock-csrf-token" },
+          cookies: { csrf_token: "mock-csrf-token" },
+        },
+      );
+      const response = await POST_VERIFY_SETUP(event);
+      const result = await response!.json();
+
+      expect(result.success).toBe(true);
+    });
+
+    it("should return success: false for wrong code", async () => {
+      const user = createMockUser({ _id: "user-1" });
+      mockTwoFactorService.complete2FASetup.mockResolvedValue(false);
+
+      const event = createMockEvent(
+        { code: "000000", secret: "JBSWY3DPEHPK3PXP" },
+        user,
+        undefined,
+        "verify-setup",
+        {
+          headers: { "X-CSRF-Token": "mock-csrf-token" },
+          cookies: { csrf_token: "mock-csrf-token" },
+        },
+      );
+      await expect(POST_VERIFY_SETUP(event)).rejects.toThrow("Invalid verification code");
+    });
+  });
+
+  describe("POST /api/auth/2fa/disable", () => {
+    it("should disable 2FA for enabled user", async () => {
+      const user = createMockUser({
+        _id: "user-1",
+        is2FAEnabled: true,
+        password: "hashed_password",
+      } as any);
+      // Session snapshots are credential-free — the handler verifies against a
+      // fresh DB read, so the adapter must return the user with its hash.
+      (mockDbAdapter.auth as any).getUserById = vi.fn().mockResolvedValue({
+        success: true,
+        data: { _id: "user-1", password: "hashed_password" },
+      });
+      mockVerifyPassword.mockResolvedValue(true);
+      mockTwoFactorService.disable2FA.mockResolvedValue(true);
+
+      const event = createMockEvent({ password: "correct_password" }, user, undefined, "disable", {
+        headers: { "X-CSRF-Token": "mock-csrf-token" },
+        cookies: { csrf_token: "mock-csrf-token" },
+      });
+      const response = await POST_DISABLE(event);
+      const result = await response!.json();
+
+      expect(result.success).toBe(true);
+    });
+
+    it("should return success: false if disable fails", async () => {
+      const user = createMockUser({
+        _id: "user-1",
+        password: "hashed_password",
+      } as any);
+      (mockDbAdapter.auth as any).getUserById = vi.fn().mockResolvedValue({
+        success: true,
+        data: { _id: "user-1", password: "hashed_password" },
+      });
+      mockVerifyPassword.mockResolvedValue(true);
+      mockTwoFactorService.disable2FA.mockResolvedValue(false);
+
+      const event = createMockEvent({ password: "correct_password" }, user, undefined, "disable", {
+        headers: { "X-CSRF-Token": "mock-csrf-token" },
+        cookies: { csrf_token: "mock-csrf-token" },
+      });
+      await expect(POST_DISABLE(event)).rejects.toThrow("Failed to disable 2FA");
+    });
+  });
+
+  describe("Backup Codes Management", () => {
+    it("should return 2FA status (GET)", async () => {
+      const user = createMockUser({ _id: "user-1" });
+      mockTwoFactorService.get2FAStatus.mockResolvedValue({
+        enabled: true,
+        backupCodesRemaining: 5,
+      });
+
+      const event = createMockEvent({}, user, undefined, "backup-codes", {
+        headers: { "X-CSRF-Token": "mock-csrf-token" },
+        cookies: { csrf_token: "mock-csrf-token" },
+      });
+      const response = await GET_BACKUP_CODES(event);
+      const result = await response!.json();
+
+      expect(result.success).toBe(true);
+      expect(result.data.enabled).toBe(true);
+    });
+
+    it("should regenerate backup codes (POST)", async () => {
+      const user = createMockUser({ _id: "user-1" });
+      mockTwoFactorService.regenerateBackupCodes.mockResolvedValue(["n1", "n2"]);
+
+      const event = createMockEvent({}, user, undefined, "backup-codes", {
+        headers: { "X-CSRF-Token": "mock-csrf-token" },
+        cookies: { csrf_token: "mock-csrf-token" },
+        method: "POST",
+      });
+      const response = await POST_BACKUP_CODES(event);
+      const result = await response!.json();
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(["n1", "n2"]);
+    });
+  });
+});

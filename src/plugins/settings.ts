@@ -1,0 +1,350 @@
+/**
+ * @file src/plugins/settings.ts
+ * @description Service for managing persistent plugin settings and states,
+ * including encrypted secret fields via AES-256-GCM.
+ */
+
+import type { DatabaseId, IDBAdapter } from "@databases/db-interface";
+import { logger } from "@utils/logger";
+import type { PluginState } from "./types";
+import type { SettingsPart } from "./settings-declaration";
+import { processSecretFields, decryptSecretFields, maskSecretFields } from "./settings-crypto";
+import type { EncryptionContext } from "./settings-crypto";
+import { getSecretFieldNames } from "./settings-declaration";
+
+export class PluginSettingsService {
+  private readonly SETTINGS_COLLECTION = "plugin_settings";
+  private _stateCache = new Map<string, { data: Record<string, unknown> | null; exp: number }>();
+  private readonly CACHE_TTL_MS = 10000; // 10s TTL with instant invalidation on write
+
+  constructor(private readonly dbAdapter: IDBAdapter) {}
+
+  /** Invalidate L1 cache for a plugin/tenant */
+  public invalidateStateCache(pluginId?: string, tenantId?: string): void {
+    if (pluginId && tenantId) {
+      this._stateCache.delete(`${tenantId}:${pluginId}`);
+    } else {
+      this._stateCache.clear();
+    }
+  }
+
+  // Ensure the plugin_settings collection exists (SQL adapters need physical table).
+  // Table provisioning is delegated to SqlAdapterCore.insert() auto-provision —
+  // calling createModel directly on the adapter bypasses the standard
+  // CollectionModule.createModel() path and can cause crashes on certain adapters.
+  async initialize(): Promise<void> {
+    try {
+      // Probe: attempt a count to check if the collection has any data.
+      // For SQL adapters on a missing table, count() returns { success: true, data: 0 }
+      // because isMissingTableError is caught internally and returns 0.
+      // We check both !success (genuine error) and data === 0 (empty/missing table)
+      // to ensure the probe insert runs and triggers auto-provision via
+      // SqlAdapterCore.insert().
+      const count = await this.dbAdapter.crud.count(this.SETTINGS_COLLECTION, undefined, {
+        bypassTenantCheck: true,
+      });
+      if (!count.success || count.data === 0) {
+        logger.info(`Creating ${this.SETTINGS_COLLECTION} collection...`);
+        await this.dbAdapter.crud.insert(
+          this.SETTINGS_COLLECTION,
+          {
+            pluginId: "__INIT__",
+            tenantId: "system",
+            settings: {},
+          } as any,
+          { bypassTenantCheck: true },
+        );
+        await this.dbAdapter.crud.deleteMany(
+          this.SETTINGS_COLLECTION,
+          { pluginId: "__INIT__" } as any,
+          { bypassTenantCheck: true },
+        );
+      }
+    } catch (error) {
+      logger.error(`Failed to initialize ${this.SETTINGS_COLLECTION}`, { error });
+      // Do not rethrow — plugin settings is non-critical; the system
+      // should continue booting. Table auto-provision in insert() will
+      // handle first-write provisioning when settings are later saved.
+    }
+  }
+
+  // ============================================================================
+  // Plugin Settings (per tenant, per plugin)
+  // ============================================================================
+
+  /**
+   * Get stored settings for a plugin in a tenant.
+   * Secret fields are masked in the returned value (safe for API responses).
+   *
+   * @param pluginId - Plugin identifier
+   * @param tenantId - Tenant identifier
+   * @param declaration - Optional settings declaration for masking secrets
+   */
+  async getPluginSettings(
+    pluginId: string,
+    tenantId: string,
+    declaration?: SettingsPart,
+  ): Promise<Record<string, unknown> | null> {
+    try {
+      const result: any = await this.dbAdapter.crud.findOne(
+        this.SETTINGS_COLLECTION,
+        { pluginId, tenantId } as any,
+        { bypassTenantCheck: true },
+      );
+      const data = result.data as { settings?: Record<string, unknown> } | undefined;
+
+      if (!result.success || !data?.settings) return null;
+
+      const stored = data.settings;
+
+      // Mask secrets if declaration is provided
+      if (declaration) {
+        const secretFields = getSecretFieldNames(declaration);
+        if (secretFields.length > 0) {
+          return maskSecretFields(stored, secretFields);
+        }
+      }
+
+      return stored;
+    } catch (error) {
+      logger.error(`Failed to get plugin settings for ${pluginId}`, { error });
+      return null;
+    }
+  }
+
+  /**
+   * Get decrypted settings for server-side plugin consumption.
+   * Secret fields are decrypted — NEVER send this to the browser.
+   *
+   * @param pluginId - Plugin identifier
+   * @param tenantId - Tenant identifier
+   * @param declaration - Settings declaration for identifying secret fields
+   */
+  async getDecryptedSettings(
+    pluginId: string,
+    tenantId: string,
+    declaration?: SettingsPart,
+  ): Promise<Record<string, unknown> | null> {
+    try {
+      const result: any = await this.dbAdapter.crud.findOne(
+        this.SETTINGS_COLLECTION,
+        { pluginId, tenantId } as any,
+        { bypassTenantCheck: true },
+      );
+      const data = result.data as { settings?: Record<string, unknown> } | undefined;
+
+      if (!result.success || !data?.settings) return null;
+
+      const stored = data.settings;
+
+      // Decrypt secrets if declaration is provided
+      if (declaration) {
+        const secretFields = getSecretFieldNames(declaration);
+        if (secretFields.length > 0) {
+          const context: EncryptionContext = { tenantId, pluginId };
+          return decryptSecretFields(stored, secretFields, context);
+        }
+      }
+
+      return stored;
+    } catch (error) {
+      logger.error(`Failed to get decrypted settings for ${pluginId}`, { error });
+      return null;
+    }
+  }
+
+  /**
+   * Save plugin settings for a tenant.
+   * Secret fields are encrypted before storage.
+   * Existing secret values are preserved if the submitted value is blank/masked.
+   *
+   * @param pluginId - Plugin identifier
+   * @param tenantId - Tenant identifier
+   * @param settings - The settings values to store
+   * @param declaration - Settings declaration for identifying and processing secret fields
+   */
+  async savePluginSettings(
+    pluginId: string,
+    tenantId: string,
+    settings: Record<string, unknown>,
+    declaration?: SettingsPart,
+  ): Promise<boolean> {
+    try {
+      let toStore = { ...settings };
+
+      // Process secret fields: encrypt new values, preserve existing
+      if (declaration) {
+        const secretFields = getSecretFieldNames(declaration);
+        if (secretFields.length > 0) {
+          const existing = await this.getPluginSettings(pluginId, tenantId);
+          const context: EncryptionContext = { tenantId, pluginId };
+          toStore = await processSecretFields(toStore, existing, secretFields, context);
+        }
+      }
+
+      const existing: any = await this.dbAdapter.crud.findOne(
+        this.SETTINGS_COLLECTION,
+        { pluginId, tenantId } as any,
+        { bypassTenantCheck: true },
+      );
+      const existingData = existing.data as
+        | { _id?: unknown; settings?: Record<string, unknown> }
+        | undefined;
+
+      if (existing.success && existingData?._id) {
+        const updateResult = await this.dbAdapter.crud.update(
+          this.SETTINGS_COLLECTION,
+          existingData._id as unknown as DatabaseId,
+          {
+            settings: toStore,
+            updatedAt: new Date(),
+          } as any,
+          { bypassTenantCheck: true },
+        );
+        return updateResult.success;
+      }
+
+      // Insert new
+      const insertResult = await this.dbAdapter.crud.insert(
+        this.SETTINGS_COLLECTION,
+        {
+          pluginId,
+          tenantId,
+          settings: toStore,
+        } as any,
+        { bypassTenantCheck: true },
+      );
+      return insertResult.success;
+    } catch (error) {
+      logger.error(`Failed to save plugin settings for ${pluginId}`, { error });
+      return false;
+    }
+  }
+
+  /**
+   * Delete all settings for a plugin in a tenant.
+   */
+  async deletePluginSettings(pluginId: string, tenantId: string): Promise<boolean> {
+    try {
+      const result = await this.dbAdapter.crud.deleteMany(
+        this.SETTINGS_COLLECTION,
+        { pluginId, tenantId } as any,
+        { bypassTenantCheck: true },
+      );
+      return result.success;
+    } catch (error) {
+      logger.error(`Failed to delete plugin settings for ${pluginId}`, { error });
+      return false;
+    }
+  }
+
+  // ============================================================================
+  // Plugin State (backward compatible)
+  // ============================================================================
+
+  // Get state for a specific plugin and tenant
+  async getPluginState(pluginId: string, tenantId: string): Promise<PluginState | null> {
+    const cacheKey = `${tenantId}:${pluginId}`;
+    const cached = this._stateCache.get(cacheKey);
+    if (cached && Date.now() < cached.exp) {
+      return cached.data as PluginState | null;
+    }
+
+    try {
+      const result = await this.dbAdapter.crud.findOne<PluginState>(
+        "pluginStates",
+        {
+          pluginId,
+          tenantId,
+        } as any,
+        { bypassTenantCheck: true },
+      );
+
+      const state = result.success && result.data ? result.data : null;
+      this._stateCache.set(cacheKey, { data: state as any, exp: Date.now() + this.CACHE_TTL_MS });
+      return state;
+    } catch (error) {
+      logger.error(`Failed to get plugin state for ${pluginId}`, { error });
+      return null;
+    }
+  }
+
+  // Get all plugin states for a tenant
+  async getAllPluginStates(tenantId: string): Promise<PluginState[]> {
+    try {
+      const result = await this.dbAdapter.crud.findMany<PluginState>(
+        "pluginStates",
+        {
+          tenantId,
+        } as any,
+        { bypassTenantCheck: true },
+      );
+      const rows = result.success && result.data ? result.data : [];
+      const exp = Date.now() + this.CACHE_TTL_MS;
+      for (const state of rows) {
+        if (state.pluginId) {
+          this._stateCache.set(`${tenantId}:${state.pluginId}`, { data: state as any, exp });
+        }
+      }
+      return rows;
+    } catch (error) {
+      logger.error(`Failed to get all plugin states for tenant ${tenantId}`, {
+        error,
+      });
+      return [];
+    }
+  }
+
+  // Set plugin enabled/disabled state
+  async setPluginState(
+    pluginId: string,
+    tenantId: string,
+    enabled: boolean,
+    userId?: string,
+  ): Promise<boolean> {
+    this.invalidateStateCache(pluginId, tenantId);
+    try {
+      // Server-only layout-cache invalidation via the globalThis bridge — this
+      // file is browser-reachable (plugins admin via src/plugins/index.ts), so a
+      // direct import of layout-caches.server would trip SvelteKit's server-only
+      // import guard. layout-caches.server registers the callback at boot.
+      (globalThis as any).__sveltycms_layout_invalidators?.pluginStates?.(tenantId);
+    } catch {
+      /* cache helper is server-only */
+    }
+    try {
+      const existing = await this.getPluginState(pluginId, tenantId);
+
+      if (existing?._id) {
+        const updateResult = await this.dbAdapter.crud.update<PluginState>(
+          "pluginStates",
+          existing._id,
+          {
+            enabled,
+            updatedAt: new Date(),
+            updatedBy: userId,
+          } as any,
+          { bypassTenantCheck: true },
+        );
+        this.invalidateStateCache(pluginId, tenantId);
+        return updateResult.success;
+      }
+      const insertResult = await this.dbAdapter.crud.insert<PluginState>(
+        "pluginStates",
+        {
+          pluginId,
+          tenantId,
+          enabled,
+          updatedBy: userId,
+        } as any,
+        { bypassTenantCheck: true },
+      );
+      this.invalidateStateCache(pluginId, tenantId);
+      return insertResult.success;
+    } catch (error) {
+      this.invalidateStateCache(pluginId, tenantId);
+      logger.error(`Failed to set plugin state for ${pluginId}`, { error });
+      return false;
+    }
+  }
+}
