@@ -440,11 +440,9 @@ function getChangedFiles(): string[] {
 }
 
 function matchesPattern(file: string, pattern: string): boolean {
-  // Simple glob matching: convert ** → .* , * → [^/]*
-  // codeql[js/incomplete-sanitization]: glob→regex for dev/test file filters —
-  // only * and ** metacharacters are supported by design (paths, not user HTML).
-  const regexStr = pattern
-    .replace(/\./g, "\\.")
+  // Comprehensive glob matching: escape all regex metacharacters except '*', then expand wildcards
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+  const regexStr = escaped
     .replace(/\*\*/g, "§§GLOBSTAR§§")
     .replace(/\*/g, "[^/]*")
     .replace(/§§GLOBSTAR§§/g, ".*");

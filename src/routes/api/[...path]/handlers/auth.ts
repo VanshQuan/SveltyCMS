@@ -1344,10 +1344,13 @@ export async function handle2FARoutes(
       const freshUser = userResult?.success ? userResult.data : null;
       if (!freshUser) throw new AppError("User not found", 404);
 
+      const mfaVerifiedAt = new Date().toISOString() as ISODateString;
       const sessionResult = await cms.db.auth.createSession({
         user_id: userId as DatabaseId,
         tenantId,
         expires: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() as ISODateString,
+        amr: ["pwd", "mfa"],
+        mfaVerifiedAt,
       });
       const created = sessionResult?.success ? sessionResult.data : null;
       const sessionId = (created as any)?._id ?? (created as any)?.id;
@@ -1355,7 +1358,7 @@ export async function handle2FARoutes(
 
       setSessionCookie(event, sessionId);
       generateCsrfToken(event.cookies, getCookieConfig(event).isSecure);
-      primeSessionMemoryCache(sessionId, freshUser, tenantId);
+      primeSessionMemoryCache(sessionId, freshUser, tenantId, ["pwd", "mfa"]);
 
       // Set trusted-device cookie if the client opted in and a token was minted.
       if (trustDevice && result.trustedDeviceToken) {
@@ -1686,6 +1689,18 @@ export async function handleGdprRoutes(
       throw new AppError("Anonymization failed", 400, "GDPR_ANONYMIZE_FAILED");
     }
     return successResponse(event, { anonymized: true });
+  }
+
+  if (action === "erase" || action === "wipe") {
+    const ok = await gdprService.eraseUser(
+      targetUserId,
+      effectiveTenant,
+      body.reason || "User self-request (Right to Erasure)",
+    );
+    if (!ok) {
+      throw new AppError("Erasure failed", 400, "GDPR_ERASURE_FAILED");
+    }
+    return successResponse(event, { erased: true, message: "GDPR wipe completed" });
   }
 
   throw new AppError("Invalid GDPR action", 400, "INVALID_GDPR_ACTION");

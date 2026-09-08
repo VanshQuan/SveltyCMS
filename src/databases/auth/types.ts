@@ -133,6 +133,19 @@ export interface Session {
   ipAddress?: string; // IP address captured at session creation (security auditing)
   lastActiveAt?: ISODateString; // Last time this session was actively used
   amr?: string[]; // Authentication Method References (e.g. ["pwd"], ["pwd", "mfa"], ["webauthn"])
+  mfaVerifiedAt?: ISODateString; // When MFA was successfully verified for this session
+}
+
+// Session Metadata & Data for AMR tracking
+export interface SessionMetadata {
+  amr?: string[];
+  mfaVerifiedAt?: ISODateString;
+}
+
+export interface SessionData {
+  user: User;
+  amr?: string[];
+  mfaVerifiedAt?: ISODateString;
 }
 
 // Token Interface
@@ -187,7 +200,18 @@ export interface SessionStore {
   delete(sessionId: DatabaseId): Promise<void>;
   deletePattern(pattern: string): Promise<number>;
   get(sessionId: DatabaseId): Promise<User | null>;
-  set(sessionId: DatabaseId, user: User, expiration: ISODateString): Promise<void>;
+  getSessionData?(sessionId: DatabaseId): Promise<SessionData | null>;
+  set(
+    sessionId: DatabaseId,
+    user: User,
+    expiration: ISODateString,
+    metadata?: SessionMetadata,
+  ): Promise<void>;
+  updateSessionAmr?(
+    sessionId: DatabaseId,
+    amr: string[],
+    mfaVerifiedAt?: ISODateString,
+  ): Promise<void>;
   validateWithDB(
     sessionId: DatabaseId,
     dbValidationFn: (sessionId: DatabaseId) => Promise<User | null>,

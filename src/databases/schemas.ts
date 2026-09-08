@@ -88,6 +88,7 @@ export const roleSchema = object({
   description: optional(string()),
   permissions: array(string()),
   isAdmin: optional(boolean(), false),
+  mfaRequired: optional(boolean(), false),
   createdAt: optional(
     pipe(
       string(),

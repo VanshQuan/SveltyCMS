@@ -374,6 +374,22 @@ export class TwoFactorAuthService {
       if (!(userResult.success && userResult.data)) return false;
 
       const user = userResult.data;
+      // 🛡️ TRUSTED-DEVICE OVERRIDE: Roles with mfaRequired === true cannot skip MFA via trusted devices
+      if (user.role && typeof this.db.getRoleById === "function") {
+        try {
+          const roleRes = await this.db.getRoleById(user.role as any, {
+            tenantId: tenantId ?? undefined,
+          });
+          if (roleRes?.success && roleRes.data?.mfaRequired) {
+            logger.info("Trusted-device bypass disabled: role mandates interactive MFA", {
+              userId,
+              role: user.role,
+            });
+            return false;
+          }
+        } catch {}
+      }
+
       const trustedDevices = user.twoFactorTrustedDevices || [];
       if (trustedDevices.length === 0) return false;
 

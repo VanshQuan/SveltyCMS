@@ -1192,19 +1192,9 @@ export async function handleTestingRoutes(
       logger.info(`[GDPR] Performing deep wipe for user: ${userId}`);
 
       try {
-        await cms.db.crud.deleteMany("audit_logs", { actorId: userId } as any, {
-          bypassTenantCheck: true,
-        });
-        await cms.db.crud.deleteMany("auth_sessions", { user_id: userId } as any, {
-          bypassTenantCheck: true,
-        });
-        await cms.db.crud.deleteMany("auth_tokens", { user_id: userId } as any, {
-          bypassTenantCheck: true,
-        });
-        await cms.db.crud.delete("auth_users", userId, {
-          permanent: true,
-          bypassTenantCheck: true,
-        });
+        const { gdprService } = await import("@src/services/security/gdpr-service");
+        const ok = await gdprService.eraseUser(userId, tenantId || "global");
+        if (!ok) throw new AppError("Wipe failed: user erasure error", 500);
 
         return rawResponse({ success: true, message: "GDPR wipe completed" });
       } catch (err: any) {
@@ -2205,10 +2195,6 @@ export async function handleTestingRoutes(
       {
         success: false,
         message: err.message || "Internal error in testing handler",
-        stack:
-          process.env.NODE_ENV === "development" || process.env.BENCHMARK_MODE === "true"
-            ? err.stack
-            : undefined,
       },
       500,
     );

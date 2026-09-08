@@ -421,6 +421,7 @@ export const SYSTEM_SCHEMA: SchemaItem[] = [
         default: { sqlite: dStr("[]").sqlite, postgresql: dStr("[]").postgresql },
       },
       { name: "isAdmin", type: boolCol(), notNull: pgMaria, default: dFalse() },
+      { name: "mfaRequired", type: boolCol(), notNull: pgMaria, default: dFalse() },
       { name: "icon", type: varchar(100) },
       { name: "color", type: varchar(50) },
       { name: "tenantId", type: varchar(36) },

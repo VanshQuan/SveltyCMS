@@ -23,6 +23,23 @@ import {
 
 export type AuditSeverity = "low" | "medium" | "high" | "critical";
 
+const SENSITIVE_KEY_RE = /password|secret|token|authorization|credential|api[_-]?key/i;
+
+function redactSensitiveDetails(details: Record<string, unknown>): Record<string, unknown> {
+  if (!details || typeof details !== "object") return details;
+  const clean: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(details)) {
+    if (SENSITIVE_KEY_RE.test(k)) {
+      clean[k] = "[REDACTED]";
+    } else if (v && typeof v === "object" && !Array.isArray(v)) {
+      clean[k] = redactSensitiveDetails(v as Record<string, unknown>);
+    } else {
+      clean[k] = v;
+    }
+  }
+  return clean;
+}
+
 /** Outbox collection — internal machinery, excluded from automatic audit hooks. */
 const OUTBOX_COLLECTION = "svelty_outbox";
 
@@ -285,7 +302,7 @@ export class AuditService {
           targetType: resource.type,
           eventType,
           severity,
-          details,
+          details: redactSensitiveDetails(details),
           tenantId,
           result,
           timestamp,

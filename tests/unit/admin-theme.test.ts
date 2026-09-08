@@ -27,6 +27,7 @@ import {
   getRoleBasedDensity,
   isPreferenceLocked,
 } from "../../src/utils/theme-merge";
+import { stripHtml } from "@utils/sanitize-html";
 
 // ─── AdminTheme Class ───
 
@@ -240,18 +241,53 @@ describe("theme-merge utilities", () => {
 describe("CSS sanitization", () => {
   // codeql[js/incomplete-multi-character-sanitization]: test mirror of the
   // admin-only CSS blocklist in admin-theme-service.ts (annotated there too).
+  function stripScriptBlocks(str: string): string {
+    if (!str.includes("<")) return str;
+    let output = "";
+    let inScript = false;
+    let tagBuffer = "";
+
+    for (let i = 0; i < str.length; i++) {
+      const ch = str[i];
+      if (ch === "<") {
+        tagBuffer = "<";
+      } else if (ch === ">") {
+        tagBuffer += ">";
+        const lower = tagBuffer.toLowerCase();
+        if (lower.startsWith("<script")) {
+          inScript = true;
+        } else if (lower.startsWith("</script")) {
+          inScript = false;
+        }
+        tagBuffer = "";
+      } else if (tagBuffer) {
+        if (tagBuffer.length < 15) tagBuffer += ch;
+      } else if (!inScript) {
+        output += ch;
+      }
+    }
+
+    return output;
+  }
+
   function sanitizeCss(css: string): string {
-    return (
-      css
+    let cleaned = css;
+    let prev: string;
+    do {
+      prev = cleaned;
+      cleaned = cleaned
         .replace(/url\s*\([^)]*\)/gi, "url()")
         .replace(/expression\s*\(/gi, "/* blocked */")
         .replace(/javascript\s*:/gi, "/* blocked */")
         .replace(/behavior\s*:/gi, "/* blocked */")
-        .replace(/@import/gi, "/* blocked */")
-        // codeql[js/bad-tag-filter]: removes script blocks from injected CSS strings
-        .replace(/<script[\s\S]*?<\/script>/gi, "")
-        .replace(/<[^>]*>/g, "")
-    );
+        .replace(/@import/gi, "/* blocked */");
+    } while (cleaned !== prev);
+
+    if (cleaned.includes("<")) {
+      cleaned = stripHtml(stripScriptBlocks(cleaned));
+    }
+
+    return cleaned;
   }
 
   it("should strip url() references", () => {

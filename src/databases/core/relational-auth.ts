@@ -124,6 +124,8 @@ export class RelationalAuthModule implements IAuthAdapter {
       _id: role._id as DatabaseId,
       tenantId: role.tenantId as DatabaseId | null,
       permissions: parseJsonField<string[]>(role.permissions, []),
+      isAdmin: Boolean(role.isAdmin),
+      mfaRequired: Boolean(role.mfaRequired),
     } as unknown as Role;
   }
 

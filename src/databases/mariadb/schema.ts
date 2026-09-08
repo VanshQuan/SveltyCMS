@@ -126,6 +126,7 @@ export const roles = mysqlTable(
     description: text("description"),
     permissions: json("permissions").$type<string[]>().notNull().default([]),
     isAdmin: boolean("isAdmin").notNull().default(false),
+    mfaRequired: boolean("mfaRequired").notNull().default(false),
     icon: varchar("icon", { length: 100 }),
     color: varchar("color", { length: 50 }),
     tenantId: tenantField(),

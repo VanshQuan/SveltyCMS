@@ -20,7 +20,7 @@ import {
   WRITE_HTTP_METHODS,
 } from "@src/utils/hook-utils";
 import { cacheService } from "@src/databases/cache/cache-service";
-import { hasPermissionWithRoles } from "@src/databases/auth/permissions";
+import { hasPermissionWithRoles, isMfaRequiredForUser } from "@src/databases/auth/permissions";
 import { isSecureCookieContext, readSessionCookie, isAdmin } from "@src/databases/auth/constants";
 import { pluginRouteRegistry } from "@src/plugins/plugin-route-registry";
 import {
@@ -253,7 +253,39 @@ export function _checkEndpointPermission(
   method: string,
   namespace: string,
   segments: string[],
+  sessionAmr?: string[],
 ): boolean {
+  // Check if endpoint is an exempt auth/2FA/logout path
+  const action = segments[1];
+  const isExemptAuthPath =
+    (namespace === "auth" || namespace === "user") &&
+    (!action ||
+      action === "me" ||
+      action === "login" ||
+      action === "logout" ||
+      action === "oidc-logout" ||
+      action === "oidc-login" ||
+      action === "oidc-callback" ||
+      action === "sso-providers" ||
+      action === "frontchannel-logout" ||
+      action === "backchannel-logout" ||
+      action === "saml" ||
+      action === "2fa" ||
+      action.startsWith("2fa"));
+
+  // 🛡️ ROLE-BASED MFA ENFORCEMENT (P0):
+  // If the user's role mandates MFA, verify that the session carries interactive MFA in AMR.
+  if (!isExemptAuthPath && isMfaRequiredForUser(user, roles)) {
+    const hasMfa = sessionAmr && (sessionAmr.includes("mfa") || sessionAmr.includes("webauthn"));
+    if (!hasMfa) {
+      throw new AppError(
+        "Multi-Factor Authentication is required for your role.",
+        403,
+        "MFA_REQUIRED",
+      );
+    }
+  }
+
   // 🚀 ADMIN FAST-PATH: System and super admins have all access
   if (isAdmin(user)) {
     return true;
@@ -481,7 +513,9 @@ export const _handler = async (event: RequestEvent) => {
     request.method.toUpperCase() !== "OPTIONS"
   ) {
     const roles = locals.roles || [];
-    if (!_checkEndpointPermission(user, roles, request.method, namespace, segments)) {
+    if (
+      !_checkEndpointPermission(user, roles, request.method, namespace, segments, locals.sessionAmr)
+    ) {
       throw new AppError("Forbidden: Insufficient permissions", 403, "FORBIDDEN");
     }
   }

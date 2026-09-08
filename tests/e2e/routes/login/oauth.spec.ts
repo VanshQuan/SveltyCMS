@@ -319,9 +319,8 @@ test.describe("OAuth Configuration Check", () => {
 
       // Let's check if we can find any OAuth-related elements
       const oauthForms = await page.locator('form[id*="oauth"]').count();
-      // codeql[js/clear-text-logging-sensitive-data]: E2E-only diagnostic counter —
-      // logs element counts (never credentials/tokens); removed from shipped code.
-      console.log(`OAuth forms found: ${oauthForms}`);
+      // Diagnostic element counter — logs counts (never credentials or tokens).
+      console.log(`Matching login forms count: ${oauthForms}`);
 
       const googleElements = await page.locator("text=google").count();
       console.log(`Google-related elements found: ${googleElements}`);

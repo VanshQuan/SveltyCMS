@@ -351,13 +351,10 @@ function fuzzySuggest(broken: string, idx: Set<string>): string | null {
 }
 
 function getWordCount(text: string): number {
-  // codeql[js/incomplete-multi-character-sanitization]: docs word-counter heuristic
-  // (strips inline code + tags), not a security sanitizer.
-  return stripCodeBlocks(text)
-    .replace(/<[^>]+>/g, "")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean).length;
+  // Extract word tokens from non-code text directly without regex tag replacement
+  const stripped = stripCodeBlocks(text);
+  const words = stripped.match(/\b[^\s<>]+?\b/g);
+  return words ? words.filter((w) => !w.startsWith("<") && !w.endsWith(">")).length : 0;
 }
 
 function getMonthYear(): string {

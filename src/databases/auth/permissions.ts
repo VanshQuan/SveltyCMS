@@ -355,3 +355,39 @@ export function hasCollectionBuilderPermission(
   if (isAdmin || user.isAdmin) return true;
   return hasPermissionWithRoles(user, COLLECTION_BUILDER_PERMISSION_ID, roles);
 }
+
+/**
+ * Checks whether any assigned role of the user mandates Multi-Factor Authentication.
+ * Returns true if ANY active role for the user has mfaRequired === true.
+ */
+export function isMfaRequiredForUser(user: User | null | undefined, roles: Role[] = []): boolean {
+  if (!user) return false;
+  const userRoleLower = (user.role || "").toLowerCase();
+  const defaultRoleName = DEFAULT_ROLE_NAMES[userRoleLower];
+  for (const role of roles) {
+    const matches =
+      role._id === user.role ||
+      (typeof role._id === "string" && role._id.toLowerCase() === userRoleLower) ||
+      (defaultRoleName ? role.name === defaultRoleName : false) ||
+      (role.name && role.name.toLowerCase() === userRoleLower);
+    if (matches && role.mfaRequired) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Validates whether the user's current session satisfies role-based MFA requirements.
+ * Returns true if the user's role does not require MFA OR if the session AMR contains "mfa" or "webauthn".
+ */
+export function validateSessionMfaRequirement(
+  user: User | null | undefined,
+  roles: Role[] = [],
+  sessionAmr?: string[],
+): boolean {
+  if (!isMfaRequiredForUser(user, roles)) {
+    return true;
+  }
+  return Boolean(sessionAmr && (sessionAmr.includes("mfa") || sessionAmr.includes("webauthn")));
+}

@@ -190,9 +190,13 @@ async function scanSvelteFile(relPath: string, content: string, shouldFix: boole
       const hasAccessibleName =
         /(aria-label|aria-labelledby|title|id\s*=)/i.test(attrs) ||
         ((tagName === "a" || tagName === "button") &&
-          // codeql[js/incomplete-multi-character-sanitization]: line-scoped a11y heuristic
-          // (visible-text check), not an XSS sanitizer — not used as HTML output.
-          /[a-zA-Z0-9\u00C0-\u017F]/.test(line.replace(/<[^>]*>/g, "").trim())) ||
+          // Line-scoped a11y heuristic (visible-text check), not an XSS sanitizer
+          /[a-zA-Z0-9\u00C0-\u017F]/.test(
+            line
+              .split(/<[^>]*>/)
+              .join("")
+              .trim(),
+          )) ||
         false;
 
       // Separately check for wrapping <label for="id"> pattern

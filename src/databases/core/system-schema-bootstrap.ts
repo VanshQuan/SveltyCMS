@@ -346,6 +346,7 @@ async function runPostgresLegacyTails(sql: postgres.Sql): Promise<void> {
     `ALTER TABLE system_virtual_folders ADD COLUMN IF NOT EXISTS "position" INT NOT NULL DEFAULT 0`,
     `ALTER TABLE workflow_definitions ADD COLUMN IF NOT EXISTS "gatePublication" BOOLEAN NOT NULL DEFAULT FALSE`,
     `ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS "assigneeId" VARCHAR(36)`,
+    `ALTER TABLE roles ADD COLUMN IF NOT EXISTS "mfaRequired" BOOLEAN NOT NULL DEFAULT FALSE`,
   ];
   try {
     for (const alter of alters) {
@@ -460,6 +461,7 @@ async function runMariaDbLegacyTails(connection: mysql.Pool): Promise<void> {
     `ALTER TABLE system_virtual_folders ADD COLUMN IF NOT EXISTS position INT NOT NULL DEFAULT 0`,
     `ALTER TABLE workflow_definitions ADD COLUMN IF NOT EXISTS gatePublication BOOLEAN NOT NULL DEFAULT FALSE`,
     `ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS assigneeId VARCHAR(36)`,
+    `ALTER TABLE roles ADD COLUMN IF NOT EXISTS mfaRequired BOOLEAN NOT NULL DEFAULT FALSE`,
   ];
   try {
     for (const alter of alters) {
@@ -601,6 +603,7 @@ async function runSqliteTails(db: unknown): Promise<void> {
     `ALTER TABLE "workflow_definitions" ADD COLUMN "gatePublication" INTEGER DEFAULT 0`,
   );
   executeSqlite(db, `ALTER TABLE "workflow_instances" ADD COLUMN "assigneeId" TEXT`);
+  executeSqlite(db, `ALTER TABLE "roles" ADD COLUMN "mfaRequired" INTEGER DEFAULT 0`);
 
   // 🚀 MIGRATION: Rename 'security' to 'password' if needed
   try {

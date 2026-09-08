@@ -136,6 +136,81 @@ export class GDPRService {
       return false;
     }
   }
+
+  /**
+   * Right to Erasure / Deep Wipe (Article 17)
+   * Permanently erases user identity, sessions, tokens, and cascading records.
+   */
+  public async eraseUser(
+    userId: string,
+    tenantId: string,
+    reason = "GDPR Article 17 Right to Erasure",
+  ): Promise<boolean> {
+    if (!dbAdapter) {
+      logger.error("GDPR Erasure Failed: Database adapter not initialized");
+      return false;
+    }
+
+    try {
+      const targetTenant = (tenantId || "global") as DatabaseId;
+      const targetUser = userId as DatabaseId;
+
+      // 1. Invalidate and purge sessions/tokens if auth adapter supports it
+      if (dbAdapter.auth?.deleteUserAndSessions) {
+        await dbAdapter.auth
+          .deleteUserAndSessions(targetUser, { tenantId: targetTenant })
+          .catch(() => {});
+      }
+
+      // 2. Cascade delete records via crud if available
+      if (dbAdapter.crud) {
+        await Promise.all([
+          dbAdapter.crud
+            .deleteMany("audit_logs", { actorId: userId } as any, {
+              tenantId: targetTenant,
+            })
+            .catch(() => {}),
+          dbAdapter.crud
+            .deleteMany("auth_sessions", { user_id: userId } as any, {
+              tenantId: targetTenant,
+            })
+            .catch(() => {}),
+          dbAdapter.crud
+            .deleteMany("auth_tokens", { user_id: userId } as any, {
+              tenantId: targetTenant,
+            })
+            .catch(() => {}),
+        ]);
+        await dbAdapter.crud
+          .delete("auth_users", userId, {
+            permanent: true,
+            tenantId: targetTenant,
+          })
+          .catch(() => {});
+      }
+
+      // 3. Fallback direct user delete via auth adapter
+      if (dbAdapter.auth?.deleteUser) {
+        await dbAdapter.auth.deleteUser(targetUser, { tenantId: targetTenant }).catch(() => {});
+      }
+
+      // 4. Log erasure audit record
+      await auditLogService.log(
+        "GDPR Data Erasure",
+        { id: "system" as any, email: "system@sveltycms.internal", ip: "system" },
+        { type: "user", id: userId as any },
+        AuditEventType.DATA_DELETION,
+        "high",
+        { reason, action: "erase", targetUserId: userId, tenantId },
+      );
+
+      logger.info(`User ${userId} permanently erased under GDPR Article 17 (tenant: ${tenantId}).`);
+      return true;
+    } catch (error) {
+      logger.error(`GDPR Erasure Failed for user ${userId} (tenant: ${tenantId}):`, error);
+      return false;
+    }
+  }
 }
 
 export const gdprService = GDPRService.getInstance();

@@ -138,6 +138,7 @@ export const roles = sqliteTable(
       .notNull()
       .default([] as any),
     isAdmin: integer("isAdmin", { mode: "boolean" }).notNull().default(false),
+    mfaRequired: integer("mfaRequired", { mode: "boolean" }).notNull().default(false),
     icon: text("icon", { length: 100 }),
     color: text("color", { length: 50 }),
     tenantId: tenantField(),

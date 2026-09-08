@@ -98,6 +98,8 @@ declare global {
       session_id?: DatabaseId;
       /** Authentication Method References for the current session (e.g. ["pwd","mfa"]). */
       sessionAmr?: string[];
+      /** ISO timestamp when MFA was verified for this session. */
+      mfaVerifiedAt?: string;
       tenantId?: DatabaseId | null;
       theme: Theme | null;
       user: User | null;

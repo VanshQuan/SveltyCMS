@@ -414,11 +414,15 @@ export class Auth {
       user = (ur as User) ?? null;
     }
 
-    if (!user) {
-      throw error(404, `User not found for ID: ${sessionData.user_id}`);
-    }
-
-    await this.sessionStore.set(session._id, user, sessionData.expires);
+    const sessionMetadata = {
+      amr: sessionData.amr ?? (user.is2FAEnabled ? ["pwd", "mfa"] : ["pwd"]),
+      mfaVerifiedAt:
+        (sessionData as any).mfaVerifiedAt ??
+        (sessionData.amr?.includes("mfa")
+          ? (new Date().toISOString() as ISODateString)
+          : undefined),
+    };
+    await this.sessionStore.set(session._id, user, sessionData.expires, sessionMetadata);
 
     // Session device policy (enterprise-configurable):
     //   single-per-device (default) — evict other non-rotated sessions of this
@@ -474,6 +478,10 @@ export class Auth {
     if (rawSession?.success && rawSession.data) {
       const sessionData = rawSession.data as any;
       sessionData.amr = amr;
+      const mfaVerifiedAt = amr.includes("mfa")
+        ? (new Date().toISOString() as ISODateString)
+        : undefined;
+      if (mfaVerifiedAt) sessionData.mfaVerifiedAt = mfaVerifiedAt;
       // updateSession is adapter-optional (IAuthAdapter has no such method) —
       // widen once so the runtime guard type-checks.
       const authWithSessionPatch = this.db.auth as IAuthAdapter & {
@@ -484,11 +492,16 @@ export class Auth {
         ) => Promise<unknown>;
       };
       if (authWithSessionPatch.updateSession) {
-        await authWithSessionPatch.updateSession(sessionId, { amr }, options).catch(() => {});
+        await authWithSessionPatch
+          .updateSession(sessionId, { amr, mfaVerifiedAt }, options)
+          .catch(() => {});
       }
       const user = await this.getUserById(sessionData.user_id, options);
       if (user) {
-        await this.sessionStore.set(sessionId, user, sessionData.expires);
+        await this.sessionStore.set(sessionId, user, sessionData.expires, { amr, mfaVerifiedAt });
+        if (this.sessionStore.updateSessionAmr) {
+          await this.sessionStore.updateSessionAmr(sessionId, amr, mfaVerifiedAt);
+        }
       }
       const { invalidateSessionCache } = await import("@src/hooks/handle-authentication");
       invalidateSessionCache(String(sessionId), options?.tenantId ?? sessionData.tenantId ?? null);

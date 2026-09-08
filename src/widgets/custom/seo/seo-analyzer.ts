@@ -30,29 +30,41 @@ export class SeoAnalyzer {
   private readonly transitionWords: Set<string>;
 
   /**
-   * Robustly remove all HTML tags from input string.
-   * Applies replacements repeatedly until no more tags can be found,
-   * preventing bypass via malformed or nested tags.
+   * Fast state-based plain text extractor.
+   * Traverses characters to discard HTML tags and <script>...</script> bodies
+   * without error-prone regular expressions (immune to ReDoS and nested tag bypasses).
    */
   private stripHtmlTags(input: string): string {
-    let previous: string;
-    do {
-      previous = input;
-      // Remove <script>...</script> blocks (with any attributes and malformed end tags)
-      // codeql[js/incomplete-multi-character-sanitization]: intentional — the loop below
-      // re-applies both strips until no more tags remain (nested/malformed safe) and the
-      // final [<>] removal catches partial tags; output feeds SEO text analysis, never HTML.
-      input = input.replace(/<script[\s\S]*?>[\s\S]*?<\/script[^>]*>/gi, "");
-      // Remove all other HTML tags
-      // codeql[js/incomplete-multi-character-sanitization]: iterative strip (see above).
-      input = input.replace(/<[^>]*>/gi, "");
-    } while (input !== previous);
+    if (!input || !input.includes("<")) return input ?? "";
 
-    // Final safeguard: remove any remaining angle brackets to prevent
-    // malformed or partial tags (e.g., "<script") from surviving.
-    input = input.replace(/[<>]/g, "");
+    let output = "";
+    let inTag = false;
+    let inScript = false;
+    let tagBuffer = "";
 
-    return input;
+    for (let i = 0; i < input.length; i++) {
+      const ch = input[i];
+      if (ch === "<") {
+        inTag = true;
+        tagBuffer = "<";
+      } else if (ch === ">") {
+        inTag = false;
+        tagBuffer += ">";
+        const lower = tagBuffer.toLowerCase();
+        if (lower.startsWith("<script")) {
+          inScript = true;
+        } else if (lower.startsWith("</script")) {
+          inScript = false;
+        }
+        tagBuffer = "";
+      } else if (inTag) {
+        if (tagBuffer.length < 15) tagBuffer += ch;
+      } else if (!inScript) {
+        output += ch;
+      }
+    }
+
+    return output;
   }
 
   constructor(config: SeoAnalysisConfig) {

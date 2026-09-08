@@ -53,7 +53,7 @@ Our API tests operate at the **integration** level. Unlike unit tests, they boot
 ### Key Components
 
 1. **Fail-Closed Dispatcher**: Unmapped or unauthorized routes must reject by default.
-2. **Testing API (`/api/testing`)**: Handles reset, seed, and isolated fixture orchestration without direct adapter imports inside black-box tests.
+2. **Testing API (`/api/testing`)**: Handles state reset, seed, and isolated fixture orchestration for black-box E2E and integration tests under `TEST_MODE=true`. It is not exposed to production and is never used for production benchmarks or compliance verification (which target real routes like `POST /api/gdpr`).
 3. **Integration harness**: `tests/integration/harness.ts` provisions `config/private.test.ts`, starts the preview server, and seeds via `/api/testing`. Run with `bun test --timeout 300000 tests/integration/`.
 4. **Real Authentication**: Tests obtain cookies via `/api/auth/login` and then hit the same endpoints a browser or API consumer would use.
 

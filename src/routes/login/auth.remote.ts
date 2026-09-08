@@ -238,6 +238,7 @@ export const verify2FA = command(
       userAgent: ua,
       ipAddress: ip,
       amr: ["pwd", "mfa"],
+      mfaVerifiedAt: new Date().toISOString() as ISODateString,
     });
 
     const sc = auth.createSessionCookie(session._id, isSecureConnection(event));
@@ -487,11 +488,23 @@ async function signInInternal(event: RequestEvent, input: any) {
         return { success: false, message: authHookResult.message || "Access denied." };
       }
 
-      // Plugin can force 2FA even if user doesn't have it enabled
-      const requires2FA = user.is2FAEnabled || authHookResult?.requires2FA;
+      // Check if user's role mandates MFA
+      let roleMfaRequired = false;
+      try {
+        if (user.role && typeof auth.getRoleById === "function") {
+          const userRole = await auth.getRoleById(user.role as any);
+          if (userRole?.mfaRequired) {
+            roleMfaRequired = true;
+          }
+        }
+      } catch {}
+
+      // Plugin can force 2FA even if user doesn't have it enabled, or role mandates it
+      const requires2FA = user.is2FAEnabled || authHookResult?.requires2FA || roleMfaRequired;
 
       let usedTrustedDevice = false;
-      if (requires2FA && !authHookResult?.requires2FA) {
+      // 🛡️ TRUSTED-DEVICE OVERRIDE: Deaktivierung des hasTrustedDevice-Skips für Rollen mit mfaRequired: true
+      if (requires2FA && !authHookResult?.requires2FA && !roleMfaRequired) {
         const trustedCookie = event.cookies.get("__Host-2fa-trusted-device");
         if (trustedCookie) {
           // 🛡️ HARDENING (pen-test M9): rebind the trusted-device cookie to the

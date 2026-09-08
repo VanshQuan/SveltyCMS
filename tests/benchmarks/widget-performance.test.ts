@@ -19,6 +19,7 @@ import {
 } from "./modules/benchmark-utils";
 import "../unit/bun-preload.ts";
 import { logger } from "@utils/logger";
+import { stripHtml } from "@utils/sanitize-html";
 
 function forceGarbageCollection() {
   if (typeof Bun !== "undefined" && typeof (Bun as any).gc === "function") {
@@ -50,9 +51,7 @@ const CORE_WIDGET_PROCESSORS: Record<string, (ctx: WidgetContext) => Promise<any
   RichText: (ctx) => {
     const raw = ctx.data[ctx.field.db_fieldName] || "";
     // Realistic HTML sanitizer / token extraction simulation
-    // codeql[js/incomplete-multi-character-sanitization]: benchmark-only synthetic
-    // workload simulating a RichText tokenizer — never shipped sanitization logic.
-    return raw.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "").trim();
+    return stripHtml(raw).trim();
   },
   DateTime: (ctx) => {
     const raw = ctx.data[ctx.field.db_fieldName];

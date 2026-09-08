@@ -220,6 +220,21 @@ To ensure optimal throughput and prevent performance bottlenecks, SveltyCMS main
 
 ---
 
+### 7.3 Role-Based Multi-Factor Authentication Enforcement (MFA-RBAC)
+
+SveltyCMS enforces mandatory multi-factor authentication on a per-role basis:
+
+- **Per-Role Mandate (`Role.mfaRequired`)**: When `mfaRequired: true`, users assigned to this role must complete interactive 2FA enrollment and verification before accessing protected system resources.
+- **Session AMR Tracking (RFC 8176)**: Sessions capture Authentication Methods References:
+  - `amr: ["pwd"]` — Password authentication only.
+  - `amr: ["pwd", "mfa"]` — Interactive 2FA verified (TOTP, hardware passkey/WebAuthn, backup code).
+  - `mfaVerifiedAt` — ISO timestamp recording when second-factor elevation occurred.
+- **Endpoint Gate Enforcement**: In `_checkEndpointPermission`, requests made under a mandatory-MFA role that carry non-MFA sessions (`amr: ["pwd"]` or `amr: ["pwd", "trusted_device"]`) are immediately rejected with HTTP 403 `MFA_REQUIRED`.
+- **Exempt Routes**: Self-service 2FA setup/verification (`/api/auth/2fa/*`) and session teardown (`/api/auth/logout`) remain accessible so users can authenticate their factor or safely log out.
+- **Trusted-Device Override**: Device-level trust (`__Host-2fa-trusted-device`) is unconditionally disabled for any user assigned to a role with `mfaRequired: true`. Interactive second factor is required on every login.
+
+---
+
 ## 8. Performance Benchmarks
 
 All metrics self-measured via `bun test tests/benchmarks/` — reproducible on any machine.

@@ -51,7 +51,7 @@ tags:
 
 | Dimension      | Tests | Status | Worst Δ | Issues |
 | -------------- | ----: | ------ | ------- | ------ |
-| **Core**       |     2 | 🟢     | -70%    | 0      |
+| **Core**       |     1 | 🟢     | +2%     | 0      |
 | **API**        |     0 | ⚪     | —       | 0      |
 | **Scale**      |     0 | ⚪     | —       | 0      |
 | **Resilience** |     0 | ⚪     | —       | 0      |
@@ -62,10 +62,9 @@ tags:
 
 ### Executive latency matrix
 
-| Scenario  | Latency | Trend                                  | Budget | Result |
-| --------- | ------- | -------------------------------------- | ------ | ------ |
-| **HTTP**  | 2.396ms | ⚪ stable at 7.91ms (±6.15ms) (6 runs) | < 5ms  | 🟢     |
-| **TURBO** | 1.368ms | ⚪ stable at 3.68ms (±3.55ms) (6 runs) | < 5ms  | 🟢     |
+| Scenario                        | Latency | Trend                                    | Budget | Result |
+| ------------------------------- | ------- | ---------------------------------------- | ------ | ------ |
+| **Right To Be Forgotten Audit** | 0.891ms | ⚪ stable at 0.875ms (±0.095ms) (7 runs) | < 5ms  | 🟢     |
 
 ### Historical pulse
 
@@ -90,23 +89,6 @@ xychart-beta
 ```
 
 </details>
-<details>
-<summary>📊 Regression severity matrix (quadrant)</summary>
-
-```mermaid
-quadrantChart
-  title "Regression severity (impact vs delta)"
-  x-axis Low latency impact --> High latency impact
-  y-axis Low delta --> High delta
-  quadrant-1 Monitor
-  quadrant-2 Investigate soon
-  quadrant-3 Acceptable variance
-  quadrant-4 Critical — fix first
-    HTTP: [0.95, 0.95]
-    TURBO: [0.57, 0.90]
-```
-
-</details>
 
 <!-- EXECUTIVE_PARTIAL_WATERMARK -->
 
@@ -119,24 +101,23 @@ quadrantChart
 
 <!-- SUMMARY_RUN_OVERLAY_START -->
 
-### Current Run Summary (2026-09-04)
+### Current Run Summary (2026-09-08)
 
 > **Scope:** Only tests that ran in THIS invocation.
 
 > ⚠️ Executive PASS/FAIL reflects the last full matrix run.
 
-**Run ID:** `93b83281-3ab1-403e-b5af-8f4e7b9acbd5` · **Tests invoked:** 1 · **Metrics:** 2 · **DB:** sqlite
+**Run ID:** `8fdb3b44-69a4-47ed-96e0-1879cc5aea17` · **Tests invoked:** 1 · **Metrics:** 1 · **DB:** sqlite
 
-| Test        | Metric                               | Avg (ms) | p95 (ms) | RPS  | Trend | Detail                                 |
-| ----------- | ------------------------------------ | -------- | -------- | ---- | ----- | -------------------------------------- |
-| Api Latency | HTTP: findById @ 8c (Cold)           | 2.396    | 4.079    | 3049 | 🟢    | ⚪ stable at 7.91ms (±6.15ms) (6 runs) |
-| Api Latency | HTTP: findById TURBO-HIT @ 8c (Warm) | 1.368    | 1.817    | 5478 | 🟢    | ⚪ stable at 3.68ms (±3.55ms) (6 runs) |
+| Test                        | Metric              | Avg (ms) | p95 (ms) | RPS | Trend | Detail                                   |
+| --------------------------- | ------------------- | -------- | -------- | --- | ----- | ---------------------------------------- |
+| Right To Be Forgotten Audit | Deep Deletion Speed | 0.891    | 1.096    | 936 | 🟢    | ⚪ stable at 0.875ms (±0.095ms) (7 runs) |
 
 <!-- SUMMARY_RUN_OVERLAY_END -->
 
 <!-- SUMMARY_HISTORY_START -->
 
-### Historical Trends (2026-09-04)
+### Historical Trends (2026-09-08)
 
 > **Scope:** Sparklines only — full run tables live in `history.sqlite` (link below). Runs = sparkline bar count.
 
@@ -190,7 +171,7 @@ quadrantChart
 | RELATIONAL PERFORMANCE (warm)       | 🟢    | `█▃▁▂▃▁▂`          | 2.207ms    |
 | REST API PERFORMANCE (warm)         | 🟢    | `▃▁█▇▇█▄`          | 0.786ms    |
 | REVISION STRESS (warm)              | 🟢    | `▄█▃▇▃▁▂`          | 0.740ms    |
-| RIGHT TO BE FORGOTTEN AUDIT (warm)  | 🟢    | `▁▁▁█▆`            | 2.485ms    |
+| RIGHT TO BE FORGOTTEN AUDIT (warm)  | 🟢    | `▁▁█▅▄▄▄`          | 0.891ms    |
 | SCALE SPECTRUM (warm)               | 🟢    | `▃█▆▃▂▁▃`          | 2.079ms    |
 | SECURITY AUDIT (warm)               | 🟢    | `█▁▁▁▁▁▁`          | 0.001ms    |
 | SEO PERFORMANCE (warm)              | 🟢    | `█▁▁▁█▁▁`          | 6.715ms    |
@@ -1636,30 +1617,18 @@ Throughput dropped 52% — check connection pool saturation or lock contention.
 
 <!-- SECTION:AUDIT:START -->
 <details id="section-audit">
-<summary><strong>🏷️ Audit</strong> · 🟢 ⏳ pending · ↘️ ⚪ stable at 0.001ms (±0.001ms) (3 runs) (2026-09-03 20:15:16) · <a href="../../../tests/benchmarks/security-audit.test.ts">source</a></summary>
-<!-- LEDGER_INSIGHT_START -->
-> [!NOTE]
-> **Specific to this test**: Performance improved — recent optimizations or cache warming likely effective.
-<!-- LEDGER_INSIGHT_END -->
-
+<summary><strong>🏷️ right to be forgotten audit</strong> · 🟢 0.891ms · ➡️ ⚪ stable at 0.875ms (±0.095ms) (7 runs) (2026-09-08 15:25:25) · <a href="../../../tests/benchmarks/right-to-be-forgotten-audit.test.ts">source</a></summary>
 <!-- LEDGER_TRUTH_START -->
-
 ```text
 ╔═══════════════════════════════════════════════════════════════════════════════════════════════════════╗
-║                                   SVELTYCMS — PRODUCTION DAY AUDIT                                    ║
-║                             File: tests/benchmarks/production-day.test.ts                             ║
-║                                       Ran: 2026-08-29 21:32:33                                        ║
-║Simulates a realistic multi-user workload with a weighted mix of read, list, update, media, and GraphQL operations with per-tier latency telemetry.║
+║                                   SVELTYCMS — GDPR COMPLIANCE AUDIT                                   ║
+║                      File: tests/benchmarks/right-to-be-forgotten-audit.test.ts                       ║
+║                                       Ran: 2026-09-08 15:25:25                                        ║
+║Measures the latency, cascading relational integrity, and throughput of deep user erasure across all linked repositories.║
 ╠═══════════════════════════════════════════════════════════════════════════════════════════════════════╣
-║ Production Day Composite     │ Cold:     2.95 ms │ Warm:     2.141 ms │ p95:     3.423 ms │     135 RPS ║
-║ Day: READ_LIST                 │        2.006 ms │ p95:        3.041 ms │ RPS:        205 ║
-║ Day: READ_ENTRY                │        1.875 ms │ p95:        3.218 ms │ RPS:        105 ║
-║ Day: UPDATE                    │        2.392 ms │ p95:        3.324 ms │ RPS:        125 ║
-║ Day: MEDIA                     │        2.592 ms │ p95:        3.785 ms │ RPS:         58 ║
-║ Day: GQL                       │        3.253 ms │ p95:        4.433 ms │ RPS:         26 ║
+║ Deep Deletion Speed          │ Cold:     5.35 ms │ Warm:     0.891 ms │ p95:     1.096 ms │     936 RPS ║
 ╚═══════════════════════════════════════════════════════════════════════════════════════════════════════╝
 ```
-
 <!-- LEDGER_TRUTH_END -->
 
 </details>

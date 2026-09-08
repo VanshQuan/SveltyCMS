@@ -21,7 +21,7 @@ import type { ISODateString, User, DatabaseId } from "@databases/db-interface";
 import { isoDateStringToDate } from "@utils/date";
 // System Logger
 import { logger } from "@utils/logger";
-import type { SessionStore } from "./types";
+import type { SessionStore, SessionMetadata, SessionData } from "./types";
 import { toSafeSessionUser } from "./session-user";
 
 // Redis client interface to avoid direct dependency on a specific Redis library
@@ -35,7 +35,15 @@ interface RedisLike {
 
 // In-memory session storage as fallback
 class InMemorySessionManager implements SessionStore {
-  private readonly sessions: Map<string, { user: User; expiresAt: Date }> = new Map();
+  private readonly sessions: Map<
+    string,
+    {
+      user: User;
+      expiresAt: Date;
+      amr?: string[];
+      mfaVerifiedAt?: ISODateString;
+    }
+  > = new Map();
   private static readonly MAX_SESSIONS = 10000;
 
   async get(sessionId: string): Promise<User | null> {
@@ -52,7 +60,30 @@ class InMemorySessionManager implements SessionStore {
     return session.user;
   }
 
-  async set(sessionId: string, user: User, expiration: ISODateString): Promise<void> {
+  async getSessionData(sessionId: string): Promise<SessionData | null> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return null;
+    }
+
+    if (new Date() > session.expiresAt) {
+      this.sessions.delete(sessionId);
+      return null;
+    }
+
+    return {
+      user: session.user,
+      amr: session.amr,
+      mfaVerifiedAt: session.mfaVerifiedAt,
+    };
+  }
+
+  async set(
+    sessionId: string,
+    user: User,
+    expiration: ISODateString,
+    metadata?: SessionMetadata,
+  ): Promise<void> {
     const expirationDate = isoDateStringToDate(expiration);
     // Bounded capacity protection: prune expired or oldest if exceeding MAX_SESSIONS
     if (this.sessions.size >= InMemorySessionManager.MAX_SESSIONS) {
@@ -64,10 +95,29 @@ class InMemorySessionManager implements SessionStore {
     }
     // Defense-in-depth: never retain credential material (password hash, TOTP
     // secret, backup codes, reset/refresh tokens) in the session store.
+    const amr = metadata?.amr ?? (user.is2FAEnabled ? ["pwd", "mfa"] : ["pwd"]);
     this.sessions.set(sessionId, {
       user: toSafeSessionUser(user),
       expiresAt: expirationDate,
+      amr,
+      mfaVerifiedAt: metadata?.mfaVerifiedAt,
     });
+  }
+
+  async updateSessionAmr(
+    sessionId: string,
+    amr: string[],
+    mfaVerifiedAt?: ISODateString,
+  ): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.amr = amr;
+      if (mfaVerifiedAt !== undefined) {
+        session.mfaVerifiedAt = mfaVerifiedAt;
+      } else if (amr.includes("mfa") && !session.mfaVerifiedAt) {
+        session.mfaVerifiedAt = new Date().toISOString() as ISODateString;
+      }
+    }
   }
 
   async delete(sessionId: string): Promise<void> {
@@ -152,10 +202,45 @@ class RedisSessionManager implements SessionStore {
     return await this.fallbackManager.get(sessionId);
   }
 
-  async set(sessionId: string, user: User, expiration: ISODateString): Promise<void> {
+  async getSessionData(sessionId: string): Promise<SessionData | null> {
+    try {
+      if (this.redisClient) {
+        const sessionData = await this.redisClient.get(sessionId);
+        if (sessionData) {
+          const parsed = JSON.parse(sessionData);
+          if (new Date() > new Date(parsed.expiresAt)) {
+            await this.redisClient.del(sessionId);
+            return null;
+          }
+          return {
+            user: parsed.user,
+            amr: parsed.amr,
+            mfaVerifiedAt: parsed.mfaVerifiedAt,
+          };
+        }
+      }
+    } catch (err: any) {
+      logger.warn(`Redis session getSessionData failed, falling back to memory: ${err.message}`);
+    }
+
+    return await this.fallbackManager.getSessionData(sessionId);
+  }
+
+  async set(
+    sessionId: string,
+    user: User,
+    expiration: ISODateString,
+    metadata?: SessionMetadata,
+  ): Promise<void> {
     const expirationDate = isoDateStringToDate(expiration);
+    const amr = metadata?.amr ?? (user.is2FAEnabled ? ["pwd", "mfa"] : ["pwd"]);
     // Defense-in-depth: never retain credential material in Redis either.
-    const sessionData = { user: toSafeSessionUser(user), expiresAt: expirationDate };
+    const sessionData = {
+      user: toSafeSessionUser(user),
+      expiresAt: expirationDate,
+      amr,
+      mfaVerifiedAt: metadata?.mfaVerifiedAt,
+    };
 
     try {
       if (this.redisClient) {
@@ -169,7 +254,36 @@ class RedisSessionManager implements SessionStore {
       logger.warn(`Redis session set failed, falling back to memory: ${err.message}`);
     } // Fallback to in-memory manager
 
-    await this.fallbackManager.set(sessionId, user, expiration);
+    await this.fallbackManager.set(sessionId, user, expiration, metadata);
+  }
+
+  async updateSessionAmr(
+    sessionId: string,
+    amr: string[],
+    mfaVerifiedAt?: ISODateString,
+  ): Promise<void> {
+    try {
+      if (this.redisClient) {
+        const raw = await this.redisClient.get(sessionId);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          parsed.amr = amr;
+          if (mfaVerifiedAt !== undefined) {
+            parsed.mfaVerifiedAt = mfaVerifiedAt;
+          } else if (amr.includes("mfa") && !parsed.mfaVerifiedAt) {
+            parsed.mfaVerifiedAt = new Date().toISOString() as ISODateString;
+          }
+          const ttlSeconds = Math.floor((new Date(parsed.expiresAt).getTime() - Date.now()) / 1000);
+          if (ttlSeconds > 0) {
+            await this.redisClient.setex(sessionId, ttlSeconds, JSON.stringify(parsed));
+          }
+        }
+      }
+    } catch (err: any) {
+      logger.warn(`Redis updateSessionAmr failed: ${err.message}`);
+    }
+
+    await this.fallbackManager.updateSessionAmr(sessionId, amr, mfaVerifiedAt);
   }
 
   async delete(sessionId: string): Promise<void> {

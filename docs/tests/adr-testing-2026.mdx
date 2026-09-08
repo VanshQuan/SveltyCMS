@@ -155,6 +155,14 @@ Seed/reset under `/api/testing` exist **only** for CI/E2E.
 
 **Agents:** Do not add seed routes outside this handler. Do not weaken the gate. Do not commit production secrets. Known e2e default secret strings are rejected outside an explicit test env.
 
+### Testing API vs Production Benchmarks & Compliance Audits
+
+- **`/api/testing` is strictly for CI/E2E fixture orchestration and state resets**. It is never available on production servers (`NODE_ENV=production` → 403 `TESTING_DISABLED_PRODUCTION`) and is stripped from deployable builds via `testBackdoorStripperPlugin`.
+- **Benchmarks and regulatory compliance suites must exercise authentic production APIs**:
+  - Regulatory audits (e.g. GDPR Right to Erasure `right-to-be-forgotten-audit.test.ts`) must never target `/api/testing`.
+  - Instead, they target real endpoints (such as `POST /api/gdpr` with `action: "erase"` or `POST /api/user/batch` with `action: "delete"`) using real authenticated session cookies (`benchmarkAuthHeaders()`).
+  - This ensures benchmarks measure authentic production latency without requiring `requireTestInfrastructure` guards or being excluded from the multi-database benchmark matrix.
+
 ---
 
 ## Shared infrastructure

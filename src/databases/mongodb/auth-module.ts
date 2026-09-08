@@ -39,6 +39,7 @@ function getRoleModel(conn: Connection | typeof mongoose) {
       description: String,
       isNative: { type: Boolean, default: false },
       isAdmin: { type: Boolean, default: false },
+      mfaRequired: { type: Boolean, default: false },
       groupName: String,
       icon: String,
       color: String,

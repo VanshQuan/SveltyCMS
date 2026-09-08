@@ -33,20 +33,30 @@ function getFastByteLength(str: string): number {
   return len;
 }
 
+function sanitizePayloadData(data: any): any {
+  if (!data || typeof data !== "object") return data;
+  if ("stack" in data && typeof (data as any).stack === "string") {
+    const { stack: _stack, ...rest } = data as any;
+    return rest;
+  }
+  return data;
+}
+
 function buildJsonResponse(
   event: RequestEvent,
   data: any,
   status = 200,
   extraHeaders?: Record<string, string>,
 ): Response {
+  const safeData = sanitizePayloadData(data);
   let serialized = "";
-  if (typeof data === "string") {
-    serialized = data;
-  } else if (data === undefined) {
+  if (typeof safeData === "string") {
+    serialized = safeData;
+  } else if (safeData === undefined) {
     serialized = '{"success":true}';
   } else {
     try {
-      serialized = JSON.stringify(data) ?? "{}";
+      serialized = JSON.stringify(safeData) ?? "{}";
     } catch {
       serialized = "{}";
     }

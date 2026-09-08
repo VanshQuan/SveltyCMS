@@ -20,6 +20,7 @@ import { mapPresetToAdminTheme, type ThemePreset } from "@utils/theme-preset-map
 import { auditPresetJson, type ContrastWarning } from "@utils/theme-contrast";
 import type { DatabaseId } from "@src/content/types";
 import type { Theme } from "@src/databases/db-interface";
+import { stripHtml } from "@utils/sanitize-html";
 
 /** Admin-controlled locks — when true, users cannot override that preference */
 export interface AdminLockedSettings {
@@ -53,20 +54,55 @@ export interface ThemeSummary {
 
 const ADMIN_THEME_KEY = "adminTheme";
 
+function stripScriptBlocks(str: string): string {
+  if (!str.includes("<")) return str;
+  let output = "";
+  let inScript = false;
+  let tagBuffer = "";
+
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (ch === "<") {
+      tagBuffer = "<";
+    } else if (ch === ">") {
+      tagBuffer += ">";
+      const lower = tagBuffer.toLowerCase();
+      if (lower.startsWith("<script")) {
+        inScript = true;
+      } else if (lower.startsWith("</script")) {
+        inScript = false;
+      }
+      tagBuffer = "";
+    } else if (tagBuffer) {
+      if (tagBuffer.length < 15) tagBuffer += ch;
+    } else if (!inScript) {
+      output += ch;
+    }
+  }
+
+  return output;
+}
+
 function sanitizeCss(css: string): string {
-  // codeql[js/incomplete-multi-character-sanitization]: admin-only CSS blocklist (theme service),
-  // intentionally conservative over-blocking; handler layer gates to admins.
-  return (
-    css
+  let cleaned = css;
+  let prev: string;
+  // Complete multi-character token removal via fixpoint loop
+  do {
+    prev = cleaned;
+    cleaned = cleaned
       .replace(/url\s*\([^)]*\)/gi, "url()")
       .replace(/expression\s*\(/gi, "/* blocked */")
       .replace(/javascript\s*:/gi, "/* blocked */")
       .replace(/behavior\s*:/gi, "/* blocked */")
-      .replace(/@import/gi, "/* blocked */")
-      // codeql[js/bad-tag-filter]: removes script blocks from injected CSS strings
-      .replace(/<script[\s\S]*?<\/script>/gi, "")
-      .replace(/<[^>]*>/g, "")
-  );
+      .replace(/@import/gi, "/* blocked */");
+  } while (cleaned !== prev);
+
+  // Discard all HTML tags and script content via state-based character traversal (no regex tag filters)
+  if (cleaned.includes("<")) {
+    cleaned = stripHtml(stripScriptBlocks(cleaned));
+  }
+
+  return cleaned;
 }
 
 function extractAdminTheme(theme: Theme): StoredAdminTheme | null {

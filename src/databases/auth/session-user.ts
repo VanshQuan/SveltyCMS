@@ -85,3 +85,68 @@ export function evaluateSessionAnomaly(options: {
       storedUaNorm.length > 0 && currentUaNorm.length > 0 && currentUaNorm !== storedUaNorm,
   };
 }
+
+/**
+ * Authentication Methods References (RFC 8176) evaluation helpers.
+ *
+ * Supported AMR identifiers:
+ * - "pwd": Username & password authentication
+ * - "mfa": Interactive multi-factor authentication (e.g., TOTP or backup code)
+ * - "webauthn": Hardware-backed passkey or FIDO2 key
+ * - "trusted_device": Device-token trust bypass
+ */
+export interface SessionAuthContext {
+  amr?: string[];
+  mfaVerifiedAt?: string;
+}
+
+/**
+ * Returns true if the session carries an interactive second factor
+ * ("mfa" or "webauthn"). Note: "trusted_device" alone is not interactive MFA.
+ */
+export function isSessionMfaActive(
+  sessionOrAmr?: SessionAuthContext | string[] | null,
+  maxAgeMs?: number,
+): boolean {
+  if (!sessionOrAmr) return false;
+
+  let amr: string[] | undefined;
+  let mfaVerifiedAt: string | undefined;
+
+  if (Array.isArray(sessionOrAmr)) {
+    amr = sessionOrAmr;
+  } else {
+    amr = sessionOrAmr.amr;
+    mfaVerifiedAt = sessionOrAmr.mfaVerifiedAt;
+  }
+
+  if (!amr || (!amr.includes("mfa") && !amr.includes("webauthn"))) {
+    return false;
+  }
+
+  // If a max age was specified, verify freshness of mfaVerifiedAt
+  if (maxAgeMs && maxAgeMs > 0 && mfaVerifiedAt) {
+    const verifiedTime = new Date(mfaVerifiedAt).getTime();
+    if (Number.isNaN(verifiedTime) || Date.now() - verifiedTime > maxAgeMs) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Derives default AMR array for a newly authenticated session.
+ */
+export function deriveSessionAmr(options: {
+  isMfaVerified?: boolean;
+  usedTrustedDevice?: boolean;
+}): string[] {
+  const amr: string[] = ["pwd"];
+  if (options.isMfaVerified) {
+    amr.push("mfa");
+  } else if (options.usedTrustedDevice) {
+    amr.push("trusted_device");
+  }
+  return amr;
+}

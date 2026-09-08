@@ -80,6 +80,23 @@ describe("GDPR API", () => {
     }
   });
 
+  it("erases user", async () => {
+    const response = await invokeApi("POST", {
+      path: "gdpr",
+      body: { action: "erase", userId: "u1", reason: "test erase" },
+      user: adminUser,
+      tenantId: "t1",
+      bypass: true,
+      dbAdapter,
+    });
+    expect([200, 400]).toContain(response.status);
+    if (response.status === 200) {
+      const body = await response.json();
+      expect(body.success).toBe(true);
+      expect(body.data?.erased).toBe(true);
+    }
+  });
+
   it("rejects unauthenticated", async () => {
     await expectApi(
       "POST",

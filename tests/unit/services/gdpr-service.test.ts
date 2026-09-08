@@ -111,4 +111,21 @@ describe("GDPRService", () => {
       expect(result).toBe(false);
     });
   });
+
+  describe("eraseUser", () => {
+    it("should permanently erase user and cascading records", async () => {
+      const userId = "user-to-erase";
+      const result = await gdprService.eraseUser(userId, tenantId);
+
+      expect(result).toBe(true);
+      expect(mockAuditLog.log).toHaveBeenCalledWith(
+        "GDPR Data Erasure",
+        expect.anything(),
+        expect.objectContaining({ id: userId }),
+        expect.anything(),
+        "high",
+        expect.objectContaining({ action: "erase", targetUserId: userId }),
+      );
+    });
+  });
 });

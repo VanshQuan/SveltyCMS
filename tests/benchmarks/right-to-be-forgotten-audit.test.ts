@@ -16,8 +16,6 @@ import {
   printTruthTable,
   printSummaryTable,
   getDbType,
-  requireTestInfrastructure,
-  TEST_API_SECRET,
   benchmarkAuthHeaders,
 } from "./modules/benchmark-utils";
 import "../unit/bun-preload.ts";
@@ -35,8 +33,6 @@ function forceGarbageCollection() {
 }
 
 async function runGdprAudit() {
-  process.env.TEST_MODE = "true";
-  requireTestInfrastructure("right-to-be-forgotten-audit");
   const dbType = getDbType().toUpperCase();
   console.log(`🚀 Starting Enterprise Right-to-be-Forgotten Audit (${dbType})...\n`);
 
@@ -53,10 +49,9 @@ async function runGdprAudit() {
     const _db = getDb();
     if (!_db) throw new Error("Database adapter not initialized");
 
-    const testEndpoint = `${baseUrl}/api/testing`;
+    const testEndpoint = `${baseUrl}/api/gdpr`;
     const complianceHeaders: Record<string, string> = {
       "content-type": "application/json",
-      "x-test-secret": TEST_API_SECRET,
       ...benchmarkAuthHeaders(),
       connection: "keep-alive",
     };
@@ -95,7 +90,7 @@ async function runGdprAudit() {
     // Pre-serialize erase payloads
     const wipePayloads = preseededUserIds.map((userId) =>
       JSON.stringify({
-        action: "wipe-user",
+        action: "erase",
         userId,
       }),
     );

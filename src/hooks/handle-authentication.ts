@@ -171,6 +171,7 @@ interface SessionCacheEntry {
   timestamp: number;
   user: User;
   amr?: string[];
+  mfaVerifiedAt?: string;
 }
 
 /**
@@ -181,7 +182,7 @@ interface SessionCacheEntry {
  *               the caller must NOT delete the session cookie on this status
  */
 export type SessionResolution =
-  | { status: "ok"; user: User; amr?: string[] }
+  | { status: "ok"; user: User; amr?: string[]; mfaVerifiedAt?: string }
   | { status: "invalid" }
   | { status: "transient" };
 
@@ -361,7 +362,12 @@ async function getUserFromSession(
     // NOTE: cached users are snapshots — a NEW block is detected via cache
     // invalidation on block/unblock/delete (batchAction purge), after which the
     // next request re-validates against the DB and hits the blocked check below.
-    return { status: "ok", user: memCached.user, amr: memCached.amr };
+    return {
+      status: "ok",
+      user: memCached.user,
+      amr: memCached.amr,
+      mfaVerifiedAt: memCached.mfaVerifiedAt,
+    };
   }
 
   // Fallback to checking the default SessionStore (holds active in-memory/Redis sessions)
@@ -370,11 +376,30 @@ async function getUserFromSession(
     const store = getDefaultSessionStore();
     // Credential stripping at the store boundary (defense-in-depth: the store
     // already strips on set, but a stale pre-strip entry must never leak).
-    const storedUser = await store.get(sessionId as DatabaseId);
-    if (storedUser) {
-      const safeStoredUser = toSafeSessionUser(storedUser);
-      setSessionInCache(sessionId, { user: safeStoredUser, timestamp: now });
-      return { status: "ok", user: safeStoredUser };
+    if (typeof store.getSessionData === "function") {
+      const storedData = await store.getSessionData(sessionId as DatabaseId);
+      if (storedData) {
+        const safeStoredUser = toSafeSessionUser(storedData.user);
+        setSessionInCache(sessionId, {
+          user: safeStoredUser,
+          timestamp: now,
+          amr: storedData.amr,
+          mfaVerifiedAt: storedData.mfaVerifiedAt,
+        });
+        return {
+          status: "ok",
+          user: safeStoredUser,
+          amr: storedData.amr,
+          mfaVerifiedAt: storedData.mfaVerifiedAt,
+        };
+      }
+    } else {
+      const storedUser = await store.get(sessionId as DatabaseId);
+      if (storedUser) {
+        const safeStoredUser = toSafeSessionUser(storedUser);
+        setSessionInCache(sessionId, { user: safeStoredUser, timestamp: now });
+        return { status: "ok", user: safeStoredUser };
+      }
     }
   } catch (err: any) {
     logger.trace(`SessionStore lookup failed: ${err.message}`);
@@ -496,13 +521,21 @@ async function getUserFromSession(
           const safeUser = toSafeSessionUser(user);
           const rawSession = sessionResult.data as any;
           const amr: string[] = rawSession.amr ?? (rawSession.has2fa ? ["pwd", "mfa"] : ["pwd"]);
-          const sessionData: SessionCacheEntry = { user: safeUser, timestamp: now, amr };
+          const mfaVerifiedAt: string | undefined =
+            rawSession.mfaVerifiedAt ??
+            (amr.includes("mfa") ? new Date().toISOString() : undefined);
+          const sessionData: SessionCacheEntry = {
+            user: safeUser,
+            timestamp: now,
+            amr,
+            mfaVerifiedAt,
+          };
           setSessionInCache(sessionId, sessionData);
           const cacheKey = tenantId ? `session:${tenantId}:${sessionId}` : `session:${sessionId}`;
           await cacheService
             .set(cacheKey, sessionData, Math.ceil(SESSION_CACHE_TTL_MS / 1000), tenantId as any)
             .catch((err: any) => logger.warn(`Session cache set failed: ${err.message}`));
-          return { status: "ok", user: safeUser, amr };
+          return { status: "ok", user: safeUser, amr, mfaVerifiedAt };
         } else {
           // Definitive: User not found in DB
           logger.debug(`[Auth] User not found in DB: ${sessionResult.data.user_id}`);
@@ -972,6 +1005,7 @@ export const handleAuthentication: Handle = async ({ event, resolve }) => {
           locals.user = user;
           locals.session_id = sessionId as DatabaseId;
           locals.sessionAmr = resolution.amr;
+          locals.mfaVerifiedAt = resolution.mfaVerifiedAt;
           locals.permissions = user.permissions || [];
           if (user._id) {
             void cacheService.set(`layout:user:${user._id}`, user, 15, locals.tenantId as string);
@@ -1381,6 +1415,7 @@ export function primeSessionMemoryCache(
   user: User,
   tenantId?: DatabaseId | null,
   amr?: string[],
+  mfaVerifiedAt?: string,
 ): void {
   // Targeted negative-entry removal (the session is now known-valid) — never
   // clear the whole negative cache for one session.
@@ -1388,7 +1423,7 @@ export function primeSessionMemoryCache(
   // Credential-free snapshot — the in-memory cache must never hold password
   // hashes, TOTP secrets, backup codes, or reset/refresh tokens.
   const safeUser = toSafeSessionUser(user);
-  const entry: SessionCacheEntry = { user: safeUser, timestamp: Date.now(), amr };
+  const entry: SessionCacheEntry = { user: safeUser, timestamp: Date.now(), amr, mfaVerifiedAt };
   setSessionInCache(sessionId, entry);
   const resolvedTenant = tenantId ?? (safeUser as User).tenantId ?? null;
   setTurboAuthContext(sessionId, safeUser, [], new Uint32Array(1), resolvedTenant);

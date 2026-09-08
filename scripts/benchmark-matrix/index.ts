@@ -234,7 +234,6 @@ const SKIP_IN_MATRIX = new Set([
   "circuit-breaker-failover",
   "chaos-resilience",
   "data-residency-failover",
-  "right-to-be-forgotten-audit",
   "database-failover",
 ]);
 
