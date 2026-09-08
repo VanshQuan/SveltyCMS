@@ -34,27 +34,28 @@ Field sets **vary by product version**; tests assert group navigation and shell 
 
 ## Control → test matrix
 
-| Control                                         | Unit                    | Integration         | E2E                       |
-| ----------------------------------------------- | ----------------------- | ------------------- | ------------------------- |
-| Permission gate (admin / config:settings / 403) | ✅ page.server          | settings API        | RBAC suite                |
-| Group catalog unique ids + adminOnly filter     | ✅ settings-groups      | —                   | —                         |
-| CSRF header builder (`remoteJsonHeaders`)       | ✅ settings-utils       | —                   | —                         |
-| Field validation / empty-config / import parse  | ✅ settings-utils       | —                   | —                         |
-| Page shell + title                              | —                       | —                   | ✅                        |
-| In-page group nav + search                      | —                       | —                   | ✅                        |
-| Switch group updates URL + panel                | —                       | —                   | ✅                        |
-| Unknown group recovery UI                       | —                       | —                   | ✅                        |
-| Save disabled when clean                        | —                       | —                   | ✅                        |
-| Field testids (`settings-field-*`)              | —                       | —                   | ✅                        |
-| Edit enables save; discard restores clean       | —                       | —                   | ✅                        |
-| Happy path: edit → save → reload persists       | —                       | —                   | ✅                        |
-| Export / Import / Reset / Discard controls      | —                       | —                   | ✅                        |
-| Cache repair button                             | —                       | —                   | ✅ present on cache group |
-| GDPR special panel                              | —                       | —                   | ✅                        |
-| MT Check Structure                              | —                       | —                   | ✅                        |
-| Settings PUT/DELETE CSRF                        | settings.remote → utils | settings.test.ts    | —                         |
-| Export/import API                               | —                       | ✅ settings.test.ts | —                         |
-| Admin-only tenant structure detect              | admin.remote            | —                   | —                         |
+| Control                                                             | Unit                    | Integration         | E2E                       |
+| ------------------------------------------------------------------- | ----------------------- | ------------------- | ------------------------- |
+| Permission gate (admin / config:settings / 403)                     | ✅ page.server          | settings API        | RBAC suite                |
+| Group catalog unique ids + adminOnly filter                         | ✅ settings-groups      | —                   | —                         |
+| CSRF header builder (`remoteJsonHeaders`)                           | ✅ settings-utils       | —                   | —                         |
+| Field validation / empty-config / import parse                      | ✅ settings-utils       | —                   | —                         |
+| Page shell + title                                                  | —                       | —                   | ✅                        |
+| In-page group nav + search                                          | —                       | —                   | ✅                        |
+| Switch group updates URL + panel                                    | —                       | —                   | ✅                        |
+| Unknown group recovery UI                                           | —                       | —                   | ✅                        |
+| Save disabled when clean                                            | —                       | —                   | ✅                        |
+| Field testids (`settings-field-*`)                                  | —                       | —                   | ✅                        |
+| Languages group: `LOCALES` / `BASE_LOCALE` ISO picker + Inlang save | ✅ settings-groups      | —                   | —                         |
+| Edit enables save; discard restores clean                           | —                       | —                   | ✅                        |
+| Happy path: edit → save → reload persists                           | —                       | —                   | ✅                        |
+| Export / Import / Reset / Discard controls                          | —                       | —                   | ✅                        |
+| Cache repair button                                                 | —                       | —                   | ✅ present on cache group |
+| GDPR special panel                                                  | —                       | —                   | ✅                        |
+| MT Check Structure                                                  | —                       | —                   | ✅                        |
+| Settings PUT/DELETE CSRF                                            | settings.remote → utils | settings.test.ts    | —                         |
+| Export/import API                                                   | —                       | ✅ settings.test.ts | —                         |
+| Admin-only tenant structure detect                                  | admin.remote            | —                   | —                         |
 
 ---
 

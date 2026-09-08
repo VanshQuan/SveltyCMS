@@ -6,7 +6,7 @@ order: 8
 icon: "mdi:translate"
 author: "SveltyCMS Team"
 created: "2025-11-02"
-updated: "2026-03-27"
+updated: "2026-09-08"
 tags:
   - "architecture"
   - "i18n"
@@ -68,15 +68,19 @@ graph TB
 - ✅ Zero runtime overhead
 - ✅ Perfect for admin UI that doesn't change often
 
-**Available Languages:**
+**Available Languages (default ship):** `en`, `de`
 
 ```
 // project.inlang/settings.json
 {
-  "languageTags": ["en", "de", "fr", "es"],
-  "baseLanguageTag": "en"
+  "baseLocale": "en",
+  "locales": ["en", "de"],
+  "sourceLanguageTag": "en",
+  "languageTags": ["en", "de"]
 }
 ```
+
+Setup and System Settings can add any ISO 639-1 code. New locales are appended here, then machine-translated. See [System Languages guide](../../guides/configuration/system-languages.mdx).
 
 ### 2. Content Language (`contentLanguage`)
 
@@ -118,43 +122,20 @@ Source Files → ParaglideJS Compiler → Type-Safe Messages → Runtime
 ### Message Files Structure
 
 ```
-src/
-├── paraglide/
-│   ├── messages/
-│   │   ├── en.json          # English (base)
-│   │   ├── de.json          # German
-│   │   ├── fr.json          # French
-│   │   └── es.json          # Spanish
-│   └── messages.js          # Generated type-safe exports
+src/messages/en.json          # English source catalog (edit this)
+src/messages/de.json          # German (bundled)
+src/messages/{locale}.json    # Extra locales (machine-translated or community)
+src/paraglide/                # Generated — do not edit
 ```
 
 ### Message File Example
 
 ```
-// src/paraglide/messages/en.json
+// src/messages/en.json
 {
-  "dashboard_title": "Dashboard",
-  "collections_menu": "Collections",
-  "media_menu": "Media Library",
-  "settings_menu": "Settings",
-  "user_greeting": "Hello, {name}!",
-  "save_button": "Save Changes",
-  "cancel_button": "Cancel",
-  "delete_confirm": "Are you sure you want to delete {itemName}?"
-}
-```
-
-```
-// src/paraglide/messages/de.json
-{
-  "dashboard_title": "Übersicht",
-  "collections_menu": "Sammlungen",
-  "media_menu": "Medienbibliothek",
-  "settings_menu": "Einstellungen",
-  "user_greeting": "Hallo, {name}!",
-  "save_button": "Änderungen speichern",
-  "cancel_button": "Abbrechen",
-  "delete_confirm": "Sind Sie sicher, dass Sie {itemName} löschen möchten?"
+  "button_save": "Save",
+  "button_cancel": "Cancel",
+  "applayout_systemlanguage": "System Language"
 }
 ```
 
@@ -186,17 +167,15 @@ src/
 1. **Type Safety:** TypeScript knows all available translation keys
 
    ```
-   m.dashboard_title(); // ✅ Valid
-   m.nonexistent_key(); // ❌ TypeScript error
+   m.dashboard_title(); // Valid
+   m.nonexistent_key(); // TypeScript error
    ```
-
-````
 
 2. **Tree Shaking:** Only used messages are bundled
 
    ```typescript
    // If you never use m.old_unused_message(), it's not in the bundle
-````
+   ```
 
 3. **Parameter Validation:** Type-checked parameters
 
@@ -207,43 +186,18 @@ src/
 
 4. **Build-Time Compilation:** No runtime parsing overhead
 
-### Adding New System Language
+### Adding a New System Language
 
-1. **Add language to ParaglideJS config:**
+**Preferred:** add the ISO code in Setup → System Languages, or later in **Config → System Settings → Languages & Localization** (`LOCALES` / `BASE_LOCALE`). Saving writes `project.inlang/settings.json` and runs `bun translate` then `bun run paraglide`.
 
-   ```json
-   // project.inlang/settings.json
-   {
-     "languageTags": ["en", "de", "fr", "es", "it"], // Added 'it'
-     "baseLanguageTag": "en"
-   }
-   ```
+**Manual / community:**
 
-2. **Create message file:**
+1. Add the code to `project.inlang/settings.json` `locales` and `languageTags`.
+2. `bun translate` — Inlang machine-fills `src/messages/{locale}.json`.
+3. `bun run paraglide` — compile type-safe messages.
+4. Review the catalog and open a GitHub PR, or edit in [Fink](https://fink.inlang.com/github.com/SveltyCMS/SveltyCMS).
 
-   ```bash
-   cp src/paraglide/messages/en.json src/paraglide/messages/it.json
-   # Edit it.json with Italian translations
-   ```
-
-3. **Rebuild application:**
-
-   ```bash
-   npm run build
-   # or
-   npm run dev
-   ```
-
-4. **Update language switcher UI:**
-   ```svelte
-   <select bind:value={app.systemLanguage}>
-   	<option value="en">English</option>
-   	<option value="de">Deutsch</option>
-   	<option value="fr">Français</option>
-   	<option value="es">Español</option>
-   	<option value="it">Italiano</option>
-   </select>
-   ```
+The language switcher reads configured `LOCALES` plus bundled Paraglide locales. RTL uses `getTextDirection()` from `@utils/string` (not a hardcoded `<select>`). Until a catalog is compiled, the UI stays in English and still sets `html lang` + `dir`.
 
 ---
 

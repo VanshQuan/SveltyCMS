@@ -366,6 +366,25 @@ export async function completeSetup(
           ...opts,
           category: "public",
         });
+      if (system.systemLanguages?.length) {
+        try {
+          const { syncInlangSystemLocales } = await import("./sync-inlang-locales.server");
+          const inlang = await syncInlangSystemLocales(system.systemLanguages);
+          if (inlang.added.length) {
+            logger.info(
+              `[Setup] Inlang locales added: ${inlang.added.join(", ")} (translated=${inlang.translated}, compiled=${inlang.compiled})`,
+            );
+          }
+          if (inlang.error) {
+            logger.warn("[Setup] Inlang catalog sync warning:", inlang.error);
+          }
+        } catch (e) {
+          logger.warn(
+            "[Setup] Inlang catalog sync failed (setup continues with EN/DE catalogs):",
+            e,
+          );
+        }
+      }
       if (system.defaultContentLanguage)
         await p.set("DEFAULT_CONTENT_LANGUAGE", system.defaultContentLanguage, {
           ...opts,

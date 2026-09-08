@@ -38,6 +38,8 @@
 		setup_step_system_desc
 	} from '@src/paraglide/messages';
 	import { locales as availableLocales, getLocale } from '@src/paraglide/runtime';
+	import { systemLanguage } from '@src/stores/locale-store.svelte';
+	import { applySystemLanguage, mergeSystemLanguages } from '@utils/system-locale';
 	import { setupStore } from '@src/stores/setup-store.svelte.ts';
 	// Utils
 	import { getLanguageName } from '@utils/language-utils';
@@ -156,7 +158,9 @@
 		return JSON.stringify(wizard) !== initialDataSnapshot;
 	});
 	const systemLanguages = $derived.by(() => {
-		return [...availableLocales].sort((a: string, b: string) => getLanguageName(a, 'en').localeCompare(getLanguageName(b, 'en')));
+		return mergeSystemLanguages(wizard.systemSettings.systemLanguages, availableLocales).sort((a: string, b: string) =>
+			getLanguageName(a, 'en').localeCompare(getLanguageName(b, 'en'))
+		);
 	});
 	const isFullUri = $derived(() => {
 		return wizard.dbConfig.host.includes('mongodb://') || wizard.dbConfig.host.includes('mongodb+srv://');
@@ -256,8 +260,9 @@
 
 	// --- 7. UI HANDLERS ---
 	function selectLanguage(lang: string) {
-		app.systemLanguage = lang as import('@src/paraglide/runtime').Locale;
-		currentLanguageTag = lang as typeof currentLanguageTag;
+		systemLanguage.set(lang);
+		currentLanguageTag = lang;
+		applySystemLanguage(lang);
 	}
 </script>
 

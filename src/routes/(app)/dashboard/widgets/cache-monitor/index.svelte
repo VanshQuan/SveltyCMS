@@ -38,6 +38,19 @@ export const widgetMeta = {
 	import type { WidgetSize } from '@src/content/types';
 	import BaseWidget from '../../base-widget.svelte';
 	import { formatNumber } from '@utils/format-date';
+	import {
+		dashboard_cache_evictions,
+		dashboard_cache_hit_rate,
+		dashboard_cache_hits,
+		dashboard_cache_metrics_flow,
+		dashboard_cache_misses,
+		dashboard_cache_no_data,
+		dashboard_cache_overall,
+		dashboard_cache_sets,
+		dashboard_ext_premium,
+		dashboard_ext_trial_expired,
+		dashboard_ext_upgrade_arrow
+	} from '@src/paraglide/messages';
 
 	interface CacheStat {
 		hits: number;
@@ -106,9 +119,9 @@ export const widgetMeta = {
 	>
 		<div class="flex h-full flex-col items-center justify-center text-center px-4 bg-surface-500/10 dark:bg-surface-800/50 rounded-lg">
 			<iconify-icon icon="mdi:lock-outline" class="text-4xl text-warning-500 mb-2"></iconify-icon>
-			<h3 class="text-sm font-semibold text-surface-600 dark:text-surface-400">Premium Extension</h3>
-			<p class="text-xs text-surface-500 mt-1 mb-3">Your 14-day trial for this extension has expired. A valid LICENSE_KEY is required.</p>
-			<a href="https://marketplace.sveltycms.com" target="_blank" class="text-xs font-medium text-primary-600 hover:text-primary-600 dark:text-primary-500">Upgrade License &rarr;</a>
+			<h3 class="text-sm font-semibold text-surface-600 dark:text-surface-400">{dashboard_ext_premium()}</h3>
+			<p class="text-xs text-surface-500 mt-1 mb-3">{dashboard_ext_trial_expired()}</p>
+			<a href="https://marketplace.sveltycms.com" target="_blank" class="text-xs font-medium text-primary-600 hover:text-primary-600 dark:text-primary-500">{dashboard_ext_upgrade_arrow()}</a>
 		</div>
 	</BaseWidget>
 {:else}
@@ -131,8 +144,8 @@ export const widgetMeta = {
 			<!-- ===== Empty / Loading ===== -->
 			<div class="flex h-full flex-col items-center justify-center text-center">
 				<iconify-icon icon="mdi:cached" class="text-4xl opacity-20 mb-3" ></iconify-icon>
-				<div class="text-sm font-medium text-surface-500">No cache data</div>
-				<div class="text-xs text-surface-400 mt-1">Metrics will appear as traffic flows</div>
+				<div class="text-sm font-medium text-surface-500">{dashboard_cache_no_data()}</div>
+				<div class="text-xs text-surface-400 mt-1">{dashboard_cache_metrics_flow()}</div>
 			</div>
 		{:else if isCompact}
 			{const o = cache.overall}
@@ -143,7 +156,7 @@ export const widgetMeta = {
 					<span class="text-lg font-bold tabular-nums {hitRateClass(o.hitRate)}">
 						{o.hitRate.toFixed(0)}%
 					</span>
-					<span class="text-xs text-surface-500">hit rate</span>
+					<span class="text-xs text-surface-500">{dashboard_cache_hit_rate()}</span>
 				</div>
 
 				<div class="h-5 w-px shrink-0 bg-surface-200 dark:bg-surface-700"></div>
@@ -158,10 +171,10 @@ export const widgetMeta = {
 				<!-- Inline stats -->
 				<div class="flex items-center gap-3 text-xs">
 					<span class="tabular-nums text-surface-500">
-						<span class="text-success-500 font-medium">{fmtNum(o.hits)}</span> hits
+						<span class="text-success-500 font-medium">{fmtNum(o.hits)}</span> {dashboard_cache_hits().toLowerCase()}
 					</span>
 					<span class="tabular-nums text-surface-500">
-						<span class="text-error-500 font-medium">{fmtNum(o.misses)}</span> misses
+						<span class="text-error-500 font-medium">{fmtNum(o.misses)}</span> {dashboard_cache_misses().toLowerCase()}
 					</span>
 					<span class="tabular-nums font-medium text-tertiary-500">{fmtSize(o.size)}</span>
 				</div>
@@ -173,7 +186,7 @@ export const widgetMeta = {
 				<!-- Overall Summary -->
 				<div class="rounded-2xl bg-surface-500/10 p-3 dark:bg-surface-800">
 					<div class="flex items-center justify-between mb-2">
-						<span class="text-xs font-semibold uppercase tracking-wider text-surface-400">Overall</span>
+						<span class="text-xs font-semibold uppercase tracking-wider text-surface-400">{dashboard_cache_overall()}</span>
 						<span class="text-xs font-medium text-tertiary-500 tabular-nums">{fmtSize(o.size)}</span>
 					</div>
 
@@ -181,7 +194,7 @@ export const widgetMeta = {
 						<span class="text-2xl font-semibold tabular-nums {hitRateClass(o.hitRate)}">
 							{o.hitRate.toFixed(1)}%
 						</span>
-						<span class="text-xs text-surface-400">hit rate</span>
+						<span class="text-xs text-surface-400">{dashboard_cache_hit_rate()}</span>
 					</div>
 
 					<div class="h-2.5 w-full overflow-hidden rounded-full bg-surface-200 dark:bg-surface-700 mb-3">
@@ -191,19 +204,19 @@ export const widgetMeta = {
 					<div class="grid grid-cols-4 gap-2 text-center text-xs">
 						<div class="rounded bg-surface-500/10 p-1.5 dark:bg-surface-700/50">
 							<div class="font-mono font-semibold text-success-500 tabular-nums">{fmtNum(o.hits)}</div>
-							<div class="text-[10px] text-surface-500">Hits</div>
+							<div class="text-[10px] text-surface-500">{dashboard_cache_hits()}</div>
 						</div>
 						<div class="rounded bg-surface-500/10 p-1.5 dark:bg-surface-700/50">
 							<div class="font-mono font-semibold text-error-500 tabular-nums">{fmtNum(o.misses)}</div>
-							<div class="text-[10px] text-surface-500">Misses</div>
+							<div class="text-[10px] text-surface-500">{dashboard_cache_misses()}</div>
 						</div>
 						<div class="rounded bg-surface-500/10 p-1.5 dark:bg-surface-700/50">
 							<div class="font-mono font-semibold tabular-nums">{fmtNum(o.sets ?? 0)}</div>
-							<div class="text-[10px] text-surface-500">Sets</div>
+							<div class="text-[10px] text-surface-500">{dashboard_cache_sets()}</div>
 						</div>
 						<div class="rounded bg-surface-500/10 p-1.5 dark:bg-surface-700/50">
 							<div class="font-mono font-semibold tabular-nums">{fmtNum(o.deletes ?? 0)}</div>
-							<div class="text-[10px] text-surface-500">Evictions</div>
+							<div class="text-[10px] text-surface-500">{dashboard_cache_evictions()}</div>
 						</div>
 					</div>
 				</div>
@@ -223,8 +236,8 @@ export const widgetMeta = {
 										{s.hitRate.toFixed(1)}%
 									</span>
 									<div class="flex gap-3 text-[11px] text-surface-500">
-										<span>{fmtNum(s.hits)} hits</span>
-										<span>{fmtNum(s.misses)} misses</span>
+										<span>{fmtNum(s.hits)} {dashboard_cache_hits().toLowerCase()}</span>
+										<span>{fmtNum(s.misses)} {dashboard_cache_misses().toLowerCase()}</span>
 									</div>
 								</div>
 

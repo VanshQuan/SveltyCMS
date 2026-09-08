@@ -6,7 +6,7 @@ order: 5
 icon: "mdi:shield-lock"
 author: "SveltyCMS Team"
 created: "2026-05-14"
-updated: "2026-06-26"
+updated: "2026-09-08"
 tags:
   - "security"
   - "auth"
@@ -135,14 +135,14 @@ To prevent memory exhaustion and DoS attacks through oversized payloads:
 
 ## 5. Rate Limiting & DoS Prevention
 
-| Mechanism                | Location                   | Detail                                                                                                 |
-| ------------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------ |
-| **Login brute-force**    | `handle-authentication.ts` | `handle-rate-limit.ts` (`RateLimiter`) — 5 attempts → 15-min lockout (HTTP 423)                        |
-| **API rate limit**       | `handle-rate-limit.ts`     | Per-IP + per-tenant fixed window; **commerce lane** isolated from admin mutations (`X-RateLimit-Lane`) |
-| **WAF endpoint limits**  | `SecurityResponseService`  | `rate-limiter-flexible` per path; `/api/commerce` is 60/min (prefix-matched)                           |
-| **Body size limit**      | `api-handler.ts`           | 10MB cap — returns 413 `PAYLOAD_TOO_LARGE` before parsing                                              |
-| **Memory load shedding** | `hooks.server.ts`          | Rejects mutation traffic (503) when heap > 90%                                                         |
-| **Retry-After header**   | RFC 6585 compliant         | All 429 responses include `Retry-After: 60`                                                            |
+| Mechanism                | Location                   | Detail                                                                                                                  |
+| ------------------------ | -------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| **Login brute-force**    | `handle-authentication.ts` | `handle-rate-limit.ts` (`RateLimiter`) — 5 attempts → 15-min lockout (HTTP 423)                                         |
+| **API rate limit**       | `handle-rate-limit.ts`     | Hardware-aware Token-Bucket (Redis L2 primary + local memory fallback); **commerce lane** isolated (`X-RateLimit-Lane`) |
+| **WAF endpoint limits**  | `SecurityResponseService`  | `rate-limiter-flexible` per path; `/api/commerce` is 60/min (prefix-matched)                                            |
+| **Body size limit**      | `api-handler.ts`           | 10MB cap — returns 413 `PAYLOAD_TOO_LARGE` before parsing                                                               |
+| **Memory load shedding** | `hooks.server.ts`          | Rejects mutation traffic (503) when heap > 90%                                                                          |
+| **Retry-After header**   | RFC 6585 compliant         | All 429 responses include `Retry-After: 60` and `X-RateLimit-*` headers                                                 |
 
 ---
 
@@ -232,6 +232,49 @@ SveltyCMS enforces mandatory multi-factor authentication on a per-role basis:
 - **Endpoint Gate Enforcement**: In `_checkEndpointPermission`, requests made under a mandatory-MFA role that carry non-MFA sessions (`amr: ["pwd"]` or `amr: ["pwd", "trusted_device"]`) are immediately rejected with HTTP 403 `MFA_REQUIRED`.
 - **Exempt Routes**: Self-service 2FA setup/verification (`/api/auth/2fa/*`) and session teardown (`/api/auth/logout`) remain accessible so users can authenticate their factor or safely log out.
 - **Trusted-Device Override**: Device-level trust (`__Host-2fa-trusted-device`) is unconditionally disabled for any user assigned to a role with `mfaRequired: true`. Interactive second factor is required on every login.
+
+---
+
+### 7.4 Hardware-Aware Token-Bucket Rate Limiter & Throttling
+
+To eliminate the 2× traffic spike artifacts inherent in fixed-window rate limiters, SveltyCMS implements a continuous Token-Bucket rate limiting engine in `src/hooks/handle-rate-limit.ts`:
+
+```mermaid
+flowchart TD
+  REQ[Incoming HTTP Request] --> SYNC_AUTH[Sync Session Peeker]
+  SYNC_AUTH --> TIER{User Privilege Tier}
+  TIER -->|Admin| CAP_ADMIN[Capacity Multiplier: 10x]
+  TIER -->|Authenticated| CAP_USER[Capacity Multiplier: 2x]
+  TIER -->|Anonymous| CAP_ANON[Capacity Multiplier: 1x]
+
+  CAP_ADMIN & CAP_USER & CAP_ANON --> HW{SystemMonitor CPU/Lag}
+  HW --> COST[Adjusted Token Cost]
+
+  COST --> REDIS_CHECK{Redis Active & Circuit Closed?}
+  REDIS_CHECK -->|Yes| REDIS_LUA[Atomic Lua Token-Bucket Script <15ms]
+  REDIS_CHECK -->|No / Timeout / Circuit Open| MEM_FALLBACK[Local In-Memory Token Bucket <2µs]
+
+  REDIS_LUA & MEM_FALLBACK --> EVAL{Tokens Available?}
+  EVAL -->|Yes| ALLOW[Allow Request + Append X-RateLimit Headers]
+  EVAL -->|No| REJECT[429 Too Many Requests + Retry-After]
+```
+
+1. **Continuous Token Replenishment**: Rather than resetting counters at minute boundaries, tokens are replenished continuously based on elapsed milliseconds (`refillRatePerMs = capacity / windowMs`). Requests consume tokens based on adjusted cost.
+2. **Distributed Redis L2 Primary**: Multi-node deployments execute an atomic Lua script directly on Redis:
+   - Computes dynamic replenishment and token decrement in a single network round-trip.
+   - Sets key TTL automatically matching the window duration.
+3. **Resilient Circuit-Breaker Fallback**:
+   - Redis commands are constrained by a strict **15 ms timeout**.
+   - On Redis connection failure, timeout, or error, an internal circuit breaker trips with a **5-second backoff**.
+   - Requests immediately fall back to a high-speed, local in-memory Token Bucket (`< 2 µs`), ensuring zero downtime and zero failed requests during Redis outages.
+4. **Adaptive User-Tier Quotas**:
+   - **Administrators**: $10\times$ capacity multiplier to guarantee unblocked CMS operations during batch management.
+   - **Authenticated Users**: $2\times$ capacity multiplier for verified editors and interactive staff.
+   - **Anonymous / Public**: $1\times$ baseline quota protecting against unauthenticated scrapers and brute-force attempts.
+   - Evaluated via a **zero-overhead synchronous session cache peeker** (`peekSessionFromCacheSync`) in `handle-authentication.ts` avoiding circular dependencies and Promise overhead.
+5. **Hardware-Aware Load Shedding**:
+   - Integrates with `SystemMonitor` to measure event loop lag and CPU load.
+   - Under heavy system pressure, token cost scales between $0.8\times$ (idle system) up to $2.0\times$ (saturated host), actively dampening traffic before server responsiveness degrades.
 
 ---
 

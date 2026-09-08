@@ -26,6 +26,16 @@
 	import Button from '@components/ui/button.svelte';
 	import Badge from '@components/ui/badge.svelte';
 	import Input from '@components/ui/input.svelte';
+	import {
+		widget_todo_title,
+		widget_todo_open_count,
+		widget_todo_placeholder,
+		widget_todo_new_task,
+		widget_todo_add_btn,
+		widget_todo_mark_open,
+		widget_todo_mark_done,
+		widget_todo_delete_task
+	} from '@src/paraglide/messages';
 
 	let newTodoText = $state('');
 	let todos = $state<{ id: string; text: string; done: boolean }[]>([
@@ -58,19 +68,19 @@
 	<div class="flex items-center justify-between border-b border-surface-100 dark:border-surface-500/40 pb-3">
 		<div class="flex items-center gap-2">
 			<iconify-icon icon="mdi:checkbox-marked-outline" width="20" class="text-primary-500"></iconify-icon>
-			<h3 class="font-bold text-sm text-surface-900 dark:text-white">Admin TODO List</h3>
+			<h3 class="font-bold text-sm text-surface-900 dark:text-white">{widget_todo_title()}</h3>
 		</div>
-		<Badge variant="primary" size="sm">{todos.filter((t) => !t.done).length} open</Badge>
+		<Badge variant="primary" size="sm">{widget_todo_open_count({ count: todos.filter((t) => !t.done).length })}</Badge>
 	</div>
 
 	<form onsubmit={(e) => { e.preventDefault(); addTodo(); }} class="flex gap-2">
 		<Input
 			bind:value={newTodoText}
-			placeholder="Add a new task..."
+			placeholder={widget_todo_placeholder()}
 			inputClass="w-full px-3 py-1.5 rounded-xl border border-surface-500/30 dark:border-surface-500/40 bg-surface-500/10 dark:bg-surface-900 text-xs text-surface-900 dark:text-white"
-			aria-label="New task"
+			aria-label={widget_todo_new_task()}
 		/>
-		<Button type="submit" variant="primary" size="sm" class="shrink-0">Add</Button>
+		<Button type="submit" variant="primary" size="sm" class="shrink-0">{widget_todo_add_btn()}</Button>
 	</form>
 
 	<div class="space-y-1.5 max-h-48 overflow-y-auto pe-1">
@@ -82,7 +92,7 @@
 					size="sm"
 					onclick={() => toggleTodo(todo.id)}
 					class="flex items-center gap-2 text-start flex-1 cursor-pointer"
-					aria-label={todo.done ? `Mark "${todo.text}" as open` : `Mark "${todo.text}" as done`}
+					aria-label={todo.done ? widget_todo_mark_open({ text: todo.text }) : widget_todo_mark_done({ text: todo.text })}
 				>
 					<iconify-icon icon={todo.done ? 'mdi:check-circle' : 'mdi:checkbox-blank-circle-outline'} width="16" class={todo.done ? 'text-success-500' : 'text-surface-400'}></iconify-icon>
 					<span class={todo.done ? 'line-through text-surface-400' : 'text-surface-600 dark:text-surface-400 font-medium'}>{todo.text}</span>
@@ -93,7 +103,7 @@
 					size="sm"
 					onclick={() => deleteTodo(todo.id)}
 					class="text-surface-400 hover:text-error-500 opacity-0 group-hover:opacity-100 transition-opacity p-1"
-					aria-label={`Delete task "${todo.text}"`}
+					aria-label={widget_todo_delete_task({ text: todo.text })}
 				>
 					<iconify-icon icon="mdi:trash-can-outline" width="14"></iconify-icon>
 				</Button>

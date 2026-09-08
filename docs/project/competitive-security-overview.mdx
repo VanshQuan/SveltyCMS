@@ -4,7 +4,7 @@ title: "Competitive Security Overview"
 description: "An EU-compliant, documentation-based comparison of security and compliance controls across SveltyCMS, Payload CMS, Strapi, and Directus."
 author: "SveltyCMS Team"
 created: "2026-08-25"
-updated: "2026-09-03"
+updated: "2026-09-08"
 tags:
   - "security"
   - "compliance"
@@ -36,18 +36,19 @@ with? How fast do permission changes propagate?_
 
 ## Security model at a glance
 
-| Control                      | SveltyCMS (self-hosted core)                   | Payload CMS                              | Strapi                                                                        | Directus                                              |
-| :--------------------------- | :--------------------------------------------- | :--------------------------------------- | :---------------------------------------------------------------------------- | :---------------------------------------------------- |
-| **Authentication**           | Email/password + WebAuthn (P4 bootstrap) + SSO | Password + plugins                       | Email/password + plugins                                                      | Built-in SSO/OIDC/LDAP                                |
-| **SSO / SAML / OIDC**        | Documented in core (all 3 logout flows)        | Plugin; SAML Enterprise                  | Paid Pro / Enterprise                                                         | Built-in SSO                                          |
-| **Per-role MFA enforcement** | Built-in (`Role.mfaRequired` + session AMR)    | Enterprise / documented                  | Not documented as built-in                                                    | Documented                                            |
-| **SCIM 2.0**                 | Documented in core (RFC 7644)                  | Enterprise tier                          | Enterprise tier                                                               | Enterprise module                                     |
-| **RBAC**                     | Built-in; instant invalidation (<1 ms)         | TTL-based caching                        | TTL-based caching                                                             | TTL-based caching                                     |
-| **Audit logs**               | Built-in, SHA-256 chained (tamper-evident)     | Enterprise tier                          | Plugin / Enterprise tier                                                      | Activity log; audit Enterprise                        |
-| **Session hardening**        | `__Host-` cookie prefix + per-origin tokens    | Built-in                                 | Built-in                                                                      | Built-in                                              |
-| **API key security**         | HMAC-SHA-256 (v2) with server secret           | SHA-256 hashing                          | SHA-256 hashing                                                               | SHA-256 hashing                                       |
-| **Field-level encryption**   | Native `encrypt: true` AES-256-GCM in core     | Hooks / marketplace plugin (public docs) | Marketplace plugin; dashboard data not auto-encrypted (public security guide) | Client-responsible; extensions (public security page) |
-| **Collection ETag / 304**    | Weak generation ETag; DB-free 304 on match     | HTTP caching via app/CDN (public docs)   | HTTP caching via app/CDN (public docs)                                        | Cache headers / CDN (public docs)                     |
+| Control                      | SveltyCMS (self-hosted core)                                     | Payload CMS                              | Strapi                                                                        | Directus                                              |
+| :--------------------------- | :--------------------------------------------------------------- | :--------------------------------------- | :---------------------------------------------------------------------------- | :---------------------------------------------------- |
+| **Authentication**           | Email/password + WebAuthn (P4 bootstrap) + SSO                   | Password + plugins                       | Email/password + plugins                                                      | Built-in SSO/OIDC/LDAP                                |
+| **SSO / SAML / OIDC**        | Documented in core (all 3 logout flows)                          | Plugin; SAML Enterprise                  | Paid Pro / Enterprise                                                         | Built-in SSO                                          |
+| **Per-role MFA enforcement** | Built-in (`Role.mfaRequired` + session AMR)                      | Enterprise / documented                  | Not documented as built-in                                                    | Documented                                            |
+| **SCIM 2.0**                 | Documented in core (RFC 7644)                                    | Enterprise tier                          | Enterprise tier                                                               | Enterprise module                                     |
+| **RBAC**                     | Built-in; instant invalidation (<1 ms)                           | TTL-based caching                        | TTL-based caching                                                             | TTL-based caching                                     |
+| **Audit logs**               | Built-in, SHA-256 chained (tamper-evident)                       | Enterprise tier                          | Plugin / Enterprise tier                                                      | Activity log; audit Enterprise                        |
+| **Session hardening**        | `__Host-` cookie prefix + per-origin tokens                      | Built-in                                 | Built-in                                                                      | Built-in                                              |
+| **API key security**         | HMAC-SHA-256 (v2) with server secret                             | SHA-256 hashing                          | SHA-256 hashing                                                               | SHA-256 hashing                                       |
+| **Field-level encryption**   | Native `encrypt: true` AES-256-GCM (< 18 µs, zero-tax)           | Hooks / marketplace plugin (public docs) | Marketplace plugin; dashboard data not auto-encrypted (public security guide) | Client-responsible; extensions (public security page) |
+| **Rate limiting & DoS**      | Built-in Token-Bucket (Redis L2 + local memory fallback + tiers) | Not documented as built-in               | Rate limit plugin (public docs)                                               | Rate limit plugin (public docs)                       |
+| **Collection ETag / 304**    | Weak generation ETag; DB-free 304 on match                       | HTTP caching via app/CDN (public docs)   | HTTP caching via app/CDN (public docs)                                        | Cache headers / CDN (public docs)                     |
 
 > Tier/packaging claims are from public vendor pricing pages (July 2026) and
 > reflect where a feature is **placed** (free core vs. paid tier), not the
@@ -72,16 +73,15 @@ with? How fast do permission changes propagate?_
   protected admin/API resources. Trusted-device logins are tagged with `amr: ["pwd", "trusted_device"]`
   and automatically require step-up authentication (`STEP_UP_MFA_REQUIRED`) for high-privilege
   administrative operations, lifting device trust directly to the session MFA level.
+- **Distributed Token-Bucket rate limiting & adaptive throttling** — continuous token replenishment with Redis L2 primary via atomic Lua script (15ms timeout), automatic instantaneous circuit-breaker fallback to local memory (< 2 µs), adaptive user quotas (Admin 10x, Authenticated 2x, Anonymous 1x), and real-time hardware pressure scaling (0.8x–2.0x). Self-described, September 2026. See [API Security](../reference/security/api-security.mdx).
 - **Streamed collection export** — `GET /api/collections/{id}/export` streams
   NDJSON, CSV, or chunked JSON from database cursors / paged SQL reads so the
   process does not hold the full export in memory. Self-described, September 2026.
 - **Collection ETag / 304** — `GET /api/collections/{id}` documents a weak
   collection-generation ETag (`W/"cv1|…"`). Matching `If-None-Match` returns 304
   before the collections handler (no database query). Self-described, September 2026.
-- **Field-level encryption at rest** — collection fields flagged `encrypt: true` are stored as
-  AES-256-GCM envelopes (`v1:iv:tag:ciphertext`) using `ENCRYPTION_KEY`. Writes fail closed
-  without the key; reads decrypt a clone so L1/L2 caches keep ciphertext. See
-  [Field-Level Encryption](../reference/security/field-level-encryption.mdx).
+- **Field-level encryption at rest (ALE)** — collection fields flagged `encrypt: true` are stored as
+  AES-256-GCM envelopes (`v1:iv:tag:ciphertext`) using `ENCRYPTION_KEY` with HKDF-SHA-256 domain separation and AAD binding. Pure synchronous execution paths (`encryptFieldValueSync`) achieve <18 µs encryption time and <3% write duration overhead on benchmarked workloads (`tests/benchmarks/ale-encryption-impact.test.ts`), strictly satisfying the <5% write overhead tolerance gate. See [Field-Level Encryption](../reference/security/field-level-encryption.mdx) and [ALE Benchmark](../benchmarks/encryption_impact.mdx).
 
 ### Payload CMS
 

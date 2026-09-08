@@ -63,15 +63,38 @@ Features:
 		setup_system_site_name_placeholder,
 		setup_system_timezone,
 		setup_db_test_redis_button,
-		setup_db_test_redis_success
+		setup_db_test_redis_success,
+		setup_badge_rtl,
+		setup_badge_translated,
+		setup_badge_english_ui,
+		setup_system_lang_primary_help,
+		setup_content_lang_primary_help,
+		setup_search_languages,
+		setup_select_system_language,
+		setup_select_content_language,
+		setup_select_timezone,
+		setup_aria_add_system_language,
+		setup_aria_add_content_language,
+		setup_aria_search_system_languages,
+		setup_aria_search_content_languages,
+		setup_help_site_name_aria,
+		setup_help_host_prod_aria,
+		setup_help_timezone_aria,
+		setup_help_default_system_language_aria,
+		setup_help_system_languages_aria,
+		setup_help_default_content_language_aria,
+		setup_help_content_languages_aria,
+		setup_note_machine_translate
 	} from '@src/paraglide/messages';
-	import { locales as systemLocales } from '@src/paraglide/runtime';
 	//  Import types from the store
 	import type { ValidationErrors } from '@src/stores/setup-store.svelte.ts';
 	import { setupStore } from '@src/stores/setup-store.svelte.ts';
 	import { systemSettingsSchema } from '@utils/schemas';
 	import iso6391 from '@utils/iso639-1.json';
 	import { getLanguageName } from '@utils/language-utils';
+	import { getTextDirection } from '@utils/string';
+	import { BUNDLED_SYSTEM_LOCALES, isCompiledSystemLocale, isIso6391LanguageCode, languageBase } from '@utils/system-locale';
+	import { logger } from '@utils/logger';
 	import { safeParse } from 'valibot';
 	// Components
 	import PresetSelector from './preset-selector.svelte';
@@ -81,8 +104,6 @@ Features:
 
 	// --- PROPS ---
 	let { systemSettings = $bindable(), validationErrors, redisAvailable } = $props();
-
-	const availableLanguages: string[] = [...systemLocales];
 
 	import { SvelteSet } from 'svelte/reactivity';
 
@@ -153,8 +174,8 @@ Features:
 		systemPickerSearch = '';
 	}
 	function addSystemLanguage(code: string) {
-		const c = code.toLowerCase();
-		if (!availableLanguages.includes(c)) {
+		const c = languageBase(code);
+		if (!isCompiledSystemLocale(c)) {
 			return;
 		}
 		if (!systemSettings.systemLanguages.includes(c)) {
@@ -181,6 +202,10 @@ Features:
 	function onSystemPickerKey(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
 			closeSystemPicker();
+		}
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			addSystemLanguage(systemPickerSearch.trim());
 		}
 	}
 
@@ -215,7 +240,7 @@ Features:
 				systemSettings.defaultContentLanguage = c;
 			}
 		}
-		closeSystemPicker();
+		closeContentPicker();
 	}
 	$effect(() => {
 		if (!showContentPicker) {
@@ -270,11 +295,17 @@ Features:
 	});
 
 	// Derived available suggestions
-	let systemAvailable = $state<string[]>([]);
+	let systemAvailable = $state<{ code: string; name: string; native: string }[]>([]);
 	let contentAvailable = $state<{ code: string; name: string; native: string }[]>([]);
 	$effect(() => {
-		systemAvailable = availableLanguages.filter(
-			(l: string) => !systemSettings.systemLanguages.includes(l) && l.toLowerCase().includes(systemPickerSearch.toLowerCase())
+		const systemSearch = systemPickerSearch.toLowerCase();
+		systemAvailable = iso6391.filter(
+			(lang) =>
+				isCompiledSystemLocale(lang.code) &&
+				!systemSettings.systemLanguages.includes(lang.code) &&
+				(lang.code.toLowerCase().includes(systemSearch) ||
+					lang.name.toLowerCase().includes(systemSearch) ||
+					lang.native.toLowerCase().includes(systemSearch))
 		);
 		const search = contentPickerSearch.toLowerCase();
 		contentAvailable = iso6391.filter(
@@ -359,7 +390,7 @@ Features:
 						<iconify-icon icon="mdi:web" width="18" class="text-tertiary-500 dark:text-primary-500" aria-hidden="true"></iconify-icon>
 						<span class="text-surface-900 dark:text-surface-50">{setup_system_site_name?.() || 'CMS Name'}</span>
 						<SystemTooltip title={setup_help_site_name()}>
-							<HelpIcon ariaLabel="Help: Site Name" />
+							<HelpIcon ariaLabel={setup_help_site_name_aria()} />
 						</SystemTooltip>
 					</label>
 
@@ -380,7 +411,7 @@ Features:
 						<iconify-icon icon="mdi:earth" width="18" class="text-tertiary-500 dark:text-primary-500" aria-hidden="true"></iconify-icon>
 						<span class="text-surface-900 dark:text-surface-50">{setup_system_host_prod?.() || 'Production URL'}</span>
 						<SystemTooltip title={setup_help_host_prod?.() || 'The production URL...'}>
-							<HelpIcon ariaLabel="Help: Production URL" />
+							<HelpIcon ariaLabel={setup_help_host_prod_aria()} />
 						</SystemTooltip>
 					</label>
 
@@ -401,7 +432,7 @@ Features:
 							<iconify-icon icon="mdi:clock-outline" width="18" class="text-tertiary-500 dark:text-primary-500" aria-hidden="true"></iconify-icon>
 							<span class="text-surface-900 dark:text-surface-50">{setup_system_timezone?.() || 'Timezone'}</span>
 							<SystemTooltip title={setup_help_timezone?.() || 'Default system timezone'}>
-								<HelpIcon ariaLabel="Help: Timezone" />
+								<HelpIcon ariaLabel={setup_help_timezone_aria()} />
 							</SystemTooltip>
 						</label>
 
@@ -420,7 +451,7 @@ Features:
 									variant="outline"
 									class="w-full h-10 justify-between border-(--admin-border-default) bg-(--admin-bg-input) text-(--admin-text-body) font-normal px-3 py-2"
 								>
-									<span class="truncate text-sm">{systemSettings.timezone || 'Select timezone...'}</span>
+									<span class="truncate text-sm">{systemSettings.timezone || setup_select_timezone()}</span>
 									<iconify-icon icon="mdi:chevron-down" width="16" class="ms-auto shrink-0 text-surface-400"></iconify-icon>
 								</Button>
 							{/snippet}
@@ -500,24 +531,24 @@ Features:
 						<iconify-icon icon="mdi:translate" width="18" class="text-tertiary-500 dark:text-primary-500" aria-hidden="true"></iconify-icon>
 						<span class="text-surface-900 dark:text-surface-50">{setup_label_default_system_language?.() || 'Default System Language'}</span>
 						<SystemTooltip title={setup_help_default_system_language()}>
-							<HelpIcon ariaLabel="Help: Default System Language" />
+							<HelpIcon ariaLabel={setup_help_default_system_language_aria()} />
 						</SystemTooltip>
 					</label>
 
-					<p class="text-[10px] text-surface-500 dark:text-white/40" id="system-lang-help">Select the primary language for the admin interface.</p>
+					<p class="text-[10px] text-surface-500 dark:text-white/40" id="system-lang-help">{setup_system_lang_primary_help()}</p>
 
 					<Select
 						id="default-system-lang"
 						bind:value={systemSettings.defaultSystemLanguage}
 						options={systemLanguageOptions}
-						placeholder="Select system language..."
+						placeholder={setup_select_system_language()}
 					/>
 					<div>
 						<div class="mb-1 flex items-center gap-1 text-sm font-medium tracking-wide">
 							<iconify-icon icon="mdi:translate-variant" width="14" class="text-tertiary-500 dark:text-primary-500" aria-hidden="true"></iconify-icon>
 							<span class="text-surface-900 dark:text-surface-50">{setup_label_system_languages?.() || 'System Languages'}</span>
 							<SystemTooltip title={setup_help_system_languages()}>
-								<HelpIcon ariaLabel="Help: System Languages" />
+								<HelpIcon ariaLabel={setup_help_system_languages_aria()} />
 							</SystemTooltip>
 						</div>
 
@@ -529,6 +560,14 @@ Features:
 									class="group dark:preset-filled-primary-500"
 								>
 									<span class="text-xs font-medium">{displayLang(lang)}</span>
+									{#if getTextDirection(lang) === 'rtl'}
+										<span class="text-[9px] font-bold uppercase opacity-80">{setup_badge_rtl()}</span>
+									{/if}
+									{#if isCompiledSystemLocale(lang)}
+										<span class="text-[9px] font-bold uppercase opacity-80">{setup_badge_translated()}</span>
+									{:else}
+										<span class="text-[9px] font-bold uppercase opacity-80">{setup_badge_english_ui()}</span>
+									{/if}
 									{#if systemSettings.systemLanguages.length > 1}
 										<Button
 											variant="transparent"
@@ -542,11 +581,11 @@ Features:
 									{/if}
 								</Badge>
 							{/each}
-							{#if systemAvailable.length}
+							{#if (BUNDLED_SYSTEM_LOCALES as readonly string[]).filter((c) => !systemSettings.systemLanguages.includes(c)).length > 0}
 								<Button variant="surface"
 									type="button"
 									onclick={openSystemPicker}
-									aria-label="add-system-language"
+									aria-label={setup_aria_add_system_language()}
 									aria-haspopup="dialog"
 									aria-expanded={showSystemPicker}
 									aria-controls="system-lang-picker"
@@ -562,14 +601,14 @@ Features:
 									id="system-lang-picker"
 									class="absolute inset-s-0 top-full z-20 mt-2 w-64 rounded border border-surface-500/30 dark:border-white/10 bg-white dark:bg-surface-800 p-2 shadow-xl"
 									role="dialog"
-									aria-label="Add system language"
+									aria-label={setup_aria_add_system_language()}
 									tabindex="-1"
 									onkeydown={onSystemPickerKey}
 								>
 									<Input
 										id="system-lang-search"
-										aria-label="search-system-languages"
-										placeholder="Search..."
+										aria-label={setup_aria_search_system_languages()}
+										placeholder={setup_search_languages()}
 										bind:value={systemPickerSearch}
 										inputClass="text-xs py-1"
 										class="mb-2"
@@ -578,15 +617,20 @@ Features:
 										{#if systemAvailable.length === 0}
 											<p class="px-1 py-2 text-center text-[11px] text-surface-400 dark:text-white/40">{setup_help_no_matches?.() || 'No matches'}</p>
 										{/if}
-										{#each systemAvailable as sug (sug)}
+										{#each systemAvailable as sug (sug.code)}
 											<Button
 												variant="transparent"
 												type="button"
 												class="flex w-full! items-center justify-between! rounded px-2! py-1! h-auto! text-start text-xs font-normal! hover:bg-tertiary-500/10 dark:hover:bg-tertiary-500 dark:bg-primary-500/10"
-												onclick={() => addSystemLanguage(sug)}
-												aria-label="Add language: {displayLang(sug)}"
+												onclick={() => addSystemLanguage(sug.code)}
+												aria-label="Add language: {sug.name}"
 											>
-												<span class="text-surface-900 dark:text-surface-50">{displayLang(sug)}</span>
+												<span class="text-surface-900 dark:text-surface-50"
+													>{sug.name} ({sug.code.toUpperCase()}) <span class="text-surface-500 dark:text-white/40">- {sug.native}</span></span
+												>
+												{#if getTextDirection(sug.code) === 'rtl'}
+													<span class="text-[9px] font-bold uppercase text-tertiary-500 dark:text-primary-500">{setup_badge_rtl()}</span>
+												{/if}
 												<iconify-icon icon="mdi:plus-circle-outline" width="14" class="text-tertiary-500 dark:text-primary-500" aria-hidden="true"
 												></iconify-icon>
 											</Button>
@@ -595,6 +639,7 @@ Features:
 								</div>
 							{/if}
 						</div>
+						<p class="mt-2 text-[10px] leading-relaxed text-surface-500 dark:text-white/40">{setup_note_machine_translate()}</p>
 					</div>
 				</div>
 				<!-- Default Content Language -->
@@ -604,14 +649,14 @@ Features:
 						></iconify-icon>
 						<span class="text-surface-900 dark:text-surface-50">{setup_label_default_content_language?.() || 'Default Content Language'}</span>
 						<SystemTooltip title={setup_help_default_content_language()}>
-							<HelpIcon ariaLabel="Help: Default Content Language" />
+							<HelpIcon ariaLabel={setup_help_default_content_language_aria()} />
 						</SystemTooltip>
 					</div>
-					<p class="text-[10px] text-surface-500 dark:text-white/40" id="system-lang-help">Select the primary language for your content.</p>
+					<p class="text-[10px] text-surface-500 dark:text-white/40" id="content-lang-help">{setup_content_lang_primary_help()}</p>
 					<Select
 						bind:value={systemSettings.defaultContentLanguage}
 						options={contentLanguageOptions}
-						placeholder="Select content language..."
+						placeholder={setup_select_content_language()}
 						error={displayErrors.defaultContentLanguage}
 						onchange={() => handleBlur('defaultContentLanguage')}
 					/>
@@ -620,7 +665,7 @@ Features:
 							<iconify-icon icon="mdi:book-multiple" width="14" class="text-tertiary-500 dark:text-primary-500" aria-hidden="true"></iconify-icon>
 							<span class="text-surface-900 dark:text-surface-50">{setup_label_content_languages?.() || 'Content Languages'}</span>
 							<SystemTooltip title={setup_help_content_languages()}>
-								<HelpIcon ariaLabel="Help: Content Languages" />
+								<HelpIcon ariaLabel={setup_help_content_languages_aria()} />
 							</SystemTooltip>
 						</div>
 
@@ -652,7 +697,7 @@ Features:
 							<Button variant="surface"
 								type="button"
 								onclick={openContentPicker}
-								aria-label="add-content-language"
+								aria-label={setup_aria_add_content_language()}
 								aria-haspopup="dialog"
 								aria-expanded={showContentPicker}
 								aria-controls="content-lang-picker"
@@ -667,14 +712,14 @@ Features:
 									id="content-lang-picker"
 									class="absolute inset-s-0 top-full z-20 mt-2 w-64 rounded border border-white/10 bg-surface-800 p-2 shadow-xl"
 									role="dialog"
-									aria-label="Add content language"
+									aria-label={setup_aria_add_content_language()}
 									tabindex="-1"
 									onkeydown={onContentPickerKey}
 								>
 									<Input
 										id="content-lang-search"
-										aria-label="search-content-languages"
-										placeholder="Search languages..."
+										aria-label={setup_aria_search_content_languages()}
+										placeholder={setup_search_languages()}
 										bind:value={contentPickerSearch}
 										inputClass="text-xs py-1"
 										class="mb-2"

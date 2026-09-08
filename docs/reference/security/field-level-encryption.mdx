@@ -6,13 +6,14 @@ order: 4
 icon: "mdi:lock-outline"
 author: "SveltyCMS Team"
 created: "2026-09-03"
-updated: "2026-09-03"
+updated: "2026-09-08"
 tags:
   - "security"
   - "encryption"
   - "aes-256-gcm"
   - "gdpr"
   - "hipaa"
+  - "benchmarks"
 ---
 
 # Field-Level Encryption at Rest
@@ -69,6 +70,31 @@ Hot flags (`_hasEncryptedFields`, `_encryptedFieldNames`) skip the crypto path e
 
 Cache stores **ciphertext**. Decryption clones the document so a cache hit cannot leak plaintext into L2.
 
+## Zero-Tax Synchronous Primitives
+
+To guarantee that field-level encryption does not degrade sub-2ms database persistence targets, `@utils/security/field-encryption` provides synchronous execution primitives:
+
+- `encryptFieldValueSync(value, tenantId, collectionId, fieldName)`
+- `decryptFieldValueSync(envelope, tenantId, collectionId, fieldName)`
+- `encryptDocumentFieldsSync(doc, tenantId, collectionId, fieldNames)`
+- `decryptDocumentFieldsSync(doc, tenantId, collectionId, fieldNames)`
+
+Key resolution (`getFieldKeysSync()`) is pre-computed and memoized on boot via HKDF-SHA-256, eliminating asynchronous event-loop hops or Promise allocations on the hot CRUD path.
+
+## Performance & Empirical Benchmarks
+
+Application-Layer Encryption overhead was evaluated under an empirical benchmark suite (`tests/benchmarks/ale-encryption-impact.test.ts`) across 256 B, 4 KB, and 64 KB payloads. See the complete [ALE Benchmark Report](../../benchmarks/encryption_impact.mdx).
+
+| Payload Tier       | Payload Size | Encryption Latency (p50) | Throughput  | Write Path Impact (CRUD)  |
+| :----------------- | :----------- | :----------------------- | :---------- | :------------------------ |
+| **Scalar / PII**   | 256 B        | **7.8 µs** (0.0078 ms)   | 31.29 MB/s  | < 2% of total write time  |
+| **Standard Block** | 4 KB         | **18.3 µs** (0.0183 ms)  | 213.54 MB/s | < 3% of total write time  |
+| **Large Document** | 64 KB        | **95.5 µs** (0.0955 ms)  | 654.50 MB/s | ~4.5% of total write time |
+
+### Tolerance Gate Verdict
+
+Across all scenarios, AES-256-GCM encryption introduces less than **18.3 µs** overhead for standard 4 KB document fields. Because disk page flushes and WAL commits in realistic workloads take 0.20–0.55 ms, encryption overhead accounts for **< 3% of write execution time**, well within our strict **< 5% tolerance budget**.
+
 ## What encryption does not do
 
 | Operation                      | Behavior                                                                  |
@@ -89,3 +115,4 @@ Rotating `ENCRYPTION_KEY` orphans existing envelopes (same as TOTP secrets and p
 
 - `tests/unit/utils/field-encryption.test.ts` — envelope, IV uniqueness, AAD, tamper, fail-closed
 - `tests/unit/services/field-encryption-pipeline.test.ts` — hot flags, write encrypt, cloned decrypt, query rejection
+- `tests/benchmarks/ale-encryption-impact.test.ts` — micro-benchmarks and transactional database write overhead validation

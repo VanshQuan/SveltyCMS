@@ -30,9 +30,19 @@ export const widgetMeta = {
 
 	const isLicensed = $derived(Boolean(licenseStatus?.hasLicense));
 
-		import type { WidgetSize } from '@src/content/types';
-
-		import BaseWidget from '../../base-widget.svelte';
+	import type { WidgetSize } from '@src/content/types';
+	import BaseWidget from '../../base-widget.svelte';
+	import {
+		widget_dbpool_total,
+		widget_dbpool_active,
+		widget_dbpool_idle,
+		widget_dbpool_waiting,
+		widget_dbpool_utilization,
+		widget_dbpool_recommendations,
+		widget_dbpool_premium_notice,
+		widget_dbpool_upgrade,
+		widget_dbpool_loading
+	} from '@src/paraglide/messages';
 
 	const {
 		label = 'Connection Pool',
@@ -52,85 +62,61 @@ export const widgetMeta = {
 		onRemove?: () => void;
 	} = $props();
 
-	/**
-	 * Get status color based on health
-	 */
-	function getHealthColor(health: string): string {
-		switch (health) {
+	function getHealthColor(healthStatus: string): string {
+		switch (healthStatus) {
 			case 'healthy':
-				return 'text-success-600 bg-success-500/10';
-			case 'degraded':
-				return 'text-warning-600 bg-warning-500/10';
+				return 'bg-success-500/10 text-success-600 dark:bg-success-900/20 dark:text-success-400';
+			case 'warning':
+				return 'bg-warning-500/10 text-warning-600 dark:bg-warning-900/20 dark:text-warning-400';
 			case 'critical':
-				return 'text-error-600 bg-error-500/10';
+				return 'bg-error-500/10 text-error-600 dark:bg-error-900/20 dark:text-error-400';
 			default:
-				return 'text-gray-600 bg-gray-50';
+				return 'bg-surface-500/10 text-surface-600 dark:bg-surface-700/50 dark:text-surface-400';
 		}
 	}
 
-	/**
-	 * Get utilization color
-	 */
 	function getUtilizationColor(utilization: number): string {
-		if (utilization >= 90) {
-			return 'text-error-600';
-		}
-		if (utilization >= 75) {
-			return 'text-warning-600';
-		}
-		return 'text-success-600';
+		if (utilization >= 90) return 'text-error-600 dark:text-error-400';
+		if (utilization >= 75) return 'text-warning-600 dark:text-warning-400';
+		return 'text-success-600 dark:text-success-400';
 	}
 
-	/**
-	 * Get utilization bar color
-	 */
 	function getUtilizationBarColor(utilization: number): string {
-		if (utilization >= 90) {
-			return 'bg-error-600';
-		}
-		if (utilization >= 75) {
-			return 'bg-warning-500';
-		}
-		return 'bg-tertiary-500 dark:bg-primary-500';
+		if (utilization >= 90) return 'bg-error-500';
+		if (utilization >= 75) return 'bg-warning-500';
+		return 'bg-success-500';
 	}
 
-	/**
-	 * Get recommendation icon color
-	 */
 	function getRecommendationIconColor(recommendation: string): string {
-		if (recommendation.includes('healthy')) {
-			return 'text-success-600';
+		if (recommendation.includes('critical') || recommendation.includes('exhaustion')) {
+			return 'text-error-500';
 		}
-		if (recommendation.includes('Consider') || recommendation.includes('increase') || recommendation.includes('reduce')) {
-			return 'text-warning-600';
+		if (recommendation.includes('high') || recommendation.includes('warning')) {
+			return 'text-warning-500';
 		}
-		return 'text-info-600';
+		return 'text-primary-500';
 	}
 </script>
 
 <BaseWidget
 	{label}
 	{theme}
+	endpoint="/api/dashboard/database-pool"
+	pollInterval={5000}
 	{icon}
+	{widgetId}
 	{size}
 	{onSizeChange}
-	endpoint="/api/database/pool-diagnostics"
-	pollInterval={30000}
-	{widgetId}
 	onCloseRequest={onRemove}
 >
-	{#snippet children({ data: diagnostics, isLoading, error })}
-		{#if isLoading && !diagnostics}
-			<!-- Loading State -->
-			<div class="flex items-center justify-center py-8">
-				<div class="h-8 w-8 animate-spin rounded-full border-b-2 border-primary-600"></div>
+	{#snippet children({ data })}
+		{@const diagnostics = data as PoolDiagnostics | null}
+
+		{#if !diagnostics}
+			<div class="flex h-full items-center justify-center">
+				<div class="text-surface-400">{widget_dbpool_loading()}</div>
 			</div>
-		{:else if error}
-			<!-- Error State -->
-			<div class="rounded border border-error-500/30 bg-error-500/10 p-4 dark:border-error-500/40 dark:bg-error-900/20">
-				<p class="text-sm text-error-600 dark:text-error-400">{error}</p>
-			</div>
-		{:else if diagnostics}
+		{:else}
 			<!-- Health Status Badge -->
 			<div class="mb-4">
 				<span class="inline-flex items-center rounded-full px-3 py-1 text-sm font-medium {getHealthColor(diagnostics.healthStatus)}">
@@ -143,25 +129,25 @@ export const widgetMeta = {
 			<div class="mb-6 grid grid-cols-2 gap-4">
 				<!-- Total Connections -->
 				<div class="rounded bg-surface-500/10 p-3 dark:bg-surface-700/50">
-					<div class="mb-1 text-xs text-surface-500 dark:text-surface-50">Total</div>
+					<div class="mb-1 text-xs text-surface-500 dark:text-surface-50">{widget_dbpool_total()}</div>
 					<div class="text-2xl font-bold text-surface-900 dark:text-white">{diagnostics.totalConnections}</div>
 				</div>
 
 				<!-- Active Connections -->
 				<div class="rounded bg-surface-500/10 p-3 dark:bg-surface-700/50">
-					<div class="mb-1 text-xs text-surface-500 dark:text-surface-50">Active</div>
+					<div class="mb-1 text-xs text-surface-500 dark:text-surface-50">{widget_dbpool_active()}</div>
 					<div class="text-2xl font-bold text-surface-900 dark:text-white">{diagnostics.activeConnections}</div>
 				</div>
 
 				<!-- Idle Connections -->
 				<div class="rounded bg-surface-500/10 p-3 dark:bg-surface-700/50">
-					<div class="mb-1 text-xs text-surface-500 dark:text-surface-50">Idle</div>
+					<div class="mb-1 text-xs text-surface-500 dark:text-surface-50">{widget_dbpool_idle()}</div>
 					<div class="text-2xl font-bold text-surface-900 dark:text-white">{diagnostics.idleConnections}</div>
 				</div>
 
 				<!-- Waiting Requests -->
 				<div class="rounded bg-surface-500/10 p-3 dark:bg-surface-700/50">
-					<div class="mb-1 text-xs text-surface-500 dark:text-surface-50">Waiting</div>
+					<div class="mb-1 text-xs text-surface-500 dark:text-surface-50">{widget_dbpool_waiting()}</div>
 					<div class="text-2xl font-bold {diagnostics.waitingRequests > 0 ? 'text-warning-600' : 'text-surface-900 dark:text-white'}">
 						{diagnostics.waitingRequests}
 					</div>
@@ -171,7 +157,7 @@ export const widgetMeta = {
 			<!-- Utilization Bar -->
 			<div class="mb-6">
 				<div class="mb-2 flex items-center justify-between">
-					<span class="text-sm font-medium text-surface-600 dark:text-surface-400">Pool Utilization</span>
+					<span class="text-sm font-medium text-surface-600 dark:text-surface-400">{widget_dbpool_utilization()}</span>
 					<span class="text-sm font-semibold {getUtilizationColor(diagnostics.poolUtilization)}"> {diagnostics.poolUtilization.toFixed(1)}% </span>
 				</div>
 				<div class="h-3 w-full overflow-hidden rounded-full bg-surface-200 dark:bg-surface-700">
@@ -185,7 +171,7 @@ export const widgetMeta = {
 			<!-- Recommendations -->
 			{#if diagnostics.recommendations && diagnostics.recommendations.length > 0}
 				<div class="border-t border-surface-500/30 pt-4 dark:text-surface-50">
-					<h4 class="mb-2 text-sm font-semibold text-surface-600 dark:text-surface-400">Recommendations</h4>
+					<h4 class="mb-2 text-sm font-semibold text-surface-600 dark:text-surface-400">{widget_dbpool_recommendations()}</h4>
 					<ul class="space-y-2">
 						{#each diagnostics.recommendations as recommendation (recommendation)}
 							<li class="flex items-start gap-2 text-sm text-surface-600 dark:text-surface-50">
@@ -209,16 +195,14 @@ export const widgetMeta = {
 				</div>
 			{/if}
 
-
-
-				<!-- Premium upgrade banner for historical tracking & query analysis -->
-				{#if !isLicensed}
+			<!-- Premium upgrade banner -->
+			{#if !isLicensed}
 				<div class="mt-4 rounded-lg bg-warning-500/10 dark:bg-warning-900/20 border border-warning-500/20 dark:border-warning-500/40 px-3 py-2 flex items-center justify-between">
 					<span class="text-xs text-warning-600 dark:text-warning-400">
 						<iconify-icon icon="mdi:crown" class="inline me-1 text-warning-500"></iconify-icon>
-						Historical tracking and query analysis are premium features.
+						{widget_dbpool_premium_notice()}
 					</span>
-					<a href="https://marketplace.sveltycms.com" target="_blank" class="text-xs font-medium text-warning-600 dark:text-warning-400 hover:text-warning-600 underline shrink-0 ms-3">Upgrade €9.99 →</a>
+					<a href="https://marketplace.sveltycms.com" target="_blank" class="text-xs font-medium text-warning-600 dark:text-warning-400 hover:text-warning-600 underline shrink-0 ms-3">{widget_dbpool_upgrade()}</a>
 				</div>
 			{/if}
 		{/if}

@@ -1125,7 +1125,11 @@ export default defineConfig(() => {
           "**/logs/**",
           "**/mediaFolder/**",
           "**/src/content/types.ts",
+          // Generated Paraglide output — watching it loops with paraglideVitePlugin.
+          // Source catalogs (`src/messages/*.json`) and `project.inlang/settings.json`
+          // stay watched so adding a system locale recompiles. Ignore the plugin cache.
           "**/src/paraglide/**",
+          "**/project.inlang/cache/**",
         ],
       },
     },

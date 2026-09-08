@@ -52,4 +52,20 @@ describe("settingsGroups catalog", () => {
       expect(ids).toContain(id);
     }
   });
+
+  it("languages group exposes system language (LOCALES / BASE_LOCALE) and content languages", () => {
+    const group = getSettingGroup("languages");
+    expect(group).toBeDefined();
+    const keys = group!.fields.map((f) => f.key);
+    expect(keys).toEqual(
+      expect.arrayContaining([
+        "LOCALES",
+        "BASE_LOCALE",
+        "DEFAULT_CONTENT_LANGUAGE",
+        "AVAILABLE_CONTENT_LANGUAGES",
+      ]),
+    );
+    expect(group!.fields.find((f) => f.key === "LOCALES")?.label).toMatch(/system language/i);
+    expect(group!.fields.find((f) => f.key === "BASE_LOCALE")?.label).toMatch(/system language/i);
+  });
 });

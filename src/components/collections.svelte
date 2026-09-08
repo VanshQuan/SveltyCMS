@@ -44,6 +44,25 @@ import { contentLanguage } from '@src/stores/locale-store.svelte';
 	import type { Snippet } from 'svelte';
 	import { goto, refreshAll } from '$app/navigation';
 	import { page } from '$app/state';
+	import {
+		button_Collections,
+		collections_add,
+		collections_all_tags,
+		collections_clear_filters,
+		collections_clear_search,
+		collections_custom_order,
+		collections_favorites,
+		collections_go_builder,
+		collections_loading,
+		collections_manage,
+		collections_nav_aria,
+		collections_none_found,
+		collections_none_match,
+		collections_reset_order,
+		collections_search,
+		collections_search_aria,
+		collections_search_title,
+	} from '@src/paraglide/messages';
 
 	interface ExtendedContentNode extends ContentNode {
 		children?: ExtendedContentNode[];
@@ -636,18 +655,18 @@ import { contentLanguage } from '@src/stores/locale-store.svelte';
 	}
 </script>
 
-<div class="mt-2 space-y-2" role="navigation" aria-label="Collections">
+<div class="mt-2 space-y-2" role="navigation" aria-label={collections_nav_aria()}>
 	<!-- Collections Section Header with Quick-Add -->
 	{#if isFullSidebar}
 		<div class="flex items-center justify-between px-1 pb-0.5">
-			<span class="text-[11px] font-bold uppercase tracking-wider text-surface-500">Collections</span>
-			<SystemTooltip title="Manage Collections & Categories" positioning={{ placement: 'right' }}>
+			<span class="text-[11px] font-bold uppercase tracking-wider text-surface-500">{button_Collections()}</span>
+			<SystemTooltip title={collections_manage()} positioning={{ placement: 'right' }}>
 				<a
 					href="/config/collectionbuilder"
 					data-sveltekit-preload-data="hover"
 					data-testid="sidebar-collection-builder-link"
 					class="flex h-5 w-5 items-center justify-center rounded hover:bg-surface-200 dark:hover:bg-surface-800 text-surface-500 hover:text-tertiary-500 dark:hover:text-primary-500 transition-colors no-underline!"
-					aria-label="Manage Collections & Categories"
+					aria-label={collections_manage()}
 				>
 					<iconify-icon icon="ic:round-add" width="16"></iconify-icon>
 				</a>
@@ -668,7 +687,7 @@ import { contentLanguage } from '@src/stores/locale-store.svelte';
 					: 'bg-surface-500/10 border-transparent hover:bg-surface-500/20 text-surface-600 dark:text-surface-400'}"
 			>
 				<iconify-icon icon={showOnlyFavorites ? 'bi:star-fill' : 'bi:star'} width="14"></iconify-icon>
-				<span>Favorites</span>
+				<span>{collections_favorites()}</span>
 			</Button>
 
 			{#if allTags.length > 0}
@@ -676,7 +695,7 @@ import { contentLanguage } from '@src/stores/locale-store.svelte';
 					<Select
 						bind:value={selectedTagFilter}
 						options={tagFilterOptions}
-						placeholder="All Tags"
+						placeholder={collections_all_tags()}
 						allowEmptySelection
 						size="sm"
 					/>
@@ -685,7 +704,7 @@ import { contentLanguage } from '@src/stores/locale-store.svelte';
 
 			{#if search || showOnlyFavorites || selectedTagFilter}
 				<Button variant="ghost" type="button" size="sm" onclick={clearAllFilters} class="text-xs">
-					Clear filters
+					{collections_clear_filters()}
 				</Button>
 			{/if}
 		</div>
@@ -705,7 +724,7 @@ import { contentLanguage } from '@src/stores/locale-store.svelte';
 				type="button"
 				onclick={() => (search = '')}
 				class="p-0.5 min-w-0 rounded-full hover:bg-surface-700"
-				aria-label="Clear search"
+				aria-label={collections_clear_search()}
 			>
 				<iconify-icon icon="ic:round-close" width="18"></iconify-icon>
 			</Button>
@@ -718,31 +737,31 @@ import { contentLanguage } from '@src/stores/locale-store.svelte';
 				id="collections-search"
 				type="search"
 				bind:value={search}
-				placeholder="Search collections..."
+				placeholder={collections_search()}
 				pre={searchIcon as Snippet}
 				post={clearIcon as Snippet}
 				inputClass="w-full text-xs"
-				aria-label="Search collections"
+				aria-label={collections_search_aria()}
 			/>
 		</div>
 	{:else}
 		<div class="flex flex-col items-center gap-2">
-			<SystemTooltip title="Search Collections" positioning={{ placement: 'right' }}>
+			<SystemTooltip title={collections_search_title()} positioning={{ placement: 'right' }}>
 				<Button
 					variant="ghost"
 					type="button"
 					onclick={() => ui.toggle('leftSidebar', 'full')}
-					aria-label="Search collections"
+					aria-label={collections_search_aria()}
 					class="flex h-9 w-9 items-center justify-center rounded-lg p-0! min-w-0 hover:bg-surface-200 dark:hover:bg-surface-800"
 				>
 					<iconify-icon icon="ic:outline-search" width="20"></iconify-icon>
 				</Button>
 			</SystemTooltip>
 
-			<SystemTooltip title="Go to Collection Builder" positioning={{ placement: 'right' }}>
+			<SystemTooltip title={collections_go_builder()} positioning={{ placement: 'right' }}>
 				<a
 					href="/config/collectionbuilder"
-					aria-label="Go to Collection Builder"
+					aria-label={collections_go_builder()}
 					class="flex h-9 w-9 items-center justify-center rounded-lg bg-primary-600/10 dark:bg-primary-500/20 text-primary-600 dark:text-primary-400 hover:bg-primary-500 hover:text-white transition-colors"
 				>
 					<iconify-icon icon="ic:round-add" width="18"></iconify-icon>
@@ -754,9 +773,9 @@ import { contentLanguage } from '@src/stores/locale-store.svelte';
 	<!-- Custom Order Banner -->
 	{#if orderOverrides.size > 0}
 		<div class="flex items-center justify-between rounded bg-tertiary-500/10 px-3 py-1.5 text-xs text-tertiary-600 dark:text-tertiary-400">
-			<span>Custom order active</span>
+			<span>{collections_custom_order()}</span>
 			<Button variant="ghost" type="button" size="sm" onclick={resetCustomOrder} class="text-xs px-2">
-				Reset order
+				{collections_reset_order()}
 			</Button>
 		</div>
 	{/if}
@@ -775,20 +794,20 @@ import { contentLanguage } from '@src/stores/locale-store.svelte';
 				<div class="flex flex-col items-center justify-center gap-3 p-6 text-center text-surface-900 dark:text-white">
 					{#if !widgets.isLoaded}
 						<div class="h-6 w-6 animate-spin rounded-full border-2 border-surface-500/30 border-t-tertiary-500"></div>
-						<p class="text-xs text-surface-600 dark:text-surface-400">Loading collections…</p>
+						<p class="text-xs text-surface-600 dark:text-surface-400">{collections_loading()}</p>
 					{:else if search || showOnlyFavorites || selectedTagFilter}
 						<iconify-icon icon="bi:search" width={28} class="text-surface-400"></iconify-icon>
-						<p class="text-sm text-surface-900 dark:text-white">No collections match your current filters.</p>
-						<Button variant="outline" type="button" size="sm" onclick={clearAllFilters}>Clear filters</Button>
+						<p class="text-sm text-surface-900 dark:text-white">{collections_none_match()}</p>
+						<Button variant="outline" type="button" size="sm" onclick={clearAllFilters}>{collections_clear_filters()}</Button>
 					{:else}
 						<iconify-icon icon="bi:collection" width={32} class="opacity-60 text-surface-400 dark:text-surface-400"></iconify-icon>
-						<p class="text-sm font-semibold text-surface-900 dark:text-white">No collections found.</p>
+						<p class="text-sm font-semibold text-surface-900 dark:text-white">{collections_none_found()}</p>
 						<a
 							href="/config/collectionbuilder"
 							class="inline-flex items-center gap-1.5 rounded-md bg-primary-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-primary-500 no-underline!"
 						>
 							<iconify-icon icon="ic:round-add" width="16"></iconify-icon>
-							<span>Add Collection</span>
+							<span>{collections_add()}</span>
 						</a>
 					{/if}
 				</div>

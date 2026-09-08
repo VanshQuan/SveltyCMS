@@ -254,6 +254,13 @@ function getSessionFromCache(sessionId: string): SessionCacheEntry | null {
   return null;
 }
 
+// 🚀 Zero-overhead sync session peeker hook for handleRateLimit adaptive user tiers
+const SESSION_PEEKER_KEY = Symbol.for("svelty.session.peeker");
+(globalThis as any)[SESSION_PEEKER_KEY] = (sessionId: string) => {
+  const entry = getSessionFromCache(sessionId);
+  return entry?.user ?? null;
+};
+
 /**
  * Sets a session in the cache with LRU eviction.
  */
@@ -1004,8 +1011,8 @@ export const handleAuthentication: Handle = async ({ event, resolve }) => {
           }
           locals.user = user;
           locals.session_id = sessionId as DatabaseId;
-          locals.sessionAmr = resolution.amr;
-          locals.mfaVerifiedAt = resolution.mfaVerifiedAt;
+          locals.sessionAmr = resolution.status === "ok" ? resolution.amr : undefined;
+          locals.mfaVerifiedAt = resolution.status === "ok" ? resolution.mfaVerifiedAt : undefined;
           locals.permissions = user.permissions || [];
           if (user._id) {
             void cacheService.set(`layout:user:${user._id}`, user, 15, locals.tenantId as string);

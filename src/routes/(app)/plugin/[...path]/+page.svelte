@@ -10,6 +10,7 @@ and renders it inside the admin shell with server props.
 	import Loader from '@components/ui/loader.svelte';
 	import { pluginPageRegistry } from '@src/plugins/plugin-page-registry.svelte.ts';
 	import { memoizeLazyLoader } from '@utils/lazy-component-loader';
+	import { plugin_aria_loading, plugin_page_failed_to_load, plugin_page_not_found } from '@src/paraglide/messages';
 	import type { PageData } from './$types';
 
 	const { data }: { data: PageData } = $props();
@@ -29,7 +30,7 @@ and renders it inside the admin shell with server props.
 >
 	{#if pageDef}
 		{#await loader()}
-			<Loader variant="card" height="h-40" ariaLabel="Loading plugin page" />
+			<Loader variant="card" height="h-40" ariaLabel={plugin_aria_loading()} />
 		{:then Component}
 			{#if Component.default}
 				<Component.default {...data.props} />
@@ -41,12 +42,12 @@ and renders it inside the admin shell with server props.
 				class="rounded border border-error-500/50 bg-error-500/10 p-4 text-sm text-error-600 dark:bg-error-900/10 dark:text-error-500"
 				role="alert"
 			>
-				<strong>Plugin page failed to load ({pageDef.id}):</strong> {error.message}
+				<strong>{plugin_page_failed_to_load({ id: pageDef.id })}</strong> {error.message}
 			</div>
 		{/await}
 	{:else}
 		<div class="p-8 text-center text-sm text-surface-500" data-testid="plugin-page-missing">
-			Plugin page not found.
+			{plugin_page_not_found()}
 		</div>
 	{/if}
 </AdminPageShell>

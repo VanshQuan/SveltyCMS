@@ -6,7 +6,7 @@ order: 5
 icon: "mdi:database-clock"
 author: "SveltyCMS Team"
 created: "2025-10-03"
-updated: "2026-08-21"
+updated: "2026-09-08"
 tags:
   - "cache"
   - "redis"
@@ -232,11 +232,24 @@ The `handleAuthorization` hook maintains a tenant-scoped list of all roles (`src
 > [!NOTE]
 > Use `clearByPattern("schema:")` — not `invalidateByCategory(SCHEMA)` — because schema keys are prefixed with `schema:`, not `*:schema:`.
 
-## Smart Features (All Production-Ready)
-
 ### Scheduled Publish Cache Invalidation
 
 The background job scheduler (`scheduled-jobs.ts`) now invalidates the collection cache after every successful scheduled publish. This prevents stale relation data from being served after entries transition from `draft` to `publish` status.
+
+### Distributed Rate Limiter & Token-Bucket L2 Integration
+
+The rate limiting middleware (`src/hooks/handle-rate-limit.ts`) integrates with the Redis L2 layer to coordinate request throttling across clustered instances:
+
+- **Atomic Lua Engine**: Redis L2 executes an atomic Lua script that computes continuous token replenishment (`refillRatePerMs = capacity / windowMs`) and decrements available tokens in a single network round-trip.
+- **Fail-Safe Circuit-Breaker Fallback**: Network queries to Redis L2 are bounded by a strict **15 ms timeout**. If Redis is unreachable or exceeds latency limits, an internal circuit breaker trips with a **5-second backoff**, instantly diverting throttling decisions to process-local in-memory Token Buckets (`< 2 µs`). This ensures cluster availability without dropping requests or increasing user-perceived latency.
+- **Zero-Allocation Session Cache Peeking**: Privilege-tier multipliers (Admin $10\times$, Authenticated $2\times$, Anonymous $1\times$) are evaluated synchronously against the session cache (`peekSessionFromCacheSync`) in `handle-authentication.ts` without triggering async microtask ticks.
+
+### Field-Level Encryption & Ciphertext Cache Isolation
+
+In accordance with our zero-trust data protection model (`docs/reference/security/field-level-encryption.mdx`):
+
+- **Ciphertext Storage**: L1 RAM and L2 Redis caches store encrypted envelopes (`v1:iv:tag:ciphertext`) for all fields flagged with `encrypt: true`. Unencrypted plaintext is **never** persisted in shared cache infrastructure.
+- **Read-Path Decryption Cloning**: Upon a cache hit, the read pipeline decrypts field values into an isolated shallow clone of the document before returning it to the SDK/API caller, preventing plaintext leaks back into the cache layer.
 
 ```typescript
 // After scheduled publish, in scheduled-jobs.ts:

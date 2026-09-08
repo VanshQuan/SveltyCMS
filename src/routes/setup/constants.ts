@@ -9,10 +9,11 @@
  * - Accessed via publicEnv.LOCALES at runtime
  *
  * To add a new system language:
- * 1. Add it to project.inlang/settings.json locales array
- * 2. Create the corresponding message file in src/messages/{locale}.json
- * 3. Restart the development server
- * 4. Run setup wizard again to seed the new locale into the database
+ * 1. Add the ISO 639-1 code in Setup (or System Settings → LOCALES) — EN/DE ship by default
+ * 2. Setup writes project.inlang/settings.json and runs `bun translate` + `bun run paraglide`
+ *    Manual path: edit project.inlang/settings.json, then `bun translate` and `bun run paraglide`
+ * 3. Review/PR src/messages/{locale}.json (Fink / GitHub community translations)
+ * 4. Restart or let Vite HMR pick up the compiled Paraglide catalogs
  */
 
 /**

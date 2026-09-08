@@ -467,8 +467,8 @@ stateDiagram-v2
 - **Chip-based UI**: Visual chip display for selected languages
 - **Language Search**: Quick filter for adding languages
 - **Dual Language System**:
-  - **System Languages**: From ParaglideJS config (limited set)
-  - **Content Languages**: From ISO-639-1 (150+ languages)
+  - **System Languages**: Same ISO 639-1 picker as content. **English and German ship compiled.** Extra codes are written to `project.inlang/settings.json` and machine-translated (`bun translate`) when setup completes. RTL languages use `getTextDirection()` in `@utils/string`.
+  - **Content Languages**: From ISO-639-1 (150+ languages), no rebuild required.
 - **Redis Verification**: Optional performance optimization with a dedicated "Test Redis Connection" button to verify host, port, and credentials.
 - **Storage Type Notice**: Shows configuration reminder for cloud storage
 

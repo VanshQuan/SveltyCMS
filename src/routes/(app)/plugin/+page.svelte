@@ -8,6 +8,7 @@
 	import AdminPageShell from '@components/admin-page-shell.svelte';
 	import AdminCard from '@components/admin-card.svelte';
 	import { pluginPageRegistry } from '@src/plugins/plugin-page-registry.svelte.ts';
+	import { plugin_pages_empty, plugin_pages_title } from '@src/paraglide/messages';
 
 	const navItems = $derived.by(() => {
 		void pluginPageRegistry.version;
@@ -15,7 +16,7 @@
 	});
 </script>
 
-<AdminPageShell title="Plugin Pages" icon="mdi:puzzle" showBackButton={true} backUrl="/config">
+<AdminPageShell title={plugin_pages_title()} icon="mdi:puzzle" showBackButton={true} backUrl="/config">
 	{#if navItems.length > 0}
 		<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3" data-testid="plugin-pages-index">
 			{#each navItems as item (item.id)}
@@ -37,7 +38,7 @@
 		</div>
 	{:else}
 		<div class="p-8 text-center text-sm text-surface-500">
-			No plugin pages installed. Plugin-contributed admin pages appear here.
+			{plugin_pages_empty()}
 		</div>
 	{/if}
 </AdminPageShell>

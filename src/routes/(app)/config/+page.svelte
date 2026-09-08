@@ -15,6 +15,27 @@ import { ui } from "@src/stores/ui-store.svelte.ts";
 import { onMount } from "svelte";
 import { fly } from "svelte/transition";
 import { page } from "$app/state";
+import {
+	applayout_systemconfiguration,
+	config_page_subtitle,
+	config_tile_access,
+	config_tile_api,
+	config_tile_automations,
+	config_tile_builder,
+	config_tile_design,
+	config_tile_extensions,
+	config_tile_monitor,
+	config_tile_queue,
+	config_tile_redirects,
+	config_tile_settings,
+	config_tile_sync,
+	config_tile_tenants,
+	config_tile_trash,
+	config_tile_webhooks,
+	config_tile_workflows,
+	config_tile_dashboard,
+	config_tile_email,
+} from "@src/paraglide/messages";
 
 let { data } = $props();
 
@@ -303,11 +324,34 @@ const configItems = [
 		},
 	},
 ];
+
+const tileLabel = (id: string, fallback: string): string => {
+	const labels: Record<string, () => string> = {
+		settings: config_tile_settings,
+		tenants: config_tile_tenants,
+		designSystem: config_tile_design,
+		monitor: config_tile_monitor,
+		collectionbuilder: config_tile_builder,
+		accessManagement: config_tile_access,
+		extensions: config_tile_extensions,
+		automations: config_tile_automations,
+		workflows: config_tile_workflows,
+		queue: config_tile_queue,
+		sync: config_tile_sync,
+		apiPlayground: config_tile_api,
+		dashboard: config_tile_dashboard,
+		emailPreviews: config_tile_email,
+		webhooks: config_tile_webhooks,
+		redirects: config_tile_redirects,
+		trash: config_tile_trash,
+	};
+	return labels[id]?.() ?? fallback;
+};
 </script>
 
-<AdminPageShell title="System Configuration" showBackButton={true} backUrl="/" icon="material-symbols:build-circle">
+<AdminPageShell title={applayout_systemconfiguration()} showBackButton={true} backUrl="/" icon="material-symbols:build-circle">
     <AdminCard class="border border-surface-500/30 bg-white p-4 shadow-sm backdrop-blur-md dark:border-surface-500/40 dark:bg-surface-900/50">
-	<h2 class="h2 mb-4 text-center font-bold text-tertiary-600 dark:text-primary-500" in:fly={{ y: -10, duration: 300 }}>Manage your system configuration</h2>
+	<h2 class="h2 mb-4 text-center font-bold text-tertiary-600 dark:text-primary-500" in:fly={{ y: -10, duration: 300 }}>{config_page_subtitle()}</h2>
 
 	<div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
 		{#each configItems.filter((item) => !('visible' in item) || item.visible?.()) as item, idx (item.id || item.label)}
@@ -319,7 +363,7 @@ const configItems = [
 					<a
 						href={item.href}
 						class="flex h-24 flex-col items-center justify-center gap-2 rounded border border-surface-500/30 bg-white p-2 text-center shadow-sm transition-all duration-300 ease-out hover:-translate-y-1 hover:border-tertiary-500 hover:bg-primary-500/10 hover:shadow-xl  dark:bg-surface-900 dark:hover:border-primary-500  dark:hover:bg-surface-700 lg:h-32"
-						aria-label={item.label}
+						aria-label={tileLabel(item.id, item.label)}
 						target={item.target}
 						rel={item.target === '_blank' ? 'noopener noreferrer' : undefined}
 						data-sveltekit-preload-data={item.target === '_blank' ? undefined : 'hover'}
@@ -332,7 +376,7 @@ const configItems = [
 						<p
 							class="w-full truncate text-xs font-medium uppercase tracking-wide group-hover:text-tertiary-600  dark:group-hover:text-tertiary-500 dark:text-primary-500 lg:text-sm"
 						>
-							{item.label}
+							{tileLabel(item.id, item.label)}
 						</p>
 					</a>
 				</PermissionGuard>
@@ -342,7 +386,7 @@ const configItems = [
 				<a
 					href={item.href}
 					class="group flex h-24 flex-col items-center justify-center gap-2 rounded border border-surface-500/30 bg-white p-2 text-center shadow-sm transition-all duration-300 ease-out hover:-translate-y-1 hover:border-tertiary-500 hover:bg-primary-500/10 hover:shadow-xl  dark:bg-surface-800 dark:hover:border-primary-500  dark:hover:bg-surface-700 lg:h-32"
-					aria-label={item.label}
+					aria-label={tileLabel(item.id, item.label)}
 					target={item.target}
 					rel={item.target === '_blank' ? 'noopener noreferrer' : undefined}
 					data-sveltekit-preload-data={item.target === '_blank' ? undefined : 'hover'}
@@ -355,7 +399,7 @@ const configItems = [
 					<p
 						class="w-full truncate text-xs font-medium uppercase tracking-wide text-surface-600 group-hover:text-tertiary-600 dark:text-primary-600 dark:group-hover:text-primary-500  lg:text-sm"
 					>
-						{item.label}
+						{tileLabel(item.id, item.label)}
 					</p>
 				</a>
 				</div>

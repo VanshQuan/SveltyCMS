@@ -25,6 +25,7 @@ import VersionCheck from "@src/components/version-check.svelte";
 // Paraglide Messages
 import {
 	applayout_systemlanguage,
+	applayout_search_language,
 	db_error_description,
 	db_error_reason_label,
 	db_error_refresh_page,
@@ -40,7 +41,8 @@ import {
 	login_demo_nextreset,
 	login_demo_title,
 } from "@src/paraglide/messages";
-import { locales as availableLocales } from "@src/paraglide/runtime";
+import { locales as bundledLocales } from "@src/paraglide/runtime";
+import { applySystemLanguage, mergeSystemLanguages } from "@utils/system-locale";
 import {
 	getPublicSetting,
 	publicEnv,
@@ -125,9 +127,11 @@ let debounceTimeout: ReturnType<typeof setTimeout> | undefined = $state();
 
 // Derived state using $derived rune
 const availableLanguages = $derived(
-	[...availableLocales].sort((a, b) =>
-		getLanguageName(a, "en").localeCompare(getLanguageName(b, "en")),
-	),
+	mergeSystemLanguages(
+		(getPublicSetting("LOCALES") as string[] | undefined) ??
+			(publicEnv.LOCALES as string[] | undefined),
+		bundledLocales,
+	).sort((a, b) => getLanguageName(a, "en").localeCompare(getLanguageName(b, "en"))),
 );
 
 const filteredLanguages = $derived(
@@ -146,9 +150,9 @@ const filteredLanguages = $derived(
 
 // Ensure a valid language is always used
 const currentLanguage = $derived(
-	systemLanguage.value && availableLocales.includes(systemLanguage.value as any)
+	systemLanguage.value && availableLanguages.includes(systemLanguage.value)
 		? systemLanguage.value
-		: "en",
+		: availableLanguages[0] || "en",
 );
 
 // Language selection
@@ -156,7 +160,8 @@ function handleLanguageSelection(lang: string) {
 	clearTimeout(debounceTimeout);
 	debounceTimeout = setTimeout(() => {
 		// Persist via locale store (legacy `app` bridge was removed with store.svelte.ts)
-		systemLanguage.set(lang as (typeof systemLanguage)["value"]);
+		systemLanguage.set(lang);
+		applySystemLanguage(lang);
 		isDropdownOpen = false;
 		searchQuery = "";
 	}, 100); // Reduced delay for faster feedback
@@ -453,7 +458,7 @@ function handleSignUpPointerEnter() {
 							type="text"
 							bind:this={searchInput}
 							bind:value={searchQuery}
-							placeholder="Search language..."
+							placeholder={applayout_search_language()}
 							class="w-full rounded bg-white/10 px-3 py-2 text-sm placeholder:text-white/40 focus:outline-none focus:ring-1 focus:ring-white/20 text-white border-none"
 							onclick={(e) => e.stopPropagation()}
 						/>

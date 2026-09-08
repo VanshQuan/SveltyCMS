@@ -720,7 +720,8 @@ export const settingsGroups: SettingGroup[] = [
     id: "languages",
     name: "Languages & Localization",
     icon: "🌐",
-    description: "Language, locale, and internationalization settings",
+    description:
+      "Admin UI system language (EN/DE shipped) and content languages. Extra system locales write project.inlang/settings.json and run machine translate.",
     enabled: true,
     requiresRestart: false,
     adminOnly: false,
@@ -746,8 +747,9 @@ export const settingsGroups: SettingGroup[] = [
       },
       {
         key: "BASE_LOCALE",
-        label: "Base Locale",
-        description: "Default locale for the CMS interface",
+        label: "Default System Language",
+        description:
+          "Default admin UI language for new sessions. English and German ship translated; RTL codes flip layout via getTextDirection().",
         type: "language-select",
         category: "public",
         required: true,
@@ -755,8 +757,9 @@ export const settingsGroups: SettingGroup[] = [
       },
       {
         key: "LOCALES",
-        label: "Available Locales",
-        description: "Locales available for the interface",
+        label: "System Languages",
+        description:
+          "Admin UI languages users can switch to. Same ISO 639-1 list as content. Saving writes project.inlang/settings.json and runs bun translate + bun run paraglide.",
         type: "language-multi",
         category: "public",
         required: true,

@@ -20,6 +20,12 @@ import { logger } from "@utils/logger";
 import { clientJsonHeaders } from "@utils/security/client-csrf";
 	import Button from '@components/ui/button.svelte';
 	import Input from '@components/ui/input.svelte';
+	import {
+		widget_generative_title,
+		widget_generative_connected,
+		widget_generative_placeholder,
+		widget_generative_update
+	} from '@src/paraglide/messages';
 
 interface Props {
 	spec?: Spec | null;
@@ -74,10 +80,10 @@ async function handleRegenerate() {
 						<iconify-icon icon="mdi:robot-outline" width="24" class="text-white"></iconify-icon>
 					</div>
 					<div>
-						<h3 class="font-bold text-lg leading-tight">AI Generative Dashboard</h3>
+						<h3 class="font-bold text-lg leading-tight">{widget_generative_title()}</h3>
 						<p class="text-xs text-surface-500 flex items-center gap-1">
 							<span class="inline-block w-2 h-2 rounded-full bg-success-500 animate-pulse"></span>
-							Connected to mcp.sveltycms.com
+							{widget_generative_connected()}
 						</p>
 					</div>
 				</div>
@@ -86,7 +92,7 @@ async function handleRegenerate() {
 					<Input
 						type="text"
 						bind:value={prompt}
-						placeholder="Prompt AI to change this layout..."
+						placeholder={widget_generative_placeholder()}
 						inputClass="pe-24 rounded-full"
 						onkeydown={(e) => e.key === 'Enter' && handleRegenerate()}
 					/>
@@ -97,7 +103,7 @@ async function handleRegenerate() {
 						{#if isRegenerating}
 							<iconify-icon icon="mdi:loading" class="animate-spin" width="18"></iconify-icon>
 						{:else}
-							Update
+							{widget_generative_update()}
 						{/if}
 					</Button>
 				</div>

@@ -83,6 +83,12 @@ export const saveSettingsGroup = query(
     values?: Record<string, unknown>;
     message?: string;
     error?: string;
+    inlang?: {
+      added: string[];
+      translated: boolean;
+      compiled: boolean;
+      error?: string;
+    };
   }> => {
     try {
       requireAdmin();
@@ -102,6 +108,23 @@ export const saveSettingsGroup = query(
         tenantId: tenantId as never,
       });
       void result; // settings.set persists silently; the saved snapshot is `values`.
+      let inlang:
+        | {
+            added: string[];
+            translated: boolean;
+            compiled: boolean;
+            error?: string;
+          }
+        | undefined;
+      if (Array.isArray(values.LOCALES)) {
+        try {
+          const { syncInlangSystemLocales } =
+            await import("@src/routes/setup/sync-inlang-locales.server");
+          inlang = await syncInlangSystemLocales(values.LOCALES as string[]);
+        } catch {
+          /* best effort — settings already persisted */
+        }
+      }
       try {
         const { invalidateFieldPermissionCache } =
           await import("@src/services/security/field-permission-service");
@@ -111,8 +134,11 @@ export const saveSettingsGroup = query(
       }
       return {
         success: true,
-        message: "Saved",
+        message: inlang?.error
+          ? "Saved. Machine translation did not finish — run bun translate then bun run paraglide."
+          : "Saved",
         values,
+        inlang,
       };
     } catch (err) {
       return { success: false, error: remoteErrorMessage(err, "Failed to save settings") };

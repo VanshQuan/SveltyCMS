@@ -6,7 +6,7 @@ order: 10
 icon: "mdi:cog"
 author: "SveltyCMS Team"
 created: "2025-10-03"
-updated: "2026-03-27"
+updated: "2026-09-08"
 tags:
   - "settings"
   - "configuration"
@@ -29,8 +29,11 @@ mindmap
   root((System Settings))
     General
       Site Identity
-      Localization
       Maintenance
+    Languages
+      System language (admin UI)
+      Content languages
+      RTL layout
     Email
       SMTP Config
       Authentication
@@ -101,23 +104,49 @@ Two informational banners appear at the top:
 
 ### Tabbed Navigation
 
-Settings are organized into 13 categories:
+Settings are organized into groups, including:
 
-| Tab                     | Icon | Description                                   | Status    |
-| ----------------------- | ---- | --------------------------------------------- | --------- |
-| **General Settings**    | ⚙️   | Site identity, localization, maintenance mode | ✅ Active |
-| **Email / SMTP**        | 📧   | SMTP server, authentication, templates        | ✅ Active |
-| **Security**            | 🔒   | JWT, session, 2FA, CORS, CSP                  | ✅ Active |
-| **Storage**             | 💾   | File uploads, sizes, types, quotas            | ✅ Active |
-| **Cache & Performance** | ⚡   | Cache TTLs and optimization                   | ✅ Active |
-| **Database**            | 🗄️   | Connection pool, timeouts, indexes            | ✅ Active |
-| **API**                 | 🔌   | Rate limits, versioning, authentication       | ✅ Active |
-| **OAuth**               | 🔑   | Google, GitHub, Facebook OAuth                | ✅ Active |
-| **Media**               | 🖼️   | Image optimization, CDN, thumbnails           | ✅ Active |
-| **Search**              | 🔍   | Search provider, indexing, filters            | ✅ Active |
-| **Analytics**           | 📊   | Tracking codes, privacy, reports              | ✅ Active |
-| **Notifications**       | 🔔   | Email, SMS, push notifications                | ✅ Active |
-| **Advanced**            | 🛠️   | Debug mode, logging, diagnostics              | ✅ Active |
+| Tab                          | Icon | Description                                      | Status    |
+| ---------------------------- | ---- | ------------------------------------------------ | --------- |
+| **General Settings**         | ⚙️   | Site identity, localization, maintenance mode    | ✅ Active |
+| **Languages & Localization** | 🌐   | System language (admin UI) and content languages | ✅ Active |
+| **Email / SMTP**             | 📧   | SMTP server, authentication, templates           | ✅ Active |
+| **Security**                 | 🔒   | JWT, session, 2FA, CORS, CSP                     | ✅ Active |
+| **Storage**                  | 💾   | File uploads, sizes, types, quotas               | ✅ Active |
+| **Cache & Performance**      | ⚡   | Cache TTLs and optimization                      | ✅ Active |
+| **Database**                 | 🗄️   | Connection pool, timeouts, indexes               | ✅ Active |
+| **API**                      | 🔌   | Rate limits, versioning, authentication          | ✅ Active |
+| **OAuth**                    | 🔑   | Google, GitHub, Facebook OAuth                   | ✅ Active |
+| **Media**                    | 🖼️   | Image optimization, CDN, thumbnails              | ✅ Active |
+| **Search**                   | 🔍   | Search provider, indexing, filters               | ✅ Active |
+| **Analytics**                | 📊   | Tracking codes, privacy, reports                 | ✅ Active |
+| **Notifications**            | 🔔   | Email, SMS, push notifications                   | ✅ Active |
+| **Advanced**                 | 🛠️   | Debug mode, logging, diagnostics                 | ✅ Active |
+
+---
+
+## Languages & Localization {#languages-localization}
+
+Open **Config → System Settings → Languages & Localization** (`/config/system-settings?group=languages`). This is the same dual-language model as Setup: **system language** (admin chrome) on the right, **content language** on the left.
+
+**English and German ship compiled.** You can add any ISO 639-1 code as a system language after install — including RTL (`ar`, `he`, `fa`, `ur`, …). Layout direction uses `getTextDirection()` in `@utils/string`.
+
+### Change or extend the admin UI language
+
+1. Set **Default System Language** (`BASE_LOCALE`) to the default for new sessions.
+2. Click **Add** on **System Languages** (`LOCALES`) and search the ISO list (same chip picker as content languages). RTL codes show an **RTL** badge; bundled catalogs show **Translated**.
+3. **Save**. The CMS:
+   - Persists `LOCALES` / `BASE_LOCALE` in the database
+   - Writes `project.inlang/settings.json`
+   - Creates `src/messages/{locale}.json` if missing
+   - Runs `bun translate` then `bun run paraglide`
+4. Switch language from the sidebar. Leave the dev server running so Vite picks up `src/paraglide/`. If strings stay English, run `bun translate` and `bun run paraglide` yourself.
+
+New locales from this path are **machine-translated drafts** (or English fallback). Review `src/messages/{locale}.json` in Fink or a PR before treating them as production copy — unlike vendor packs that ship community-reviewed strings. See [System Languages](./system-languages.mdx).
+
+Content languages (`DEFAULT_CONTENT_LANGUAGE` / `AVAILABLE_CONTENT_LANGUAGES`) stay independent — they do not require a rebuild.
+
+Full catalog workflow (Fink / GitHub PRs): [System Languages](./system-languages.mdx).
 
 ---
 
@@ -372,7 +401,6 @@ After changing TTL settings, monitor:
 ### General Settings
 
 - Site name and description
-- Default language
 - Timezone configuration
 - Date/time formats
 - Maintenance mode

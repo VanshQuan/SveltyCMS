@@ -26,6 +26,19 @@ export const widgetMeta = {
 <script lang="ts">
 	import type { WidgetSize } from '@src/content/types';
 	import BaseWidget from '../../base-widget.svelte';
+	import {
+		dashboard_memory_aria,
+		dashboard_memory_chart_aria,
+		dashboard_memory_free,
+		dashboard_memory_loading,
+		dashboard_memory_pct_used,
+		dashboard_memory_please_wait,
+		dashboard_memory_ram_used,
+		dashboard_memory_swap,
+		dashboard_memory_swap_memory,
+		dashboard_memory_total,
+		dashboard_memory_used
+	} from '@src/paraglide/messages';
 
 	const {
 		label = 'Memory Usage',
@@ -90,7 +103,7 @@ export const widgetMeta = {
 		})()}
 
 		{#if data?.memoryInfo?.total}
-			<div class="flex h-full flex-col justify-between space-y-4" role="region" aria-label="Memory usage statistics">
+			<div class="flex h-full flex-col justify-between space-y-4" role="region" aria-label={dashboard_memory_aria()}>
 				
 				{#if size.h === 1}
 					<!-- Compact single-row layout -->
@@ -106,7 +119,7 @@ export const widgetMeta = {
 						<div class="flex items-center gap-2 text-end">
 							<span class="font-semibold text-gray-700 dark:text-gray-300 tabular-nums">{mem.usedGB.toFixed(1)} / {mem.totalGB.toFixed(0)} GB</span>
 							{#if mem.swapPercent !== null}
-								<span class="text-gray-400 dark:text-gray-500">| Swap: <span class="font-semibold text-gray-600 dark:text-gray-400">{mem.swapPercent.toFixed(0)}%</span></span>
+								<span class="text-gray-400 dark:text-gray-500">| {dashboard_memory_swap()} <span class="font-semibold text-gray-600 dark:text-gray-400">{mem.swapPercent.toFixed(0)}%</span></span>
 							{/if}
 						</div>
 					</div>
@@ -122,11 +135,11 @@ export const widgetMeta = {
 								<span class="text-3xl font-semibold tabular-nums tracking-tighter">{mem.percent.toFixed(1)}</span>
 								<span class="text-xl font-medium text-gray-400">%</span>
 							</div>
-							<span class="text-sm {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">Used</span>
+							<span class="text-sm {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">{dashboard_memory_used()}</span>
 						</div>
 
 						<div class="text-end">
-							<div class="text-sm font-medium tabular-nums">{mem.freeGB.toFixed(1)} GB <span class="text-xs {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">free</span></div>
+							<div class="text-sm font-medium tabular-nums">{mem.freeGB.toFixed(1)} GB <span class="text-xs {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">{dashboard_memory_free()}</span></div>
 						</div>
 					</div>
 
@@ -137,7 +150,7 @@ export const widgetMeta = {
 							onmouseenter={() => (activeRing = true)}
 							onmouseleave={() => (activeRing = false)}
 							role="img"
-							aria-label="Concentric memory usage chart. Outer ring is physical RAM, inner ring is swap space."
+							aria-label={dashboard_memory_chart_aria()}
 						>
 							<svg width="148" height="148" viewBox="0 0 42 42" class="transform -rotate-90 overflow-visible">
 								<!-- Outer RAM background ring -->
@@ -194,7 +207,7 @@ export const widgetMeta = {
 								<span class="text-3xl font-semibold tabular-nums {theme === 'dark' ? 'text-white' : 'text-gray-900'}">
 									{mem.percent.toFixed(0)}
 								</span>
-								<span class="text-[9px] font-bold tracking-widest uppercase {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">RAM USED</span>
+								<span class="text-[9px] font-bold tracking-widest uppercase {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">{dashboard_memory_ram_used()}</span>
 							</div>
 						</div>
 					</div>
@@ -203,18 +216,18 @@ export const widgetMeta = {
 					<div class="space-y-4">
 						<div class="grid {size.w === 1 ? 'grid-cols-2' : 'grid-cols-3'} gap-4 text-center text-sm">
 							<div>
-								<div class={theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}>Total</div>
+								<div class={theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}>{dashboard_memory_total()}</div>
 								<div class="font-semibold tabular-nums mt-0.5">{mem.totalGB.toFixed(1)} GB</div>
 							</div>
 							<div>
-								<div class={theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}>Used</div>
+								<div class={theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}>{dashboard_memory_used()}</div>
 								<div class="font-semibold tabular-nums mt-0.5 {mem.level === 'high' ? 'text-error-500' : mem.level === 'medium' ? 'text-warning-500' : 'text-success-500'}">
 									{mem.usedGB.toFixed(1)} GB
 								</div>
 							</div>
 							{#if size.w > 1}
 								<div>
-									<div class={theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}>Free</div>
+									<div class={theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}>{dashboard_memory_free()}</div>
 									<div class="font-semibold tabular-nums mt-0.5">{mem.freeGB.toFixed(1)} GB</div>
 								</div>
 							{/if}
@@ -224,20 +237,20 @@ export const widgetMeta = {
 						{#if mem.swapPercent !== null}
 							<div class="border-t pt-2.5 {theme === 'dark' ? 'border-gray-800' : 'border-gray-150'}">
 								<div class="flex justify-between text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1.5 px-1">
-									<span>Swap Memory</span>
-									<span class="tabular-nums">{mem.swapPercent.toFixed(0)}% Used</span>
+									<span>{dashboard_memory_swap_memory()}</span>
+									<span class="tabular-nums">{mem.swapPercent.toFixed(0)}{dashboard_memory_pct_used()}</span>
 								</div>
 								<div class="grid grid-cols-3 gap-2 text-center text-xs">
 									<div>
-										<div class="text-[10px] text-gray-400 dark:text-gray-500">Total</div>
+										<div class="text-[10px] text-gray-400 dark:text-gray-500">{dashboard_memory_total()}</div>
 										<div class="font-medium text-gray-600 dark:text-gray-300 tabular-nums">{mem.swapTotalGB.toFixed(1)} GB</div>
 									</div>
 									<div>
-										<div class="text-[10px] text-gray-400 dark:text-gray-500">Used</div>
+										<div class="text-[10px] text-gray-400 dark:text-gray-500">{dashboard_memory_used()}</div>
 										<div class="font-medium text-gray-600 dark:text-gray-300 tabular-nums">{mem.swapUsedGB.toFixed(1)} GB</div>
 									</div>
 									<div>
-										<div class="text-[10px] text-gray-400 dark:text-gray-500">Free</div>
+										<div class="text-[10px] text-gray-400 dark:text-gray-500">{dashboard_memory_free()}</div>
 										<div class="font-medium text-gray-600 dark:text-gray-300 tabular-nums">{mem.swapFreeGB.toFixed(1)} GB</div>
 									</div>
 								</div>
@@ -250,8 +263,8 @@ export const widgetMeta = {
 			<div class="flex h-full flex-col items-center justify-center space-y-3" role="status" aria-live="polite">
 				<div class="h-8 w-8 animate-spin rounded-full border-2 border-success-500 border-t-transparent"></div>
 				<div class="text-center">
-					<div class="text-sm font-medium {theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}">Loading memory metrics</div>
-					<div class="text-xs {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">Please wait...</div>
+					<div class="text-sm font-medium {theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}">{dashboard_memory_loading()}</div>
+					<div class="text-xs {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">{dashboard_memory_please_wait()}</div>
 				</div>
 			</div>
 		{/if}

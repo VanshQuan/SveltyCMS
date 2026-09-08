@@ -339,3 +339,76 @@ describe("RateLimiter (Endpoint & Action Limiter)", () => {
     expect(await limiter.isLimited(event)).toBe(false);
   });
 });
+
+describe("Token-Bucket Algorithm, Adaptive Throttling & Redis Fallback", () => {
+  beforeEach(() => {
+    resetRateLimitBuckets();
+  });
+
+  it("dynamically grants 10x capacity for Admin role (adaptive throttling)", async () => {
+    const adminEvent = postEvent("/api/collections");
+    (adminEvent.locals as any).user = { _id: "admin-1", role: "admin", isAdmin: true };
+
+    const res = await handleRateLimit({ event: adminEvent, resolve: mockResolve as any });
+    expect(res.status).toBe(200);
+    // Base 1000 * 10x admin multiplier = 10000
+    expect(res.headers.get("X-RateLimit-Limit")).toBe("10000");
+    expect(res.headers.get("X-RateLimit-Remaining")).toBe("9999");
+  });
+
+  it("dynamically grants 2x capacity for Authenticated User (adaptive throttling)", async () => {
+    const userEvent = postEvent("/api/collections");
+    (userEvent.locals as any).user = { _id: "user-1", role: "editor" };
+
+    const res = await handleRateLimit({ event: userEvent, resolve: mockResolve as any });
+    expect(res.status).toBe(200);
+    // Base 1000 * 2x user multiplier = 2000
+    expect(res.headers.get("X-RateLimit-Limit")).toBe("2000");
+    expect(res.headers.get("X-RateLimit-Remaining")).toBe("1999");
+  });
+
+  it("falls back to local in-memory Token Bucket when Redis throws or disconnects", async () => {
+    const { cacheService } = await import("@src/databases/cache/cache-service");
+    const originalGetRedis = (cacheService as any).getRedisClient;
+
+    // Simulate failing Redis
+    (cacheService as any).getRedisClient = () => ({
+      isOpen: true,
+      eval: vi.fn().mockRejectedValue(new Error("ECONNREFUSED - Redis cluster unavailable")),
+    });
+
+    try {
+      const event = postEvent("/api/test-redis-fallback");
+      const res = await handleRateLimit({ event, resolve: mockResolve as any });
+      // Should not throw, but gracefully degrade to local memory
+      expect(res.status).toBe(200);
+      expect(res.headers.get("X-RateLimit-Limit")).toBe("1000");
+      expect(res.headers.get("X-RateLimit-Remaining")).toBe("999");
+    } finally {
+      (cacheService as any).getRedisClient = originalGetRedis;
+      resetRateLimitBuckets();
+    }
+  });
+
+  it("correctly routes through Redis token-bucket when Redis is available", async () => {
+    const { cacheService } = await import("@src/databases/cache/cache-service");
+    const originalGetRedis = (cacheService as any).getRedisClient;
+
+    const mockEval = vi.fn().mockResolvedValue([1, 950, 0]);
+    (cacheService as any).getRedisClient = () => ({
+      isOpen: true,
+      eval: mockEval,
+    });
+
+    try {
+      const event = postEvent("/api/test-redis-primary");
+      const res = await handleRateLimit({ event, resolve: mockResolve as any });
+      expect(res.status).toBe(200);
+      expect(mockEval).toHaveBeenCalled();
+      expect(res.headers.get("X-RateLimit-Remaining")).toBe("950");
+    } finally {
+      (cacheService as any).getRedisClient = originalGetRedis;
+      resetRateLimitBuckets();
+    }
+  });
+});

@@ -28,6 +28,11 @@ export const widgetMeta = {
 	import type { WidgetSize } from '@src/content/types';
 	import BaseWidget from '../../base-widget.svelte';
 	import { formatDate } from '@utils/format-date';
+	import {
+		widget_sysmsg_none,
+		widget_sysmsg_smooth,
+		widget_sysmsg_count
+	} from '@src/paraglide/messages';
 
 	interface SysMessage {
 		id?: string;
@@ -136,12 +141,12 @@ export const widgetMeta = {
 		{#if messages.length === 0}
 			<div class="flex h-full flex-col items-center justify-center text-center">
 				<iconify-icon icon="mdi:chat-sleep" class="text-4xl opacity-20 mb-3" ></iconify-icon>
-				<div class="text-sm font-medium text-surface-500">No system messages</div>
-				<div class="text-xs text-surface-400 mt-1">Everything is running smoothly</div>
+				<div class="text-sm font-medium text-surface-500">{widget_sysmsg_none()}</div>
+				<div class="text-xs text-surface-400 mt-1">{widget_sysmsg_smooth()}</div>
 			</div>
 		{:else if isCompact}
 			<div class="flex h-full items-center gap-2 overflow-hidden">
-				<span class="shrink-0 text-xs font-semibold text-surface-500">{messages.length} msgs</span>
+				<span class="shrink-0 text-xs font-semibold text-surface-500">{widget_sysmsg_count({ count: messages.length })}</span>
 				<div class="h-5 w-px shrink-0 bg-surface-200 dark:bg-surface-700"></div>
 				<div class="flex flex-1 items-center gap-1.5 overflow-x-auto scrollbar-none">
 					{#each messages.slice(0, 8) as msg (msg.id || msg.timestamp + msg.title)}

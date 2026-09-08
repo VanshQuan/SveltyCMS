@@ -6,7 +6,7 @@ order: 1
 icon: "mdi:shield-lock"
 author: "SveltyCMS Team"
 created: "2025-11-14"
-updated: "2026-08-18"
+updated: "2026-09-08"
 tags:
   - "security"
   - "documentation"
@@ -173,7 +173,7 @@ Every request to SveltyCMS passes through an **enterprise-grade pre-compiled pip
 3.  **🧪 Test Isolation**: Worker-index based database isolation for CI.
 4.  **🔥 Dynamic Firewall**: Scans for SQLi, XSS, and Command Injection threat patterns.
 5.  **📉 Load Shedding**: Automatically rejects mutations when memory usage > 90%.
-6.  **🚦 Rate Limiting**: Per-IP fixed-window token bucket with adaptive cost multipliers (0.8x–2.0x based on system pressure). Returns 429 with `Retry-After` and `X-RateLimit-*` headers.
+6.  **🚦 Rate Limiting**: Continuous Token-Bucket engine with Redis-primary backend, automatic local in-memory fallback (<2 µs), user-profile tier quotas (1x/2x/10x), and adaptive hardware load shedding (0.8x–2.0x). Returns 429 with `Retry-After` and `X-RateLimit-*` headers.
 7.  **🚧 Setup Guard**: Blocks initialization endpoints after the system is live.
 8.  **🔐 Authentication**: Resolves session and enforces tenant isolation.
 9.  **🛂 Authorization**: Granular RBAC and Fail-Closed API dispatching.
@@ -498,7 +498,7 @@ While the CMS provides built-in tools, a secure production deployment requires p
 
 ### User Management
 
-- [x] **Adaptive Rate Limiting (Hardware-Aware)**: Automatically scales request costs based on real-time CPU load and Event Loop lag, preventing resource exhaustion during traffic spikes.
+- [x] **Adaptive Token-Bucket Rate Limiter**: High-precision token replenishment, Redis L2 primary with 15ms circuit-breaker fallback to local memory (<2 µs), adaptive user tiers (Admin 10x, Authenticated 2x, Anonymous 1x), and hardware load scaling (0.8x–2.0x) — `tests/unit/hooks/rate-limit.test.ts`
 - [x] Password complexity requirements enforced - `tests/integration/routes/login/signup.test.ts`
 - [x] User roles and permissions reviewed - `tests/unit/hooks/authorization.test.ts`
 - [x] 2FA enabled for admin accounts - `tests/integration/api/auth-2fa.test.ts`
@@ -510,7 +510,7 @@ While the CMS provides built-in tools, a secure production deployment requires p
 ### Data Protection
 
 - [x] Audit logging enabled - `tests/integration/api/*`
-- [x] Sensitive data encrypted at rest - `tests/unit/utils/security.test.ts`
+- [x] Sensitive data encrypted at rest (ALE) with zero-tax fast paths (<18 µs overhead, <3% write duration impact) — `tests/benchmarks/ale-encryption-impact.test.ts`, `tests/unit/utils/field-encryption.test.ts`
 - [ ] Backup encryption enabled (infrastructure)
 - [ ] Key rotation schedule defined (operational)
 - [ ] Data retention policies configured (not tested)

@@ -15,7 +15,7 @@ Middle-ground height (h-[38px]), fixed dropdown borders, and right-aligned mobil
 	import ThemeToggle from '@src/components/theme-toggle.svelte';
 	import VersionCheck from '@src/components/version-check.svelte';
 	// Paraglide Messages
-	import { applayout_systemlanguage, setup_heading_subtitle } from '@src/paraglide/messages';
+	import { applayout_accessibility_help, applayout_systemlanguage, setup_heading_subtitle } from '@src/paraglide/messages';
 	import { getLanguageName } from '@utils/language-utils';
 	// Utils
 	import { modalState } from '@utils/modal.svelte';
@@ -136,8 +136,8 @@ Middle-ground height (h-[38px]), fixed dropdown borders, and right-aligned mobil
 				</SystemTooltip>
 			</div>
 
-			<SystemTooltip title="Accessibility Help">
-				<Button variant="outline" type="button" onclick={() => modalState.trigger(AccessibilityHelp)} aria-label="Accessibility Help" class="h-10 w-10 rounded text-surface-900 dark:text-surface-50">
+			<SystemTooltip title={applayout_accessibility_help()}>
+				<Button variant="outline" type="button" onclick={() => modalState.trigger(AccessibilityHelp)} aria-label={applayout_accessibility_help()} class="h-10 w-10 rounded text-surface-900 dark:text-surface-50">
 					<iconify-icon icon="mdi:accessibility" width="20"></iconify-icon>
 				</Button>
 			</SystemTooltip>

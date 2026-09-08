@@ -16,6 +16,13 @@ Sidebar navigation for System Settings
 	// Stores
 	import { groupsNeedingConfig } from '@src/routes/(app)/config/system-settings/settings-state.svelte';
 	import { page } from '$app/state';
+	import {
+		settings_needs_configuration,
+		settings_no_results,
+		settings_search_aria,
+		settings_search_placeholder,
+		settings_search_short,
+	} from '@src/paraglide/messages';
 
 	// Props
 	let { isFullSidebar = true } = $props();
@@ -57,10 +64,10 @@ Sidebar navigation for System Settings
 	<!-- Search -->
 	<div class="relative mb-2 {isFullSidebar ? 'w-full' : 'max-w-33.75'}">
 		<Input
-			aria-label="Search settings"
+			aria-label={settings_search_aria()}
 			type="text"
 			bind:value={searchTerm}
-			placeholder={isFullSidebar ? 'Search settings...' : 'Search'}
+			placeholder={isFullSidebar ? settings_search_placeholder() : settings_search_short()}
 			class="w-full {isFullSidebar ? 'h-12 py-3' : 'h-10 py-2'}"
 		/>
 		<div class="absolute inset-e-0 top-0 flex h-full items-center pe-3 pointer-events-none text-surface-400">
@@ -89,7 +96,7 @@ Sidebar navigation for System Settings
 					{#if isFullSidebar}
 						<div class="flex items-center gap-1">
 							{#if groupsNeedingConfig.has(group.id)}
-								<span class="text-lg text-warning-500" title="Needs configuration">⚠️</span>
+								<span class="text-lg text-warning-500" title={settings_needs_configuration()}>⚠️</span>
 							{/if}
 						</div>
 					{:else if groupsNeedingConfig.has(group.id)}
@@ -102,7 +109,7 @@ Sidebar navigation for System Settings
 
 		{#if filteredGroups.length === 0}
 			<div class="p-4 text-center text-sm text-surface-500">
-				<p>No results</p>
+				<p>{settings_no_results()}</p>
 			</div>
 		{/if}
 	</div>

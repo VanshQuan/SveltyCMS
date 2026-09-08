@@ -27,6 +27,21 @@ export const widgetMeta = {
 
 	import type { WidgetSize } from '@src/content/types';
 	import BaseWidget from '../../base-widget.svelte';
+	import {
+		widget_premium_extension,
+		widget_premium_trial_expired,
+		widget_premium_upgrade_license,
+		widget_scim_active_users,
+		widget_scim_all_healthy,
+		widget_scim_connecting,
+		widget_scim_last_sync,
+		widget_scim_provider,
+		widget_scim_some_degraded,
+		widget_scim_stats_aria,
+		widget_scim_sync_status,
+		widget_scim_synced_today,
+		widget_scim_today
+	} from '@src/paraglide/messages';
 
 	interface ScimMetrics {
 		status: 'healthy' | 'degraded' | 'error';
@@ -83,9 +98,9 @@ export const widgetMeta = {
 	>
 		<div class="flex h-full flex-col items-center justify-center text-center px-4 bg-surface-500/10 dark:bg-surface-800/50 rounded-lg">
 			<iconify-icon icon="mdi:lock-outline" class="text-4xl text-warning-500 mb-2"></iconify-icon>
-			<h3 class="text-sm font-semibold text-surface-600 dark:text-surface-400">Premium Extension</h3>
-			<p class="text-xs text-surface-500 mt-1 mb-3">Your 14-day trial for this extension has expired. A valid LICENSE_KEY is required.</p>
-			<a href="https://marketplace.sveltycms.com" target="_blank" class="text-xs font-medium text-primary-600 hover:text-primary-600 dark:text-primary-500">Upgrade License &rarr;</a>
+			<h3 class="text-sm font-semibold text-surface-600 dark:text-surface-400">{widget_premium_extension()}</h3>
+			<p class="text-xs text-surface-500 mt-1 mb-3">{widget_premium_trial_expired()}</p>
+			<a href="https://marketplace.sveltycms.com" target="_blank" class="text-xs font-medium text-primary-600 hover:text-primary-600 dark:text-primary-500">{widget_premium_upgrade_license()}</a>
 		</div>
 	</BaseWidget>
 {:else}
@@ -108,7 +123,7 @@ export const widgetMeta = {
 			<div class="flex h-full items-center justify-center">
 				<div class="flex flex-col items-center gap-3 text-surface-500">
 					<div class="h-8 w-8 animate-spin rounded-full border-2 border-tertiary-500 border-t-transparent"></div>
-					<p class="text-sm">Connecting to identity provider...</p>
+					<p class="text-sm">{widget_scim_connecting()}</p>
 				</div>
 			</div>
 		{:else}
@@ -118,7 +133,7 @@ export const widgetMeta = {
 			}))}
 			{const linePath = points.map((p: { x: number; y: number }, i: number) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(' ')}
 
-			<div class="flex h-full flex-col justify-between" role="region" aria-label="SCIM Sync status stats">
+			<div class="flex h-full flex-col justify-between" role="region" aria-label={widget_scim_stats_aria()}>
 				{#if size.h === 1}
 					<!-- Compact single-row layout -->
 					<div class="flex items-center justify-between text-xs px-1 w-full h-full min-h-9">
@@ -130,9 +145,9 @@ export const widgetMeta = {
 							<span class="font-bold tabular-nums text-sm capitalize {scim.status === 'healthy' ? 'text-success-600 dark:text-success-400' : scim.status === 'degraded' ? 'text-warning-600 dark:text-warning-400' : 'text-error-500'}">{scim.status}</span>
 						</div>
 						<div class="flex items-center gap-2 text-end">
-							<span class="font-semibold text-gray-700 dark:text-gray-300 tabular-nums">{scim.activeUsers} Active Users</span>
+							<span class="font-semibold text-gray-700 dark:text-gray-300 tabular-nums">{scim.activeUsers} {widget_scim_active_users()}</span>
 							{#if scim.syncedToday > 0}
-								<span class="text-gray-400 dark:text-gray-500">| +{scim.syncedToday} Today</span>
+								<span class="text-gray-400 dark:text-gray-500">{widget_scim_today({ count: scim.syncedToday })}</span>
 							{/if}
 						</div>
 					</div>
@@ -147,7 +162,7 @@ export const widgetMeta = {
 							<div class="text-xl font-bold capitalize {scim.status === 'healthy' ? 'text-success-600 dark:text-success-400' : scim.status === 'degraded' ? 'text-warning-600 dark:text-warning-400' : 'text-error-600'}">
 								{scim.status}
 							</div>
-							<div class="text-xs text-surface-500 dark:text-surface-400">SCIM Sync Status</div>
+							<div class="text-xs text-surface-500 dark:text-surface-400">{widget_scim_sync_status()}</div>
 						</div>
 					</div>
 
@@ -157,14 +172,14 @@ export const widgetMeta = {
 							<div class="text-3xl font-bold tabular-nums text-surface-900 dark:text-white">
 								{scim.activeUsers}
 							</div>
-							<div class="text-[10px] font-semibold uppercase tracking-wider text-surface-500 dark:text-surface-400 mt-1">Active Users</div>
+							<div class="text-[10px] font-semibold uppercase tracking-wider text-surface-500 dark:text-surface-400 mt-1">{widget_scim_active_users()}</div>
 						</div>
 
 						<div class="rounded-2xl bg-surface-500/10 p-4 dark:bg-surface-800 border border-transparent dark:border-gray-800 flex flex-col justify-between items-center relative overflow-hidden">
 							<div class="text-3xl font-bold tabular-nums text-surface-900 dark:text-white">
 								{scim.syncedToday}
 							</div>
-							<div class="text-[10px] font-semibold uppercase tracking-wider text-surface-500 dark:text-surface-400 mt-1">Synced Today</div>
+							<div class="text-[10px] font-semibold uppercase tracking-wider text-surface-500 dark:text-surface-400 mt-1">{widget_scim_synced_today()}</div>
 
 							<!-- Client-side mini sparkline for trend -->
 							{#if syncHistory.length > 1}
@@ -187,11 +202,11 @@ export const widgetMeta = {
 					<!-- Details -->
 					<div class="space-y-2 text-sm pt-2">
 						<div class="flex justify-between items-center py-1">
-							<span class="text-surface-500 dark:text-surface-400">Last Sync</span>
+							<span class="text-surface-500 dark:text-surface-400">{widget_scim_last_sync()}</span>
 							<span class="font-medium font-mono text-surface-600 dark:text-surface-400 tabular-nums">{scim.lastSync}</span>
 						</div>
 						<div class="flex justify-between items-center py-1 border-b border-gray-100 dark:border-gray-800 pb-2">
-							<span class="text-surface-500 dark:text-surface-400">Provider</span>
+							<span class="text-surface-500 dark:text-surface-400">{widget_scim_provider()}</span>
 							<span class="font-mono text-tertiary-600 dark:text-primary-500 font-semibold">{scim.provider}</span>
 						</div>
 
@@ -211,7 +226,7 @@ export const widgetMeta = {
 								class={scim.endpointsHealthy ? 'text-success-500' : 'text-warning-500'}
 							></iconify-icon>
 							<span class={scim.endpointsHealthy ? 'text-success-600 dark:text-success-400' : 'text-warning-600'}>
-								{scim.endpointsHealthy ? "All endpoints healthy" : "Some endpoints degraded"}
+								{scim.endpointsHealthy ? widget_scim_all_healthy() : widget_scim_some_degraded()}
 							</span>
 						</div>
 					</div>

@@ -39,7 +39,7 @@ You can define Content Collections in two ways: in code or via the GUI-based col
 
 All widget fields support localization, validation using [Valibot](https://valibot.dev), and access control.
 
-System localization uses [Inlang Paraglide JS](https://inlang.com/m/gerre34r/library-inlang-paraglideJs), a lightweight, type-safe i18n library. English is the default; additional languages are bundled and can be extended.
+System localization uses [Inlang Paraglide JS](https://inlang.com/m/gerre34r/library-inlang-paraglideJs), a lightweight, type-safe i18n library. **English and German ship by default.** Additional admin UI languages can be added in Setup (writes `project.inlang/settings.json` and runs machine translate) or by hand — see [System Languages](./docs/guides/configuration/system-languages.mdx).
 
 We use the latest [tailwindcss v4](https://tailwindcss.com), so the CMS can be quickly optimized to your personal needs.
 
@@ -253,11 +253,19 @@ SveltyCMS features a **native Svelte 5 component library** (42+ primitives) buil
 <tr>
 <td>
 
-We use [Paraglide JS](https://inlang.com/m/gerre34r/library-inlang-paraglideJs), the best i18n library together with [inlang](https://inlang.com/) ecosystem for first class System Translations with full typescript support.
+We use [Paraglide JS](https://inlang.com/m/gerre34r/library-inlang-paraglideJs) with the [inlang](https://inlang.com/) ecosystem for type-safe system translations. **English and German** ship compiled.
 
-Our System Translations are available at: [inlang](https://inlang.com/editor/github.com/SveltyCMS/SveltyCMS) and can easily be extended.
+**Add a language**
 
-If a language has not yet been defined, reach out to us, so that you can help extend the System Localization.
+1. Setup wizard (or System Settings → Available Locales) — same ISO picker as content languages, including RTL.
+2. Or edit `project.inlang/settings.json` (`locales` / `languageTags`), then:
+
+```bash
+bun translate          # machine-fill src/messages/{locale}.json
+bun run paraglide      # compile catalogs
+```
+
+Community review: [Fink](https://fink.inlang.com/github.com/SveltyCMS/SveltyCMS) (or a PR on `src/messages/`). Machine translate seeds new locales; Fink is the lektorat once the admin catalog is complete. Guide: [System Languages](./docs/guides/configuration/system-languages.mdx).
 
 </td>
 <td>

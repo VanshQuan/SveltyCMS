@@ -19,6 +19,14 @@ export const widgetMeta = {
 	import { toast } from '@src/stores/toast.svelte.ts';
 	import { clientJsonHeaders } from '@utils/security/client-csrf';
 	import BaseWidget from '../../base-widget.svelte';
+	import {
+		dashboard_health_aria,
+		dashboard_health_checking,
+		dashboard_health_latency_trend,
+		dashboard_health_reinitialize,
+		dashboard_health_system_uptime,
+		dashboard_health_uptime
+	} from '@src/paraglide/messages';
 
 	const {
 		label = 'System Health',
@@ -158,11 +166,11 @@ export const widgetMeta = {
 			<div class="flex h-full items-center justify-center">
 				<div class="flex flex-col items-center gap-3 text-surface-500">
 					<div class="h-8 w-8 animate-spin rounded-full border-2 border-tertiary-500 border-t-transparent"></div>
-					<p class="text-sm">Checking system health...</p>
+					<p class="text-sm">{dashboard_health_checking()}</p>
 				</div>
 			</div>
 		{:else}
-			<div class="flex h-full flex-col justify-between" role="region" aria-label="System Health Overview">
+			<div class="flex h-full flex-col justify-between" role="region" aria-label={dashboard_health_aria()}>
 				{#if size.h === 1}
 					<!-- Compact mode layout -->
 					<div class="flex items-center justify-between text-xs px-1 w-full h-full min-h-9">
@@ -173,7 +181,7 @@ export const widgetMeta = {
 							></iconify-icon>
 							<div>
 								<span class="font-semibold capitalize {overallColor}">{healthData.overallStatus}</span>
-								<span class="text-surface-500 dark:text-surface-400 ms-1">Uptime: {formatUptime(healthData.uptime)}</span>
+								<span class="text-surface-500 dark:text-surface-400 ms-1">{dashboard_health_uptime()} {formatUptime(healthData.uptime)}</span>
 							</div>
 						</div>
 
@@ -207,7 +215,7 @@ export const widgetMeta = {
 										{healthData.overallStatus}
 									</div>
 									<div class="text-xs text-surface-500 dark:text-surface-400">
-										System Uptime • {formatUptime(healthData.uptime)}
+										{dashboard_health_system_uptime()} • {formatUptime(healthData.uptime)}
 									</div>
 								</div>
 							</div>
@@ -217,7 +225,7 @@ export const widgetMeta = {
 								class="rounded border border-warning-500/30 px-3 py-1.5 text-xs font-semibold text-warning-600 hover:bg-warning-500/10 dark:text-warning-400 transition-all duration-150 flex items-center gap-1.5"
 							>
 								<iconify-icon icon="mdi:refresh" width={16}></iconify-icon>
-								Reinitialize
+								{dashboard_health_reinitialize()}
 							</button>
 						</div>
 
@@ -251,7 +259,7 @@ export const widgetMeta = {
 												y: 14 - (val / maxVal) * 12
 											}))}
 											{const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(' ')}
-											<div class="w-10 h-4 opacity-70 hidden sm:block" aria-hidden="true" title="Latency trend">
+											<div class="w-10 h-4 opacity-70 hidden sm:block" aria-hidden="true" title={dashboard_health_latency_trend()}>
 												<svg viewBox="0 0 40 14" class="w-full h-full overflow-visible">
 													<path d={linePath} fill="none" stroke="rgb(16, 185, 129)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" />
 												</svg>

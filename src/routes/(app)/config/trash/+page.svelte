@@ -20,6 +20,27 @@ import Loader from "@components/ui/loader.svelte";
 import AdminCard from "@components/admin-card.svelte";
 import AdminPageShell from "@components/admin-page-shell.svelte";
 import {
+	button_refresh,
+	trash_aria_loading,
+	trash_aria_refresh,
+	trash_aria_restore,
+	trash_empty_description,
+	trash_empty_title,
+	trash_load_failed,
+	trash_page_description,
+	trash_page_title,
+	trash_restore_button,
+	trash_restore_confirm_body,
+	trash_restore_confirm_title,
+	trash_restore_failed,
+	trash_restore_success,
+	trash_th_actions,
+	trash_th_collection,
+	trash_th_content,
+	trash_th_deleted_at,
+	trash_th_deleted_by,
+} from "@src/paraglide/messages";
+import {
 	listTrash,
 	restoreTrashItem,
 	unwrapTrashList,
@@ -35,23 +56,23 @@ async function loadTrash() {
 	if (response.success) {
 		trashedItems = unwrapTrashList(response);
 	} else {
-		toast.error(response.message || "Failed to load trash");
+		toast.error(response.message || trash_load_failed());
 	}
 	isLoading = false;
 }
 
 function restoreItem(collectionId: string, entryId: string, label: string) {
 	showConfirm({
-		title: "Restore Item",
-		body: `Restore <strong>${label}</strong> to its collection?`,
+		title: trash_restore_confirm_title(),
+		body: trash_restore_confirm_body({ label }),
 		onConfirm: async () => {
 			const response = await restoreTrashItem(collectionId, entryId);
 
 			if (response.success) {
-				toast.success("Item restored successfully");
+				toast.success(trash_restore_success());
 				await loadTrash();
 			} else {
-				toast.error(response.message || "Failed to restore item");
+				toast.error(response.message || trash_restore_failed());
 			}
 		},
 	});
@@ -61,9 +82,9 @@ onMount(loadTrash);
 </script>
 
 <AdminPageShell
-	title="Global Trash Bin"
+	title={trash_page_title()}
 	icon="mdi:delete-outline"
-	description="Browse and restore soft-deleted content from all collections"
+	description={trash_page_description()}
 	showBackButton={true}
 	backUrl="/config"
 >
@@ -74,9 +95,9 @@ onMount(loadTrash);
 			disabled={isLoading}
 			leadingIcon="mdi:refresh"
 			data-testid="trash-refresh"
-			aria-label="Refresh trash"
+			aria-label={trash_aria_refresh()}
 		>
-			Refresh
+			{button_refresh()}
 		</Button>
 	{/snippet}
 
@@ -86,7 +107,7 @@ onMount(loadTrash);
 				class="flex h-64 items-center justify-center border border-surface-500/30 bg-white p-6 dark:border-surface-500/40 dark:bg-surface-900/20"
 				data-testid="trash-loading"
 			>
-				<Loader variant="text" lines={2} lastLineWidth="40%" ariaLabel="Loading trash" />
+				<Loader variant="text" lines={2} lastLineWidth="40%" ariaLabel={trash_aria_loading()} />
 			</AdminCard>
 		{:else if trashedItems.length === 0}
 			<div in:fly={{ y: 20, delay: 100 }}>
@@ -95,8 +116,8 @@ onMount(loadTrash);
 					data-testid="trash-empty"
 				>
 					<iconify-icon icon="mdi:trash-can-outline" width="64" class="mx-auto mb-4 opacity-20"></iconify-icon>
-					<h3 class="text-xl font-semibold">Your trash is empty</h3>
-					<p class="text-surface-500">Deleted items will appear here for 30 days.</p>
+					<h3 class="text-xl font-semibold">{trash_empty_title()}</h3>
+					<p class="text-surface-500">{trash_empty_description()}</p>
 				</AdminCard>
 			</div>
 		{:else}
@@ -111,11 +132,11 @@ onMount(loadTrash);
 								<tr
 									class="border-b border-surface-500/30 dark:border-surface-500/40 text-start text-xs uppercase tracking-wider text-surface-400"
 								>
-									<th class="pb-3 font-semibold">Content</th>
-									<th class="pb-3 font-semibold">Collection</th>
-									<th class="pb-3 font-semibold">Deleted At</th>
-									<th class="pb-3 font-semibold">Deleted By</th>
-									<th class="pb-3 font-semibold text-end">Actions</th>
+									<th class="pb-3 font-semibold">{trash_th_content()}</th>
+									<th class="pb-3 font-semibold">{trash_th_collection()}</th>
+									<th class="pb-3 font-semibold">{trash_th_deleted_at()}</th>
+									<th class="pb-3 font-semibold">{trash_th_deleted_by()}</th>
+									<th class="pb-3 font-semibold text-end">{trash_th_actions()}</th>
 								</tr>
 							</thead>
 							<tbody class="divide-y divide-surface-100 dark:divide-surface-800/60">
@@ -145,9 +166,9 @@ onMount(loadTrash);
 												size="sm"
 												leadingIcon="mdi:restore"
 												data-testid="trash-restore"
-												aria-label="Restore item"
+												aria-label={trash_aria_restore()}
 											>
-												Restore
+												{trash_restore_button()}
 											</Button>
 										</td>
 									</tr>

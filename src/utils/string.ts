@@ -61,10 +61,11 @@ const RTL_LANGUAGES = new Set([
 
 /**
  * Returns the text direction (ltr/rtl) for a given language code.
- * Uses Set for O(1) lookup.
+ * Accepts ISO 639-1 (`ar`) and regional tags (`ar-SA`); lookup is O(1) on the base.
  */
 export function getTextDirection(lang: string): "ltr" | "rtl" {
-  return RTL_LANGUAGES.has(lang) ? "rtl" : "ltr";
+  const base = lang.trim().toLowerCase().replace(/_/g, "-").split("-")[0] ?? "";
+  return RTL_LANGUAGES.has(base) ? "rtl" : "ltr";
 }
 
 /**

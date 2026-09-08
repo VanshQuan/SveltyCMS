@@ -49,12 +49,10 @@ import DialogManager from "@src/components/system/dialog-manager.svelte";
 import ToastContainer from "@src/components/toast-container.svelte";
 // Paraglide locale bridge
 	import {
-		locales as availableLocales,
 		getLocale,
-		setLocale,
-		getTextDirection,
 	} from "@src/paraglide/runtime";
 import { locale } from "@src/stores/locale-store.svelte";
+import { applyDocumentLanguage, applySystemLanguage, isIso6391LanguageCode } from "@utils/system-locale";
 import CookieConsent from "@src/plugins/cookie-consent/cookie-consent.svelte";
 import { initWebMCP } from "@src/plugins/webmcp/init";
 // Global Settings
@@ -259,23 +257,17 @@ onMount(() => {
 	// Without this, screen.isMobile/isDesktop use SSR defaults (1024px)
 	screen.mount();
 
-	// URL is the source of truth on initial load
-	const urlLocale = getLocale();
-	if (
-		urlLocale &&
-		availableLocales.includes(urlLocale as any) &&
-		locale.systemLanguage !== urlLocale
-	) {
-		locale.systemLanguage = urlLocale as any;
-		currentLocale = urlLocale;
+	const fromPage = typeof page.data?.systemLanguage === "string" ? page.data.systemLanguage : "";
+	const initialLocale = isIso6391LanguageCode(fromPage)
+		? fromPage
+		: isIso6391LanguageCode(locale.systemLanguage)
+			? locale.systemLanguage
+			: getLocale();
+	if (initialLocale && locale.systemLanguage !== initialLocale) {
+		locale.systemLanguage = initialLocale;
 	}
-
-	// Set <html> dir + lang for RTL support on initial load
-	if (browser && document?.documentElement) {
-		const initialLocale = getLocale();
-		document.documentElement.dir = getTextDirection(initialLocale as any);
-		document.documentElement.lang = initialLocale || "en";
-	}
+	currentLocale = initialLocale;
+	applyDocumentLanguage(initialLocale);
 
 	// Initialize dark mode
 	initializeDarkMode();
@@ -355,26 +347,9 @@ $effect(() => {
 		const desired = locale.systemLanguage;
 		const current = untrack(() => currentLocale);
 
-		// Only update if there's an actual change
-		if (
-			desired &&
-			availableLocales.includes(desired as any) &&
-			current !== desired
-		) {
-			// Update Paraglide locale (handles routing internally)
-			setLocale(desired as any, { reload: false });
-			currentLocale = desired as any;
-
-			// Persist to localStorage so the preference survives sessions
-			if (browser) {
-				globalThis.localStorage.setItem("systemLanguage", desired);
-			}
-
-			// Update <html> dir attribute for RTL language support
-			if (browser && document?.documentElement) {
-				document.documentElement.dir = getTextDirection(desired as any);
-				document.documentElement.lang = desired;
-			}
+		if (desired && current !== desired) {
+			applySystemLanguage(desired);
+			currentLocale = desired;
 		}
 	});
 

@@ -48,9 +48,12 @@ import Button from '@components/ui/button.svelte';
 		applayout_systemconfiguration,
 		applayout_systemlanguage,
 		applayout_userprofile,
+		applayout_search_language,
+		applayout_select_language,
+		applayout_close_sidebar,
 	} from '@src/paraglide/messages';
-	import type { Locale } from '@src/paraglide/runtime';
-	import { locales as availableLocales, getLocale } from '@src/paraglide/runtime';
+	import { locales as bundledLocales, getLocale } from '@src/paraglide/runtime';
+	import { applySystemLanguage, mergeSystemLanguages } from '@utils/system-locale';
 	import { goto, refreshAll } from '$app/navigation';
 	// Stores
 	import { contentStructure } from '@src/stores/collection-store.svelte';
@@ -129,15 +132,19 @@ import Button from '@components/ui/button.svelte';
 		);
 	});
 
-	const availableLanguages = $derived([...availableLocales].sort((a, b) => getLanguageName(a, 'en').localeCompare(getLanguageName(b, 'en'))));
+	const availableLanguages = $derived(
+		mergeSystemLanguages(publicEnv.LOCALES as string[] | undefined, bundledLocales).sort((a, b) =>
+			getLanguageName(a, 'en').localeCompare(getLanguageName(b, 'en'))
+		)
+	);
 
 	const showLanguageDropdown = $derived(availableLanguages.length > LANGUAGE_DROPDOWN_THRESHOLD);
 
-	let languageTag = $state<Locale>(getLocale() as Locale);
+	let languageTag = $state<string>(systemLanguage.value || getLocale());
 
-	// Keep languageTag in sync when the Paraglide locale changes externally
+	// Keep languageTag in sync when the system language changes externally
 	$effect(() => {
-		languageTag = getLocale() as Locale;
+		languageTag = systemLanguage.value || getLocale();
 	});
 
 	const filteredLanguages = $derived(
@@ -191,9 +198,9 @@ import Button from '@components/ui/button.svelte';
 
 	// Event handlers
 	function handleLanguageSelection(lang: AvailableLanguage): void {
-		systemLanguage.value = lang;
-		systemLanguage.set(lang as Locale);
-		languageTag = lang as Locale;
+		systemLanguage.set(lang);
+		languageTag = lang;
+		applySystemLanguage(lang);
 		searchQuery = '';
 	}
 
@@ -276,7 +283,7 @@ import Button from '@components/ui/button.svelte';
 			<Button variant="ghost"
 				type="button"
 				onclick={() => toggleUIElement('leftSidebar', 'hidden')}
-				aria-label="Close Sidebar"
+				aria-label={applayout_close_sidebar()}
 			 class="p-0! min-w-0 preset-outlined-surface-500">
 				<iconify-icon icon="mingcute:menu-fill" width="24"></iconify-icon>
 			</Button>
@@ -523,7 +530,7 @@ import Button from '@components/ui/button.svelte';
  								<Button
  									variant="ghost"
  									rounded
- 									aria-label="Select language"
+ 									aria-label={applayout_select_language()}
  									data-testid="language-selector-trigger"
  									class="mb-3 flex items-center justify-center uppercase bg-surface-200 dark:bg-surface-700 text-surface-900 dark:text-white hover:bg-surface-300 dark:hover:bg-surface-600 {isSidebarFull ? 'h-12 w-12 text-xs font-bold' : 'h-11 w-11 text-xs font-bold'}"
  								>
@@ -538,10 +545,10 @@ import Button from '@components/ui/button.svelte';
 
  							{#if showLanguageDropdown}
  								<div class="px-2 pb-2 mb-1 border-b border-surface-500/30 dark:border-surface-50">
-									<Input aria-label="Search"
+									<Input aria-label={applayout_search_language()}
 										type="text"
 										bind:value={searchQuery}
-										placeholder="Search language..."
+										placeholder={applayout_search_language()}
 										inputClass="w-full rounded bg-surface-200 dark:bg-surface-800 px-3 py-2 text-sm placeholder:text-surface-400 focus:outline-none focus:ring-2 focus:ring-primary-500 text-surface-900 dark:text-white border-none"
 									/>
  								</div>

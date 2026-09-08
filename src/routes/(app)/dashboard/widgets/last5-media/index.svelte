@@ -28,6 +28,11 @@ export const widgetMeta = {
 	import type { WidgetSize } from '@src/content/types';
 	import { formatDisplayDate } from '@utils/date';
 	import BaseWidget from '../../base-widget.svelte';
+	import {
+		widget_media_no_files,
+		widget_media_files_appear,
+		widget_media_files_count
+	} from '@src/paraglide/messages';
 
 	interface MediaFile {
 		id: string;
@@ -123,12 +128,12 @@ export const widgetMeta = {
 		{#if files.length === 0}
 			<div class="flex h-full flex-col items-center justify-center text-center">
 				<iconify-icon icon="mdi:file-image-remove-outline" class="text-4xl opacity-20 mb-3"  ></iconify-icon>
-				<div class="text-sm font-medium text-surface-500">No media files yet</div>
-				<div class="text-xs text-surface-400 mt-1">Uploaded files will appear here</div>
+				<div class="text-sm font-medium text-surface-500">{widget_media_no_files()}</div>
+				<div class="text-xs text-surface-400 mt-1">{widget_media_files_appear()}</div>
 			</div>
 		{:else if isCompact}
 			<div class="flex h-full items-center gap-2 overflow-hidden">
-				<span class="shrink-0 text-xs font-semibold text-surface-500">{files.length} files</span>
+				<span class="shrink-0 text-xs font-semibold text-surface-500">{widget_media_files_count({ count: files.length })}</span>
 				<div class="h-5 w-px shrink-0 bg-surface-200 dark:bg-surface-700"></div>
 				<div class="flex flex-1 items-center gap-1.5 overflow-x-auto scrollbar-none">
 					{#each files.slice(0, 8) as f (f.id)}

@@ -26,6 +26,14 @@ export const widgetMeta = {
 	import type { WidgetSize } from '@src/content/types';
 	import { formatRelativeDate } from '@utils/date';
 	import BaseWidget from '../../base-widget.svelte';
+	import {
+		widget_last5_recent_items,
+		widget_last5_recent_content,
+		widget_last5_status,
+		widget_last5_author,
+		widget_last5_no_content,
+		widget_last5_items_appear
+	} from '@src/paraglide/messages';
 
 	interface ContentItem {
 		id: string;
@@ -73,7 +81,7 @@ export const widgetMeta = {
 <BaseWidget
 	{label}
 	{theme}
-	endpoint="/api/dashboard/last5-content"
+	endpoint="/api/dashboard/last5"
 	pollInterval={30000}
 	{icon}
 	{widgetId}
@@ -84,11 +92,11 @@ export const widgetMeta = {
 	{#snippet children({ data: items }: { data: FetchedData })}
 		{#if items && Array.isArray(items) && items.length > 0}
 			{const limit = size.h === 1 ? 1 : 5}
-			<div class="flex flex-col h-full overflow-hidden" role="region" aria-label="Recent content items">
+			<div class="flex flex-col h-full overflow-hidden" role="region" aria-label={widget_last5_recent_items()}>
 				<div 
 					class="flex-1 overflow-y-auto pe-1 space-y-1.5 custom-scroll" 
 					role="list"
-					aria-label="Recent content"
+					aria-label={widget_last5_recent_content()}
 				>
 					{#each items.slice(0, limit) as item (item.id)}
 						<div role="listitem">
@@ -101,7 +109,7 @@ export const widgetMeta = {
 								<div class="mt-1 shrink-0">
 									<div 
 										class="h-2.5 w-2.5 rounded-full {getStatusColor(item.status)} ring-2 ring-white dark:ring-gray-900" 
-										title="Status: {getStatusLabel(item.status)}"
+										title={`${widget_last5_status()}: ${getStatusLabel(item.status)}`}
 									></div>
 								</div>
 
@@ -119,7 +127,7 @@ export const widgetMeta = {
 
 								<!-- Creator email abbreviation -->
 								{#if size.w >= 2 || size.h >= 2}
-									<div class="text-end text-[10px] text-gray-400 dark:text-gray-500 whitespace-nowrap shrink-0 pt-0.5" title="Author: {item.createdBy}">
+									<div class="text-end text-[10px] text-gray-400 dark:text-gray-500 whitespace-nowrap shrink-0 pt-0.5" title={`${widget_last5_author()}: ${item.createdBy}`}>
 										{item.createdBy?.split('@')[0] || '—'}
 									</div>
 								{/if}
@@ -133,8 +141,8 @@ export const widgetMeta = {
 				<div class="text-4xl text-gray-300 dark:text-gray-600 mb-2">
 					<iconify-icon icon="mdi:file-remove-outline" width={32}></iconify-icon>
 				</div>
-				<div class="text-xs font-semibold text-gray-600 dark:text-gray-400">No recent content</div>
-				<div class="text-[10px] text-gray-400 dark:text-gray-500 mt-0.5">New items will appear here</div>
+				<div class="text-xs font-semibold text-gray-600 dark:text-gray-400">{widget_last5_no_content()}</div>
+				<div class="text-[10px] text-gray-400 dark:text-gray-500 mt-0.5">{widget_last5_items_appear()}</div>
 			</div>
 		{/if}
 	{/snippet}

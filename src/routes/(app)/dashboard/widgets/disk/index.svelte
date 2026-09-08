@@ -27,6 +27,17 @@ export const widgetMeta = {
 <script lang="ts">
 	import type { WidgetSize } from '@src/content/types';
 	import BaseWidget from '../../base-widget.svelte';
+	import {
+		dashboard_disk_aria,
+		dashboard_disk_free,
+		dashboard_disk_fs,
+		dashboard_disk_loading,
+		dashboard_disk_mount,
+		dashboard_disk_please_wait,
+		dashboard_disk_select_drive,
+		dashboard_disk_total,
+		dashboard_disk_used
+	} from '@src/paraglide/messages';
 
 	interface DiskInfo {
 		filesystem?: string;
@@ -100,16 +111,17 @@ export const widgetMeta = {
 		{const disk = disks.find(d => d.key === activeDiskKey) || disks[0]}
 
 		{#if disk}
-			<div class="flex h-full flex-col justify-between space-y-3" role="region" aria-label="Disk usage statistics">
+			<div class="flex h-full flex-col justify-between space-y-3" role="region" aria-label={dashboard_disk_aria()}>
 				<!-- Multi-disk Selector tabs (Only shown if more than 1 disk is detected) -->
 				{#if disks.length > 1}
 					<div
 						class="flex flex-wrap gap-1.5 border-b pb-2 {theme === 'dark' ? 'border-gray-800' : 'border-gray-200'}"
 						role="tablist"
-						aria-label="Select disk drive"
+						aria-label={dashboard_disk_select_drive()}
 					>
 						{#each disks as d (d.key)}
-							<Button variant="outline">
+							<Button
+								variant="outline"
 								type="button"
 								role="tab"
 								aria-selected={disk.key === d.key}
@@ -137,11 +149,11 @@ export const widgetMeta = {
 							<span class="text-3xl font-semibold tabular-nums tracking-tighter">{disk.percent.toFixed(1)}</span>
 							<span class="text-xl font-medium text-gray-400">%</span>
 						</div>
-						<span class="text-sm {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">Used</span>
+						<span class="text-sm {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">{dashboard_disk_used()}</span>
 					</div>
 
 					<div class="text-end text-sm">
-						<div class="font-medium tabular-nums">{disk.free.toFixed(1)} GB <span class="text-xs {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">free</span></div>
+						<div class="font-medium tabular-nums">{disk.free.toFixed(1)} GB <span class="text-xs {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">{dashboard_disk_free()}</span></div>
 					</div>
 				</div>
 
@@ -169,18 +181,18 @@ export const widgetMeta = {
 				<div class="space-y-3">
 					<div class="grid {size.w === 1 ? 'grid-cols-2' : 'grid-cols-3'} gap-4 text-center text-sm">
 						<div>
-							<div class={theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}>Total</div>
+							<div class={theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}>{dashboard_disk_total()}</div>
 							<div class="font-semibold tabular-nums mt-0.5">{disk.total.toFixed(1)} GB</div>
 						</div>
 						<div>
-							<div class={theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}>Used</div>
+							<div class={theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}>{dashboard_disk_used()}</div>
 							<div class="font-semibold tabular-nums mt-0.5 {disk.level === 'high' ? 'text-error-500' : disk.level === 'medium' ? 'text-warning-500' : 'text-tertiary-500'}">
 								{disk.used.toFixed(1)} GB
 							</div>
 						</div>
 						{#if size.w > 1}
 							<div>
-								<div class={theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}>Free</div>
+								<div class={theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}>{dashboard_disk_free()}</div>
 								<div class="font-semibold tabular-nums mt-0.5">{disk.free.toFixed(1)} GB</div>
 							</div>
 						{/if}
@@ -224,9 +236,9 @@ export const widgetMeta = {
 
 				{#if size.w >= 2}
 					<div class="flex justify-between text-xs pt-2 border-t {theme === 'dark' ? 'border-gray-700 text-gray-400' : 'border-gray-200 text-gray-500'}">
-						<span>Mount: <span class="font-mono text-gray-300 dark:text-gray-400">{disk.mountPoint}</span></span>
+						<span>{dashboard_disk_mount()} <span class="font-mono text-gray-300 dark:text-gray-400">{disk.mountPoint}</span></span>
 						{#if disk.filesystem}
-							<span>FS: <span class="font-mono text-gray-300 dark:text-gray-400">{disk.filesystem}</span></span>
+							<span>{dashboard_disk_fs()} <span class="font-mono text-gray-300 dark:text-gray-400">{disk.filesystem}</span></span>
 						{/if}
 					</div>
 				{/if}
@@ -235,8 +247,8 @@ export const widgetMeta = {
 			<div class="flex h-full flex-col items-center justify-center space-y-3" role="status" aria-live="polite">
 				<div class="h-8 w-8 animate-spin rounded-full border-2 border-tertiary-500 border-t-transparent"></div>
 				<div class="text-center">
-					<div class="text-sm font-medium {theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}">Loading disk metrics</div>
-					<div class="text-xs {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">Please wait...</div>
+					<div class="text-sm font-medium {theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}">{dashboard_disk_loading()}</div>
+					<div class="text-xs {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">{dashboard_disk_please_wait()}</div>
 				</div>
 			</div>
 		{/if}

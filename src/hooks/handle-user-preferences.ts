@@ -6,26 +6,17 @@
  *
  * ### Performance:
  * - Uses pre-computed request flags from Turbo Pipeline to skip API/static routes
- * - Only runs transformPageChunk for dark-mode to prevent FOUC (Flash of Unstyled Content)
+ * - Stamps html lang/dir from the system-language cookie (RTL via getTextDirection)
+ * - Adds class="dark" in transformPageChunk to prevent FOUC when the theme cookie is dark
  * - Skips theme retrieval when ThemeManager is not initialized
  */
 
 import { ThemeManager } from "@src/databases/theme-manager";
 import { getSystemState } from "@src/stores/system/state.svelte.ts";
-import type { Locale } from "@src/paraglide/runtime";
-import { locales } from "@src/paraglide/runtime";
 import type { Handle } from "@sveltejs/kit/hooks";
 import { logger } from "@utils/logger";
 import { getRequestFlags, shouldSkipRouteMiddleware } from "@utils/hook-utils";
-
-// --- UTILITY FUNCTIONS ---
-
-function isValidLocale(lang: string | undefined): lang is Locale {
-  if (!lang) {
-    return false;
-  }
-  return (locales as readonly string[]).includes(lang);
-}
+import { isIso6391LanguageCode, languageBase, systemHtmlAttrs } from "@utils/system-locale";
 
 // --- MAIN HOOK ---
 
@@ -53,22 +44,22 @@ export const handleUserPreferences: Handle = async ({ event, resolve }) => {
   // `event.locals`; SSR reads it from locals and the client hydrates its own
   // stores from the injected page data (see `+layout.server.ts`).
   const systemLangCookie = cookies.get("systemLanguage");
-  const systemLangValid = systemLangCookie ? isValidLocale(systemLangCookie) : false;
+  const systemLangValid = isIso6391LanguageCode(systemLangCookie);
   if (systemLangCookie && !systemLangValid) {
     logger.debug("Removing invalid systemLanguage cookie");
     cookies.delete("systemLanguage", { path: "/" });
   }
 
   const contentLangCookie = cookies.get("contentLanguage");
-  const contentLangValid = contentLangCookie ? isValidLocale(contentLangCookie) : false;
+  const contentLangValid = isIso6391LanguageCode(contentLangCookie);
   if (contentLangCookie && !contentLangValid) {
     logger.debug("Removing invalid contentLanguage cookie");
     cookies.delete("contentLanguage", { path: "/" });
   }
 
   // Request-scoped SSR language (no global store mutation)
-  event.locals.systemLanguage = systemLangValid ? (systemLangCookie as Locale) : undefined;
-  event.locals.contentLanguage = contentLangValid ? (contentLangCookie as Locale) : undefined;
+  event.locals.systemLanguage = systemLangValid ? languageBase(systemLangCookie) : undefined;
+  event.locals.contentLanguage = contentLangValid ? languageBase(contentLangCookie) : undefined;
 
   // --- 2. THEME LOGIC ---
   const themeManager = ThemeManager.getInstance();
@@ -105,16 +96,22 @@ export const handleUserPreferences: Handle = async ({ event, resolve }) => {
     event.locals.customCss = "";
   }
 
-  // 🚀 FAST-PATH: Skip transformPageChunk if not dark mode (no HTML transformation needed)
+  const { lang, dir } = systemHtmlAttrs(event.locals.systemLanguage);
+  const applyHtmlLangDir = (html: string): string =>
+    html.replace(/\blang="[^"]*"/, `lang="${lang}"`).replace(/\bdir="[^"]*"/, `dir="${dir}"`);
+
+  // Always stamp html lang/dir (RTL included). Dark class still only when requested.
   if (themePreference !== "dark") {
-    return resolve(event);
+    return resolve(event, {
+      transformPageChunk: ({ html }) => applyHtmlLangDir(html),
+    });
   }
 
-  // Transform the HTML response to prevent dark-mode flickering
   return resolve(event, {
     transformPageChunk: ({ html }) => {
-      const htmlTag = '<html lang="en" dir="ltr">';
-      return html.replace(htmlTag, '<html lang="en" dir="ltr" class="dark">');
+      const withLang = applyHtmlLangDir(html);
+      if (/\bclass="dark"/.test(withLang)) return withLang;
+      return withLang.replace(/<html\b([^>]*)>/, `<html$1 class="dark">`);
     },
   });
 };

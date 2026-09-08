@@ -12,6 +12,14 @@
 
 <script lang="ts">
 import { onMount } from "svelte";
+import {
+	Collections_MediaGallery,
+	mediagallery_create_folder,
+	mediagallery_filter_type,
+	mediagallery_loading_table,
+	mediagallery_new_folder,
+	mediagallery_title,
+} from "@src/paraglide/messages";
 import { slide } from "svelte/transition";
 import { refreshAll } from "$app/navigation";
 import { page } from "$app/state";
@@ -220,7 +228,7 @@ const filteredFiles = $derived.by(() => {
 // the current folder's path is resolved back to its folder via systemVirtualFolders.
 const breadcrumbs = $derived.by(() => {
 	const crumbs: Array<{ name: string; folderId: string | null }> = [
-		{ name: "Media Gallery", folderId: null },
+		{ name: mediagallery_title(), folderId: null },
 	];
 	const current = data.currentFolder as { path?: string } | null;
 	if (current?.path && current.path !== "/") {
@@ -572,7 +580,7 @@ async function handleCreateFolder() {
 	modalState.trigger(
 		ModalPrompt as any,
 		{
-			title: "Create New Folder",
+			title: mediagallery_new_folder(),
 			body: "Enter a name for the new folder:",
 			value: "",
 			type: "text",
@@ -666,7 +674,7 @@ async function handleDeleteImage(file: MediaBase | MediaImage) {
 </script>
 
 <AdminPageShell
-	title="Media Gallery"
+	title={Collections_MediaGallery()}
 	icon="bi:images"
 	highlight="Gallery"
 	showBackButton={true}
@@ -681,12 +689,12 @@ async function handleDeleteImage(file: MediaBase | MediaImage) {
 				variant="surface"
 				size="sm"
 				onclick={handleCreateFolder}
-				aria-label="Create new virtual folder"
+				aria-label={mediagallery_create_folder()}
 				data-testid="media-create-folder"
 				class="h-9 gap-1.5 px-2 sm:px-3"
 			>
 				<iconify-icon icon="mdi:folder-plus" width="18"></iconify-icon>
-				<span class="hidden sm:inline">New Folder</span>
+				<span class="hidden sm:inline">{mediagallery_new_folder()}</span>
 			</Button>
 
 			<span class="hidden h-4 w-px bg-surface-300 sm:block dark:bg-surface-700" aria-hidden="true"></span>
@@ -940,7 +948,7 @@ async function handleDeleteImage(file: MediaBase | MediaImage) {
 					<div transition:slide={{ duration: motionDuration(200) }} class="flex flex-col gap-1.5 pb-1">
 						<div class="flex gap-2">
 							{#if view === 'grid'}
-								<label for="media-type-filter-m" class="sr-only">Filter by media type</label>
+								<label for="media-type-filter-m" class="sr-only">{mediagallery_filter_type()}</label>
 								<Select id="media-type-filter-m" bind:value={selectedMediaType} options={mediaTypeOptions} placeholder="Type" class="flex-1" />
 							{/if}
 							<label for="sort-by-filter-m" class="sr-only">Sort by</label>
@@ -1032,7 +1040,7 @@ async function handleDeleteImage(file: MediaBase | MediaImage) {
 
 				{#if view === 'grid'}
 					<div class="w-28 shrink-0">
-						<label for="media-type-filter" class="sr-only">Filter by media type</label>
+						<label for="media-type-filter" class="sr-only">{mediagallery_filter_type()}</label>
 						<Select id="media-type-filter" bind:value={selectedMediaType} options={mediaTypeOptions} placeholder="Type" />
 					</div>
 				{/if}
@@ -1143,7 +1151,7 @@ async function handleDeleteImage(file: MediaBase | MediaImage) {
 				/>
 			{:else}
 				{#await import("./media-table.svelte")}
-					<div class="flex flex-1 items-center justify-center py-16 text-sm text-surface-500">Loading table…</div>
+					<div class="flex flex-1 items-center justify-center py-16 text-sm text-surface-500">{mediagallery_loading_table()}</div>
 				{:then mod}
 					<mod.default
 						filteredFiles={filteredFiles}

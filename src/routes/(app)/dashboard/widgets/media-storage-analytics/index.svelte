@@ -25,7 +25,18 @@ export const widgetMeta = {
 <script lang="ts">
 	import type { WidgetSize } from '@src/content/types';
 	import BaseWidget from '../../base-widget.svelte';
-	import { formatNumber } from '@utils/format-date';
+	import {
+		widget_media_files_count,
+		widget_mediastorage_files_size,
+		widget_mediastorage_free,
+		widget_mediastorage_no_analytics,
+		widget_mediastorage_quota,
+		widget_mediastorage_quota_usage_aria,
+		widget_mediastorage_quota_used,
+		widget_mediastorage_top_types,
+		widget_mediastorage_total,
+		widget_mediastorage_upload_populate
+	} from '@src/paraglide/messages';
 
 	interface MediaAnalytics {
 		total: {
@@ -94,8 +105,8 @@ export const widgetMeta = {
 		{#if !analytics?.total}
 			<div class="flex h-full flex-col items-center justify-center text-center">
 				<iconify-icon icon="mdi:chart-donut" class="mb-3 text-4xl opacity-20"></iconify-icon>
-				<div class="text-sm font-medium text-surface-500">No storage analytics yet</div>
-				<div class="mt-1 text-xs text-surface-400">Upload media to populate insights</div>
+				<div class="text-sm font-medium text-surface-500">{widget_mediastorage_no_analytics()}</div>
+				<div class="mt-1 text-xs text-surface-400">{widget_mediastorage_upload_populate()}</div>
 			</div>
 		{:else if isCompact}
 			<div class="flex h-full items-center justify-between gap-3 px-1">
@@ -103,10 +114,10 @@ export const widgetMeta = {
 					<div class="text-lg font-bold tabular-nums text-surface-900 dark:text-surface-100">
 						{analytics.total.formattedSize}
 					</div>
-					<div class="text-xs text-surface-500">{formatNumber(analytics.total.files)} files</div>
+					<div class="text-xs text-surface-500">{widget_media_files_count({ count: analytics.total.files })}</div>
 				</div>
 				<div class="shrink-0 text-end">
-					<div class="text-xs font-semibold uppercase tracking-wide text-surface-500">Quota</div>
+					<div class="text-xs font-semibold uppercase tracking-wide text-surface-500">{widget_mediastorage_quota()}</div>
 					<div class="text-sm font-bold tabular-nums {analytics.quota.status === 'critical' ? 'text-error-500' : analytics.quota.status === 'warning' ? 'text-warning-500' : 'text-success-500'}">
 						{analytics.quota.percentage.toFixed(0)}%
 					</div>
@@ -116,40 +127,40 @@ export const widgetMeta = {
 			<div class="flex h-full flex-col gap-3">
 				<div class="grid grid-cols-2 gap-3">
 					<div class="rounded-2xl bg-surface-500/10 px-3 py-2.5 dark:bg-surface-800/60">
-						<div class="text-[11px] font-semibold uppercase tracking-wide text-surface-500">Total Storage</div>
+						<div class="text-[11px] font-semibold uppercase tracking-wide text-surface-500">{widget_mediastorage_total()}</div>
 						<div class="mt-1 text-xl font-bold tabular-nums text-surface-900 dark:text-surface-100">
 							{analytics.total.formattedSize}
 						</div>
-						<div class="mt-0.5 text-xs text-surface-500">{formatNumber(analytics.total.files)} files</div>
+						<div class="mt-0.5 text-xs text-surface-500">{widget_media_files_count({ count: analytics.total.files })}</div>
 					</div>
 					<div class="rounded-2xl bg-surface-500/10 px-3 py-2.5 dark:bg-surface-800/60">
-						<div class="text-[11px] font-semibold uppercase tracking-wide text-surface-500">Quota Used</div>
+						<div class="text-[11px] font-semibold uppercase tracking-wide text-surface-500">{widget_mediastorage_quota_used()}</div>
 						<div class="mt-1 text-xl font-bold tabular-nums {analytics.quota.status === 'critical' ? 'text-error-500' : analytics.quota.status === 'warning' ? 'text-warning-500' : 'text-success-500'}">
 							{analytics.quota.percentage.toFixed(1)}%
 						</div>
-						<div class="mt-0.5 text-xs text-surface-500">{formatBytes(analytics.quota.available)} free</div>
+						<div class="mt-0.5 text-xs text-surface-500">{widget_mediastorage_free({ size: formatBytes(analytics.quota.available) })}</div>
 					</div>
 				</div>
 
 				<div>
 					<div class="mb-1 flex items-center justify-between text-[11px] font-semibold uppercase tracking-wide text-surface-500">
-						<span>Quota</span>
+						<span>{widget_mediastorage_quota()}</span>
 						<span class="capitalize">{analytics.quota.status}</span>
 					</div>
-					<div class="h-2 overflow-hidden rounded-full bg-surface-200 dark:bg-surface-700" role="progressbar" aria-valuenow={analytics.quota.percentage} aria-valuemin={0} aria-valuemax={100} aria-label="Storage quota usage">
+					<div class="h-2 overflow-hidden rounded-full bg-surface-200 dark:bg-surface-700" role="progressbar" aria-valuenow={analytics.quota.percentage} aria-valuemin={0} aria-valuemax={100} aria-label={widget_mediastorage_quota_usage_aria()}>
 						<div class="h-full transition-all duration-300 {quotaColor(analytics.quota.status)}" style="width: {Math.min(100, analytics.quota.percentage)}%"></div>
 					</div>
 				</div>
 
 				{#if analytics.byType.length > 0}
 					<div class="min-h-0 flex-1 overflow-y-auto">
-						<div class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-surface-500">Top Types</div>
+						<div class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-surface-500">{widget_mediastorage_top_types()}</div>
 						<div class="space-y-1.5">
 							{#each analytics.byType.slice(0, 4) as item (item.type)}
 								<div class="flex items-center gap-2 rounded-xl bg-surface-500/10 px-3 py-2 dark:bg-surface-800/60">
 									<div class="min-w-0 flex-1">
 										<div class="truncate text-sm font-medium capitalize text-surface-600 dark:text-surface-100">{item.type}</div>
-										<div class="text-[11px] text-surface-500">{item.count} files · {formatBytes(item.size)}</div>
+										<div class="text-[11px] text-surface-500">{widget_mediastorage_files_size({ count: item.count, size: formatBytes(item.size) })}</div>
 									</div>
 									<div class="shrink-0 text-xs font-semibold tabular-nums text-surface-500">{item.pct.toFixed(0)}%</div>
 								</div>

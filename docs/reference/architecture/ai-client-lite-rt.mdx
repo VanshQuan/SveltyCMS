@@ -6,7 +6,7 @@ order: 32
 icon: "mdi:lightning-bolt"
 author: "SveltyCMS Team"
 created: "2026-07-18"
-updated: "2026-07-18"
+updated: "2026-09-08"
 tags:
   - "ai"
   - "litert"
@@ -95,6 +95,12 @@ If a future CSP is added to admin pages, it would need:
 - `'wasm-unsafe-eval'` — allows WASM inside Workers (not `eval()`, WASM-only)
 
 Both are CSP Level 3 best practices — they explicitly permit capabilities the app already uses, rather than relying on the absence of CSP.
+
+### Zero-Egress Privacy & Application-Layer Encryption (ALE)
+
+- **Zero Data Egress**: Client-side inference executes models locally inside the operator's browser session. In contrast to SaaS-dependent AI integrations, no image buffers, prompt contexts, or generated outputs are transmitted to external AI providers.
+- **Field-Level Encryption Alignment**: Sensitive content fields designated with `encrypt: true` (AES-256-GCM at rest, see [Field-Level Encryption](../security/field-level-encryption.mdx)) remain strictly protected: client-side processing bypasses WAN transmission altogether, preventing third-party model ingestion or PII leakage into third-party training corpuses.
+- **Fail-Safe Offline Resilience**: When disconnected from external networks, the client runtime operates entirely offline via cached WebAssembly binaries and `.tflite` model weights.
 
 ## API Reference
 

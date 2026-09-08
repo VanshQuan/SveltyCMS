@@ -18,7 +18,28 @@ import SystemTooltip from "@src/components/system/system-tooltip.svelte";
 import { toast } from "@src/stores/toast.svelte.ts";
 import iso6391 from "@utils/iso639-1.json";
 import { getLanguageName } from "@utils/language-utils";
+import { getTextDirection } from "@utils/string";
 import { logger } from "@utils/logger";
+import {
+	button_add,
+	setup_badge_english_ui,
+	setup_badge_rtl,
+	setup_badge_translated,
+	setup_label_default_system_language,
+	setup_label_system_languages,
+	setup_note_machine_translate,
+	setup_search_languages,
+	settings_inlang_added,
+	settings_inlang_status_pending,
+	settings_inlang_status_ready,
+	settings_languages_content_heading,
+	settings_languages_system_heading,
+	settings_locales_help,
+	settings_no_matches,
+	settings_search_languages,
+} from "@src/paraglide/messages";
+import { BUNDLED_SYSTEM_LOCALES, isCompiledSystemLocale } from "@utils/system-locale";
+import { publicEnv } from "@src/stores/global-settings.svelte";
 import { showConfirm } from "@utils/modal.svelte";
 import { deepClone } from "@utils/native-utils";
 import { onMount, tick, untrack } from "svelte";
@@ -122,7 +143,7 @@ const showPassword = $state<Record<string, boolean>>({}); // Track password visi
 const showLanguagePicker = $state<Record<string, boolean>>({}); // Track language picker visibility per field
 const languageSearch = $state<Record<string, string>>({}); // Track search input per field
 const showLogLevelPicker = $state<Record<string, boolean>>({}); // Track log level picker visibility per field
-let allowedLocales = $state<string[]>([]); // Locales from project.inlang/settings.json
+const isoLocaleCodes = iso6391.map((lang: { code: string }) => lang.code);
 
 // Derived fields for special layouts
 const defaultLangField = $derived(
@@ -135,24 +156,6 @@ const baseLocaleField = $derived(
 	group.fields.find((f) => f.key === "BASE_LOCALE"),
 );
 const localesField = $derived(group.fields.find((f) => f.key === "LOCALES"));
-
-// Load allowed locales from project.inlang/settings.json
-async function loadAllowedLocales() {
-	try {
-		const response = await fetch("/project.inlang/settings.json");
-		const data = await response.json();
-		if (data.locales && Array.isArray(data.locales)) {
-			allowedLocales = data.locales;
-		}
-	} catch (err) {
-		logger.warn(
-			"[GenericSettingsGroup] Could not load project.inlang/settings.json, using all languages:",
-			err,
-		);
-		// Fall back to all languages if we can't read the file
-		allowedLocales = [];
-	}
-}
 
 // Check if there are empty or placeholder values that need configuration
 function checkForEmptyFields() {
@@ -454,17 +457,38 @@ async function saveSettings() {
 		const data = await saveSettingsGroup({ groupId: group.id, values });
 
 		if (data.success) {
-			let message = `${group.name} settings saved successfully!`;
-			if (group.requiresRestart) {
-				message += " Server restart required for changes to take effect.";
-				toast.warning({
-					title: "Restart Required",
-					description:
-						"One or more settings in this group require a server restart to take effect.",
-					duration: 10000,
-				});
+			if (Array.isArray(values.LOCALES)) {
+				publicEnv.LOCALES = values.LOCALES as string[];
 			}
-			toast.success({ description: message });
+			if (typeof values.BASE_LOCALE === "string") {
+				publicEnv.BASE_LOCALE = values.BASE_LOCALE;
+			}
+
+			const inlang = data.inlang;
+			if (inlang?.added?.length) {
+				toast.success({
+					description: settings_inlang_added({
+						locales: inlang.added.join(", "),
+						status:
+							inlang.translated && inlang.compiled
+								? settings_inlang_status_ready()
+								: settings_inlang_status_pending(),
+					}),
+					duration: 12_000,
+				});
+			} else {
+				let message = `${group.name} settings saved successfully!`;
+				if (group.requiresRestart) {
+					message += " Server restart required for changes to take effect.";
+					toast.warning({
+						title: "Restart Required",
+						description:
+							"One or more settings in this group require a server restart to take effect.",
+						duration: 10000,
+					});
+				}
+				toast.success({ description: message });
+			}
 
 			// Check if password policy changed and if current user is affected
 			if (
@@ -687,7 +711,6 @@ $effect(() => {
 
 onMount(() => {
 	loadSettings();
-	loadAllowedLocales();
 });
 </script>
 
@@ -749,6 +772,7 @@ onMount(() => {
 				<div class="grid grid-cols-1 gap-6 md:grid-cols-2">
 					<!-- Left Column: Default Content Language + Available Content Languages -->
 					<div class="space-y-3 rounded border border-slate-300/50 bg-surface-500/60 p-4 dark:border-slate-600/60 dark:bg-surface-800/40">
+						<p class="text-xs font-bold uppercase tracking-wider text-tertiary-500 dark:text-primary-500">{settings_languages_content_heading()}</p>
 						{#if defaultLangField}
 							<div>
 								<label for={defaultLangField.key} class="mb-1 flex items-center gap-1 text-sm font-medium">
@@ -879,7 +903,7 @@ onMount(() => {
 														<iconify-icon icon="mdi:plus-circle-outline" width="14" class="text-tertiary-500 dark:text-primary-500"></iconify-icon>
 													</button>
 												{:else}
-													<p class="px-1 py-2 text-center text-[11px] text-slate-500">No matches</p>
+													<p class="px-1 py-2 text-center text-[11px] text-slate-500">{settings_no_matches()}</p>
 												{/each}
 											</div>
 										</div>
@@ -894,13 +918,14 @@ onMount(() => {
 							</div>
 						{/if}
 					</div>
-					<!-- Right Column: Base Locale + Available Locales -->
-					<div class="space-y-3 rounded border border-slate-300/50 bg-surface-500/60 p-4 dark:border-slate-600/60 dark:bg-surface-800/40">
+					<!-- Right Column: Default System Language + System Languages -->
+					<div class="space-y-3 rounded border border-slate-300/50 bg-surface-500/60 p-4 dark:border-slate-600/60 dark:bg-surface-800/40" data-testid="settings-system-languages">
+						<p class="text-xs font-bold uppercase tracking-wider text-tertiary-500 dark:text-primary-500">{settings_languages_system_heading()}</p>
 						{#if baseLocaleField}
-							<div>
+							<div data-testid="settings-field-BASE_LOCALE">
 								<label for={baseLocaleField.key} class="mb-1 flex items-center gap-1 text-sm font-medium">
 									<iconify-icon icon="mdi:translate" width="18" class="text-tertiary-500 dark:text-primary-500"></iconify-icon>
-									<span>{baseLocaleField.label}</span>
+									<span>{setup_label_default_system_language()}</span>
 									{#if baseLocaleField.required}
 										<span class="text-error-500">*</span>
 									{/if}
@@ -927,10 +952,10 @@ onMount(() => {
 						{/if}
 
 						{#if localesField}
-							<div>
+							<div data-testid="settings-field-LOCALES">
 								<div class="mb-1 flex items-center gap-1 text-sm font-medium tracking-wide">
 									<iconify-icon icon="mdi:translate-variant" width="14" class="text-tertiary-500 dark:text-primary-500"></iconify-icon>
-									<span>{localesField.label}</span>
+									<span>{setup_label_system_languages()}</span>
 									{#if localesField.required}
 										<span class="text-error-500">*</span>
 									{/if}
@@ -953,6 +978,14 @@ onMount(() => {
 													class="group hover:preset-filled-tertiary-600 dark:preset-filled-primary-500 dark:hover:preset-filled-primary-600"
 												>
 													<span class="text-sm font-medium">{displayLanguage(langCode)} ({langCode})</span>
+													{#if getTextDirection(langCode) === 'rtl'}
+														<span class="text-[9px] font-bold uppercase opacity-80">{setup_badge_rtl()}</span>
+													{/if}
+													{#if isCompiledSystemLocale(langCode)}
+														<span class="text-[9px] font-bold uppercase opacity-80">{setup_badge_translated()}</span>
+													{:else}
+														<span class="text-[9px] font-bold uppercase opacity-80">{setup_badge_english_ui()}</span>
+													{/if}
 													{#if !localesField.readonly}
 														<button
 															type="button"
@@ -977,7 +1010,7 @@ onMount(() => {
 											<span class="text-surface-500 dark:text-surface-50 text-xs">{localesField.placeholder}</span>
 										{/if}
 
-										{#if !localesField.readonly && allowedLocales.filter((code) => !((values[localesField.key] as string[]) || []).includes(code)).length > 0}
+										{#if !localesField.readonly && (BUNDLED_SYSTEM_LOCALES as readonly string[]).filter((code) => !((values[localesField.key] as string[]) || []).includes(code)).length > 0}
 											<Button variant="tertiary"
 												type="button"
 												onclick={() => {
@@ -987,9 +1020,10 @@ onMount(() => {
 												aria-haspopup="dialog"
 												aria-expanded={showLanguagePicker[localesField.key]}
 												aria-controls="{localesField.key}-lang-picker"
+												data-testid="settings-add-system-language"
 											 class="dark: absolute inset-e-2 top-2 rounded-full text-xs font-medium">
 												<iconify-icon icon="mdi:plus" width="14"></iconify-icon>
-												Add
+												{button_add()}
 											</Button>
 										{/if}
 									</div>
@@ -1000,40 +1034,61 @@ onMount(() => {
 											id="{localesField.key}-lang-picker"
 											class="absolute inset-s-0 top-full z-20 mt-2 w-64 rounded border border-slate-300/60 bg-surface-500/10 p-2 shadow-lg dark:border-slate-600 dark:bg-surface-800"
 											role="dialog"
-											aria-label="Add language"
+											aria-label={setup_label_system_languages()}
 											tabindex="-1"
+											onkeydown={(e) => {
+												if (e.key === 'Escape') {
+													showLanguagePicker[localesField.key] = false;
+												}
+												if (e.key === 'Enter') {
+													e.preventDefault();
+													const q = (languageSearch[localesField.key] || '').trim().toLowerCase();
+													const match = iso6391.find(
+														(lang: { code: string; name: string; native: string }) =>
+															isCompiledSystemLocale(lang.code) && (lang.code === q || lang.name.toLowerCase() === q || lang.native.toLowerCase() === q)
+													);
+													if (match && !((values[localesField.key] as string[]) || []).includes(match.code)) {
+														toggleLanguage(localesField.key, match.code);
+														if (!(values[localesField.key] as string[])?.length || !values.BASE_LOCALE) {
+															values.BASE_LOCALE = match.code;
+														}
+														showLanguagePicker[localesField.key] = false;
+													}
+												}
+											}}
 										>
 											<Input
-												placeholder="Search..."
+												placeholder={setup_search_languages()}
 												bind:value={languageSearch[localesField.key]}
-												aria-label="Search locales"
+												aria-label={settings_search_languages()}
 												inputClass="text-xs py-1"
 												class="mb-2"
 											/>
 											<div class="max-h-48 overflow-auto">
-												{#each allowedLocales.filter((code: string) => {
+												{#each iso6391.filter((lang: { code: string; name: string; native: string }) => {
 													const search = (languageSearch[localesField.key] || '').toLowerCase();
 													const currentValues = (values[localesField.key] as string[]) || [];
-													const langName = displayLanguage(code).toLowerCase();
-													return !currentValues.includes(code) && (search === '' || langName.includes(search) || code.toLowerCase().includes(search));
-												}) as code (code)}
+													return isCompiledSystemLocale(lang.code) && !currentValues.includes(lang.code) && (search === '' || lang.name.toLowerCase().includes(search) || lang.native.toLowerCase().includes(search) || lang.code.toLowerCase().includes(search));
+												}) as lang (lang.code)}
 													<button
 														type="button"
 														class="flex w-full items-center justify-between rounded px-2 py-1 text-start text-xs hover:bg-tertiary-500/10 dark:bg-primary-500/10 dark:hover:bg-primary-500/20"
 														onclick={() => {
-															toggleLanguage(localesField.key, code);
+															toggleLanguage(localesField.key, lang.code);
 															showLanguagePicker[localesField.key] = false;
-															// Set as base if it's the first locale
 															if (!(values[localesField.key] as string[])?.length || !values.BASE_LOCALE) {
-																values.BASE_LOCALE = code;
+																values.BASE_LOCALE = lang.code;
 															}
 														}}
 													>
-														<span>{displayLanguage(code)} ({code.toUpperCase()})</span>
+														<span>{lang.name} ({lang.code.toUpperCase()}) <span class="text-surface-500">- {lang.native}</span></span>
+														{#if getTextDirection(lang.code) === 'rtl'}
+															<span class="text-[9px] font-bold uppercase text-tertiary-500 dark:text-primary-500">{setup_badge_rtl()}</span>
+														{/if}
 														<iconify-icon icon="mdi:plus-circle-outline" width="14" class="text-tertiary-500 dark:text-primary-500"></iconify-icon>
 													</button>
 												{:else}
-													<p class="px-1 py-2 text-center text-[11px] text-slate-500">No matches</p>
+													<p class="px-1 py-2 text-center text-[11px] text-slate-500">{settings_no_matches()}</p>
 												{/each}
 											</div>
 										</div>
@@ -1042,6 +1097,8 @@ onMount(() => {
 								{#if errors[localesField.key]}
 									<div class="mt-1 text-xs text-error-500">{errors[localesField.key]}</div>
 								{/if}
+								<p class="mt-1 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">{setup_note_machine_translate()}</p>
+								<p class="mt-1 text-[10px] text-slate-500 dark:text-slate-400">{settings_locales_help()}</p>
 								{#if localesField.placeholder}
 									<p class="mt-1 text-[10px] text-slate-500 dark:text-slate-400">Example: {localesField.placeholder}</p>
 								{/if}
@@ -1274,7 +1331,7 @@ onMount(() => {
 														<iconify-icon icon="mdi:plus-circle-outline" width="14" class="text-tertiary-500 dark:text-primary-500"></iconify-icon>
 													</button>
 												{:else}
-													<p class="px-1 py-2 text-center text-[11px] text-slate-500">No matches</p>
+													<p class="px-1 py-2 text-center text-[11px] text-slate-500">{settings_no_matches()}</p>
 												{/each}
 											</div>
 										</div>

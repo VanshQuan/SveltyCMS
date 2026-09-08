@@ -26,6 +26,11 @@
 <script lang="ts">
 	import Button from '@components/ui/button.svelte';
 	import { formatDate } from '@utils/format-date';
+	import {
+		widget_calendar_title,
+		widget_calendar_prev_month,
+		widget_calendar_next_month
+	} from '@src/paraglide/messages';
 
 	let selectedDate = $state(new Date());
 	let events = $state<{ dateStr: string; title: string; type: string }[]>([
@@ -58,14 +63,14 @@
 	<div class="flex items-center justify-between border-b border-surface-100 dark:border-surface-500/40 pb-3">
 		<div class="flex items-center gap-2">
 			<iconify-icon icon="mdi:calendar-month-outline" width="20" class="text-warning-500"></iconify-icon>
-			<h3 class="font-bold text-sm text-surface-900 dark:text-white">Admin Calendar View</h3>
+			<h3 class="font-bold text-sm text-surface-900 dark:text-white">{widget_calendar_title()}</h3>
 		</div>
 		<div class="flex items-center gap-1">
-			<Button type="button" variant="ghost" size="sm" onclick={prevMonth} aria-label="Previous month">
+			<Button type="button" variant="ghost" size="sm" onclick={prevMonth} aria-label={widget_calendar_prev_month()}>
 				<iconify-icon icon="mdi:chevron-left" width="18"></iconify-icon>
 			</Button>
 			<span class="text-xs font-bold text-surface-900 dark:text-white px-1">{monthName} {currentYear}</span>
-			<Button type="button" variant="ghost" size="sm" onclick={nextMonth} aria-label="Next month">
+			<Button type="button" variant="ghost" size="sm" onclick={nextMonth} aria-label={widget_calendar_next_month()}>
 				<iconify-icon icon="mdi:chevron-right" width="18"></iconify-icon>
 			</Button>
 		</div>

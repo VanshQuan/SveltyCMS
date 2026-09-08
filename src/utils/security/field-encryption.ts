@@ -12,6 +12,7 @@
  * - Legacy plaintext passthrough on read (gradual adoption)
  */
 
+import nodeCrypto from "node:crypto";
 import { logger } from "@utils/logger";
 import { AppError } from "@utils/error-handling";
 import {
@@ -34,12 +35,6 @@ export interface FieldEncryptionContext {
 }
 
 let _fieldKeys: ResolvedStaticAesKey | null | undefined;
-let _cryptoMod: typeof import("node:crypto") | undefined;
-
-async function getCryptoMod(): Promise<typeof import("node:crypto")> {
-  if (!_cryptoMod) _cryptoMod = await import("node:crypto");
-  return _cryptoMod;
-}
 
 /**
  * Test-only: drop the memoized key ring so the next call re-reads env.
@@ -55,14 +50,16 @@ function readEncryptionKeyRaw(): string | null {
   return raw;
 }
 
-async function getFieldKeys(): Promise<ResolvedStaticAesKey | null> {
+/**
+ * Synchronous static AES key resolver (cached after first resolution).
+ */
+export function getFieldKeysSync(): ResolvedStaticAesKey | null {
   if (_fieldKeys !== undefined) return _fieldKeys;
   _fieldKeys = null;
   try {
     const raw = readEncryptionKeyRaw();
     if (!raw) return null;
-    const cryptoMod = await getCryptoMod();
-    _fieldKeys = resolveStaticAesKey(cryptoMod, raw, AES256_HKDF_INFO.fieldAtRest);
+    _fieldKeys = resolveStaticAesKey(nodeCrypto, raw, AES256_HKDF_INFO.fieldAtRest);
     return _fieldKeys;
   } catch (err) {
     logger.error("[FieldEncryption] Failed to load ENCRYPTION_KEY", {
@@ -70,6 +67,10 @@ async function getFieldKeys(): Promise<ResolvedStaticAesKey | null> {
     });
     return null;
   }
+}
+
+export async function getFieldKeys(): Promise<ResolvedStaticAesKey | null> {
+  return getFieldKeysSync();
 }
 
 function buildAad(context: FieldEncryptionContext, fieldName: string): Buffer {
@@ -82,18 +83,17 @@ export function isFieldEncryptionEnvelope(value: unknown): value is string {
 }
 
 /**
- * Encrypt a JSON-serializable value into a `v1:iv:tag:ciphertext` envelope.
- * @throws AppError FIELD_ENCRYPTION_UNAVAILABLE when ENCRYPTION_KEY is missing
- * @throws AppError FIELD_ENCRYPTION_FAILED on cipher errors
+ * Synchronously encrypt a JSON-serializable value into a `v1:iv:tag:ciphertext` envelope.
+ * Zero async overhead / zero microtask allocation on write hot paths.
  */
-export async function encryptFieldValue(
+export function encryptFieldValueSync(
   value: unknown,
   context: FieldEncryptionContext,
   fieldName: string,
-): Promise<string> {
+): string {
   if (isFieldEncryptionEnvelope(value)) return value;
 
-  const keys = await getFieldKeys();
+  const keys = getFieldKeysSync();
   if (!keys) {
     throw new AppError(
       "Field-level encryption requires ENCRYPTION_KEY in config/private.ts.",
@@ -103,16 +103,16 @@ export async function encryptFieldValue(
   }
 
   try {
-    const cryptoMod = await getCryptoMod();
-    const iv = cryptoMod.randomBytes(IV_LENGTH);
-    const cipher = cryptoMod.createCipheriv(
+    const iv = nodeCrypto.randomBytes(IV_LENGTH);
+    const cipher = nodeCrypto.createCipheriv(
       ALGORITHM,
       keys.primary,
       iv,
     ) as import("node:crypto").CipherGCM;
     cipher.setAAD(buildAad(context, fieldName));
     const plaintext = JSON.stringify(value);
-    const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+    const ciphertext = cipher.update(plaintext, "utf8");
+    cipher.final();
     const tag = cipher.getAuthTag();
     return `${ENVELOPE_VERSION}:${iv.toString("base64url")}:${tag.toString("base64url")}:${ciphertext.toString("base64url")}`;
   } catch (err) {
@@ -126,17 +126,30 @@ export async function encryptFieldValue(
 }
 
 /**
- * Decrypt a `v1:iv:tag:ciphertext` envelope. Legacy plaintext is returned as-is.
+ * Encrypt a JSON-serializable value into a `v1:iv:tag:ciphertext` envelope.
+ * @throws AppError FIELD_ENCRYPTION_UNAVAILABLE when ENCRYPTION_KEY is missing
+ * @throws AppError FIELD_ENCRYPTION_FAILED on cipher errors
+ */
+export async function encryptFieldValue(
+  value: unknown,
+  context: FieldEncryptionContext,
+  fieldName: string,
+): Promise<string> {
+  return encryptFieldValueSync(value, context, fieldName);
+}
+
+/**
+ * Synchronously decrypt a `v1:iv:tag:ciphertext` envelope. Legacy plaintext is returned as-is.
  * Tampered / AAD-mismatched envelopes return `null` (fail-closed per field).
  */
-export async function decryptFieldValue(
+export function decryptFieldValueSync(
   stored: unknown,
   context: FieldEncryptionContext,
   fieldName: string,
-): Promise<unknown> {
+): unknown {
   if (!isFieldEncryptionEnvelope(stored)) return stored;
 
-  const keys = await getFieldKeys();
+  const keys = getFieldKeysSync();
   if (!keys) {
     throw new AppError(
       "Field-level encryption requires ENCRYPTION_KEY in config/private.ts.",
@@ -146,7 +159,6 @@ export async function decryptFieldValue(
   }
 
   try {
-    const cryptoMod = await getCryptoMod();
     const parts = stored.split(":");
     const iv = Buffer.from(parts[1], "base64url");
     const tag = Buffer.from(parts[2], "base64url");
@@ -155,7 +167,7 @@ export async function decryptFieldValue(
       logger.error("[FieldEncryption] Invalid envelope lengths", { fieldName });
       return null;
     }
-    const decrypted = aesGcmDecryptWithKeys(cryptoMod, {
+    const decrypted = aesGcmDecryptWithKeys(nodeCrypto, {
       keys: staticAesKeyRing(keys),
       iv,
       authTag: tag,
@@ -178,8 +190,39 @@ export async function decryptFieldValue(
   }
 }
 
+/**
+ * Decrypt a `v1:iv:tag:ciphertext` envelope. Legacy plaintext is returned as-is.
+ * Tampered / AAD-mismatched envelopes return `null` (fail-closed per field).
+ */
+export async function decryptFieldValue(
+  stored: unknown,
+  context: FieldEncryptionContext,
+  fieldName: string,
+): Promise<unknown> {
+  return decryptFieldValueSync(stored, context, fieldName);
+}
+
 function isEmptyFieldValue(value: unknown): boolean {
   return value === undefined || value === null || value === "";
+}
+
+/**
+ * Synchronously encrypt flagged fields in place. Skips missing/empty values and envelopes.
+ */
+export function encryptDocumentFieldsSync(
+  doc: Record<string, unknown>,
+  fieldNames: readonly string[],
+  context: FieldEncryptionContext,
+): Record<string, unknown> {
+  if (!doc || fieldNames.length === 0) return doc;
+  for (let i = 0; i < fieldNames.length; i++) {
+    const name = fieldNames[i];
+    if (!Object.hasOwn(doc, name)) continue;
+    const value = doc[name];
+    if (isEmptyFieldValue(value) || isFieldEncryptionEnvelope(value)) continue;
+    doc[name] = encryptFieldValueSync(value, context, name);
+  }
+  return doc;
 }
 
 /**
@@ -190,13 +233,25 @@ export async function encryptDocumentFields(
   fieldNames: readonly string[],
   context: FieldEncryptionContext,
 ): Promise<Record<string, unknown>> {
+  return encryptDocumentFieldsSync(doc, fieldNames, context);
+}
+
+/**
+ * Synchronously decrypt flagged fields in place. Legacy plaintext is left untouched.
+ * Per-field decrypt failure replaces the value with `null`.
+ */
+export function decryptDocumentFieldsSync(
+  doc: Record<string, unknown>,
+  fieldNames: readonly string[],
+  context: FieldEncryptionContext,
+): Record<string, unknown> {
   if (!doc || fieldNames.length === 0) return doc;
   for (let i = 0; i < fieldNames.length; i++) {
     const name = fieldNames[i];
     if (!Object.hasOwn(doc, name)) continue;
     const value = doc[name];
-    if (isEmptyFieldValue(value) || isFieldEncryptionEnvelope(value)) continue;
-    doc[name] = await encryptFieldValue(value, context, name);
+    if (!isFieldEncryptionEnvelope(value)) continue;
+    doc[name] = decryptFieldValueSync(value, context, name);
   }
   return doc;
 }
@@ -210,13 +265,5 @@ export async function decryptDocumentFields(
   fieldNames: readonly string[],
   context: FieldEncryptionContext,
 ): Promise<Record<string, unknown>> {
-  if (!doc || fieldNames.length === 0) return doc;
-  for (let i = 0; i < fieldNames.length; i++) {
-    const name = fieldNames[i];
-    if (!Object.hasOwn(doc, name)) continue;
-    const value = doc[name];
-    if (!isFieldEncryptionEnvelope(value)) continue;
-    doc[name] = await decryptFieldValue(value, context, name);
-  }
-  return doc;
+  return decryptDocumentFieldsSync(doc, fieldNames, context);
 }

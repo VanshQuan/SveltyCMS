@@ -12,6 +12,7 @@
 
 <script lang="ts">
 	import Button from '@components/ui/button.svelte';
+	import { mediagallery_drop_files, mediagallery_no_media, mediagallery_upload_first } from '@src/paraglide/messages';
 	import Checkbox from '@components/ui/checkbox.svelte';
   import MediaGridActionTooltip from "./media-grid-action-tooltip.svelte";
   import type { MediaBase, MediaImage } from "@utils/media/media-models";
@@ -215,15 +216,15 @@
     >
       <iconify-icon icon="mdi:cloud-upload-outline" width="48" class="text-surface-400 dark:text-surface-500"></iconify-icon>
       <div class="space-y-1">
-        <h3 class="text-base font-semibold">No media found</h3>
+        <h3 class="text-base font-semibold">{mediagallery_no_media()}</h3>
         <p class="max-w-xs text-sm text-surface-500 dark:text-surface-400">
-          Drop files here or use the upload button to start building your library.
+          {mediagallery_drop_files()}
         </p>
       </div>
 
       <Button variant="tertiary" onclick={() => fileUploadInput?.click()}>
         <iconify-icon icon="mdi:plus" width="18"></iconify-icon>
-        <span>Upload First File</span>
+        <span>{mediagallery_upload_first()}</span>
       </Button>
       <input aria-label="Filter media"
         type="file"

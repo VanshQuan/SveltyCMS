@@ -37,6 +37,18 @@
 	import { formatRelativeDate } from '@utils/date';
 	import UpgradePrompt from '@components/ui/upgrade-prompt.svelte';
 	import BaseWidget from '../../base-widget.svelte';
+	import {
+		widget_commerce_orders_enable_preset,
+		widget_commerce_orders_guest,
+		widget_commerce_orders_license_msg,
+		widget_commerce_orders_license_title,
+		widget_commerce_orders_loading,
+		widget_commerce_orders_no_collection,
+		widget_commerce_orders_none,
+		widget_commerce_orders_recent_aria,
+		widget_commerce_orders_recent_orders,
+		widget_commerce_orders_trial_remaining
+	} from '@src/paraglide/messages';
 
 	interface OrderRow {
 		id: string;
@@ -103,8 +115,8 @@
 		<UpgradePrompt
 			extensionId="dashboard:commerce-orders"
 			price="€12.99"
-			title="Commerce Orders requires a license"
-			message="Your 14-day trial has expired. A marketplace license is required to keep using this dashboard widget."
+			title={widget_commerce_orders_license_title()}
+			message={widget_commerce_orders_license_msg()}
 		/>
 	</BaseWidget>
 {:else}
@@ -122,22 +134,22 @@
 		{#snippet children({ data })}
 			{@const payload = data as OrdersPayload | null}
 			{#if !payload}
-				<div class="flex h-full items-center justify-center text-xs text-surface-500">Loading orders…</div>
+				<div class="flex h-full items-center justify-center text-xs text-surface-500">{widget_commerce_orders_loading()}</div>
 			{:else if !payload.available}
 				<div class="flex h-full flex-col items-center justify-center px-3 text-center">
 					<iconify-icon icon="mdi:cart-off" class="mb-2 text-3xl text-surface-400"></iconify-icon>
-					<p class="text-xs font-semibold text-surface-600 dark:text-surface-400">No orders collection</p>
-					<p class="mt-1 text-[11px] text-surface-500">Enable the ecommerce Setup Wizard preset to see orders here.</p>
+					<p class="text-xs font-semibold text-surface-600 dark:text-surface-400">{widget_commerce_orders_no_collection()}</p>
+					<p class="mt-1 text-[11px] text-surface-500">{widget_commerce_orders_enable_preset()}</p>
 				</div>
 			{:else if isCompact}
 				<div class="flex h-full items-center gap-3 overflow-hidden px-1">
 					<span class="text-lg font-bold tabular-nums text-surface-600 dark:text-surface-100">{payload.total}</span>
-					<span class="text-xs text-surface-500">recent orders</span>
+					<span class="text-xs text-surface-500">{widget_commerce_orders_recent_orders()}</span>
 				</div>
 			{:else}
 				<div class="flex h-full min-h-0 flex-col gap-2">
 					{#if trialDays !== null}
-						<p class="text-[10px] text-warning-600 dark:text-warning-400">Trial · {trialDays} day{trialDays === 1 ? '' : 's'} remaining</p>
+						<p class="text-[10px] text-warning-600 dark:text-warning-400">{widget_commerce_orders_trial_remaining({ count: trialDays })}</p>
 					{/if}
 					<div class="flex flex-wrap gap-1.5">
 						{#each Object.entries(payload.byStatus) as [status, count] (status)}
@@ -147,12 +159,12 @@
 							</span>
 						{/each}
 					</div>
-					<ul class="min-h-0 flex-1 space-y-1 overflow-y-auto" aria-label="Recent orders">
+					<ul class="min-h-0 flex-1 space-y-1 overflow-y-auto" aria-label={widget_commerce_orders_recent_aria()}>
 						{#each payload.recent as order (order.id)}
 							<li class="flex items-center justify-between gap-2 rounded px-2 py-1.5 text-xs hover:bg-surface-500/10 dark:hover:bg-surface-800/60">
 								<div class="min-w-0">
 									<div class="truncate font-medium text-surface-600 dark:text-surface-100">{order.orderNumber}</div>
-									<div class="truncate text-[10px] text-surface-500">{order.customerEmail || 'guest'} · {order.createdAt ? formatRelativeDate(order.createdAt) : '—'}</div>
+									<div class="truncate text-[10px] text-surface-500">{order.customerEmail || widget_commerce_orders_guest()} · {order.createdAt ? formatRelativeDate(order.createdAt) : '—'}</div>
 								</div>
 								<div class="shrink-0 text-end">
 									<div class="tabular-nums font-semibold">{formatTotal(order.total)}</div>
@@ -160,7 +172,7 @@
 								</div>
 							</li>
 						{:else}
-							<li class="py-4 text-center text-[11px] text-surface-500">No orders yet</li>
+							<li class="py-4 text-center text-[11px] text-surface-500">{widget_commerce_orders_none()}</li>
 						{/each}
 					</ul>
 				</div>

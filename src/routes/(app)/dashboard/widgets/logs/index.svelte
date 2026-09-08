@@ -38,12 +38,24 @@ export const widgetMeta = {
 
 	const isLicensed = $derived(Boolean(licenseStatus?.hasLicense));
 
-import type { WidgetSize } from '@src/content/types';
-import BaseWidget from '../../base-widget.svelte';
-import Select from '@components/ui/select.svelte';
-import { formatTime } from '@utils/format-date';
+	import type { WidgetSize } from '@src/content/types';
+	import BaseWidget from '../../base-widget.svelte';
+	import Select from '@components/ui/select.svelte';
+	import { formatTime } from '@utils/format-date';
+	import {
+		widget_logs_level,
+		widget_logs_search_label,
+		widget_logs_search_ph,
+		widget_logs_date_from,
+		widget_logs_date_to,
+		widget_logs_premium_notice,
+		widget_logs_upgrade,
+		widget_logs_no_match,
+		widget_logs_none,
+		widget_logs_count
+	} from '@src/paraglide/messages';
 
-interface LogEntry {
+	interface LogEntry {
 		timestamp: string;
 		level: string;
 		message: string;
@@ -68,76 +80,77 @@ interface LogEntry {
 	let filterLevel = $state('all');
 	let startDate = $state('');
 	let endDate = $state('');
-	let expandedId = $state<string | null>(null);
+	let expandedKey = $state<string | null>(null);
 
 	const levels = [
-		{ value: 'all', label: 'All' },
-		{ value: 'fatal', label: 'Fatal' },
-		{ value: 'error', label: 'Error' },
-		{ value: 'warn', label: 'Warn' },
+		{ value: 'all', label: 'All Levels' },
+		{ value: 'error', label: 'Errors' },
+		{ value: 'warn', label: 'Warnings' },
 		{ value: 'info', label: 'Info' },
-		{ value: 'debug', label: 'Debug' },
+		{ value: 'debug', label: 'Debug' }
 	];
 
-	function toggleExpand(id: string) {
-		expandedId = expandedId === id ? null : id;
+	function levelBg(lvl: string): string {
+		switch ((lvl || '').toLowerCase()) {
+			case 'error': return 'bg-error-500/10 dark:bg-error-900/20';
+			case 'warn': return 'bg-warning-500/10 dark:bg-warning-900/20';
+			case 'info': return 'bg-tertiary-500/10 dark:bg-primary-900/20';
+			default: return 'bg-surface-500/10 dark:bg-surface-800';
+		}
 	}
 
-	function levelCls(level: string): string {
-		const m: Record<string, string> = {
-			fatal: 'text-purple-500', error: 'text-error-500', warn: 'text-warning-500',
-			info: 'text-success-500', debug: 'text-tertiary-500',
-		};
-		return m[level?.toLowerCase()] || 'text-surface-500';
+	function levelCls(lvl: string): string {
+		switch ((lvl || '').toLowerCase()) {
+			case 'error': return 'text-error-500';
+			case 'warn': return 'text-warning-500';
+			case 'info': return 'text-tertiary-500 dark:text-primary-400';
+			default: return 'text-surface-400';
+		}
 	}
 
-	function levelBg(level: string): string {
-		const m: Record<string, string> = {
-			fatal: 'bg-purple-100 dark:bg-purple-900/30', error: 'bg-error-500/10 dark:bg-error-900/20',
-			warn: 'bg-warning-500/10 dark:bg-warning-900/20', info: 'bg-success-500/10 dark:bg-success-900/20',
-			debug: 'bg-tertiary-500/10 dark:bg-tertiary-900/20',
-		};
-		return m[level?.toLowerCase()] || '';
-	}
-
-	function levelIcon(level: string): string {
-		const m: Record<string, string> = {
-			fatal: 'mdi:alert-octagon', error: 'mdi:alert-circle', warn: 'mdi:alert',
-			info: 'mdi:information-outline', debug: 'mdi:bug-outline',
-		};
-		return m[level?.toLowerCase()] || 'mdi:circle-small';
-	}
-
-	function fmtTime(iso: string): string {
-		return formatTime(iso, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+	function levelIcon(lvl: string): string {
+		switch ((lvl || '').toLowerCase()) {
+			case 'error': return 'mdi:alert-circle';
+			case 'warn': return 'mdi:alert';
+			case 'info': return 'mdi:information';
+			default: return 'mdi:text-box-outline';
+		}
 	}
 
 	function filterLogs(logs: LogEntry[]): LogEntry[] {
-		return logs.filter((log) => {
-			if (filterLevel !== 'all' && log.level?.toLowerCase() !== filterLevel) return false;
-			if (searchTerm && !log.message?.toLowerCase().includes(searchTerm.toLowerCase())) return false;
-			if (startDate) {
-				const logDate = new Date(log.timestamp);
-				const start = new Date(startDate);
-				start.setHours(0, 0, 0, 0);
-				if (logDate < start) return false;
-			}
-			if (endDate) {
-				const logDate = new Date(log.timestamp);
-				const end = new Date(endDate);
-				end.setHours(23, 59, 59, 999);
-				if (logDate > end) return false;
-			}
-			return true;
-		});
+		let result = logs;
+		if (filterLevel !== 'all') {
+			result = result.filter((l) => (l.level || '').toLowerCase() === filterLevel);
+		}
+		if (searchTerm.trim()) {
+			const q = searchTerm.toLowerCase();
+			result = result.filter(
+				(l) =>
+					l.message?.toLowerCase().includes(q) ||
+					l.actor?.toLowerCase().includes(q) ||
+					l.level?.toLowerCase().includes(q)
+			);
+		}
+		if (startDate) {
+			result = result.filter((l) => l.timestamp >= startDate);
+		}
+		if (endDate) {
+			const end = endDate + 'T23:59:59.999Z';
+			result = result.filter((l) => l.timestamp <= end);
+		}
+		return result;
+	}
+
+	function toggleExpand(key: string) {
+		expandedKey = expandedKey === key ? null : key;
 	}
 </script>
 
 <BaseWidget
 	{label}
 	{theme}
-	endpoint="/api/dashboard/logs"
-	pollInterval={20000}
+	endpoint="/api/dashboard/logs?limit=50"
+	pollInterval={10000}
 	{icon}
 	{widgetId}
 	{size}
@@ -145,7 +158,7 @@ interface LogEntry {
 	onCloseRequest={onRemove}
 >
 	{#snippet children({ data })}
-		{const allLogs = (data?.logs || []) as LogEntry[]}
+		{const allLogs = (Array.isArray(data) ? data : []) as LogEntry[]}
 		{const filtered = filterLogs(allLogs)}
 
 		{#if !isCompact}
@@ -153,7 +166,7 @@ interface LogEntry {
 			<div class="mb-3 flex flex-wrap items-center gap-2">
 				<div class="w-28">
 					<Select
-						label="Log level"
+						label={widget_logs_level()}
 						bind:value={filterLevel}
 						options={levels}
 						size="sm"
@@ -161,23 +174,23 @@ interface LogEntry {
 				</div>
 
 				<div class="relative flex-1 min-w-30">
-					<input aria-label="Search logs"
+					<input aria-label={widget_logs_search_label()}
 						type="text"
 						bind:value={searchTerm}
-						placeholder="Search..."
+						placeholder={widget_logs_search_ph()}
 						class="w-full rounded border border-surface-500/30 bg-surface-500/10 py-1.5 ps-8 pe-3 text-xs text-surface-700 placeholder-surface-400 focus:border-primary-500 focus:outline-none dark:border-surface-500/40 dark:bg-surface-800 dark:text-surface-200"
 					/>
 					<iconify-icon icon="mdi:magnify" width="14" class="absolute inset-s-2.5 top-1/2 -translate-y-1/2 text-surface-400"  ></iconify-icon>
 				</div>
 
 				{#if isLicensed}
-					<input aria-label="Date from"
+					<input aria-label={widget_logs_date_from()}
 						type="date"
 						bind:value={startDate}
 						class="rounded border border-surface-500/30 bg-surface-500/10 px-2 py-1.5 text-xs text-surface-700 focus:border-primary-500 focus:outline-none dark:border-surface-500/40 dark:bg-surface-800 dark:text-surface-200"
 					/>
 					<span class="text-xs text-surface-400">–</span>
-					<input aria-label="Date to"
+					<input aria-label={widget_logs_date_to()}
 						type="date"
 						bind:value={endDate}
 						class="rounded border border-surface-500/30 bg-surface-500/10 px-2 py-1.5 text-xs text-surface-700 focus:border-primary-500 focus:outline-none dark:border-surface-500/40 dark:bg-surface-800 dark:text-surface-200"
@@ -186,16 +199,14 @@ interface LogEntry {
 			</div>
 		{/if}
 
-
-
-			<!-- Premium upgrade banner for date range filtering -->
-			{#if !isLicensed && !isCompact}
+		<!-- Premium upgrade banner for date range filtering -->
+		{#if !isLicensed && !isCompact}
 			<div class="mt-2 rounded-lg bg-warning-500/10 dark:bg-warning-900/20 border border-warning-500/20 dark:border-warning-500/40 px-3 py-2 flex items-center justify-between">
 				<span class="text-xs text-warning-600 dark:text-warning-400">
 					<iconify-icon icon="mdi:crown" class="inline me-1 text-warning-500"></iconify-icon>
-					Date range filtering and export are premium features.
+					{widget_logs_premium_notice()}
 				</span>
-				<a href="https://marketplace.sveltycms.com" target="_blank" class="text-xs font-medium text-warning-600 dark:text-warning-400 hover:text-warning-600 underline shrink-0 ms-3">Upgrade €6.99 →</a>
+				<a href="https://marketplace.sveltycms.com" target="_blank" class="text-xs font-medium text-warning-600 dark:text-warning-400 hover:text-warning-600 underline shrink-0 ms-3">{widget_logs_upgrade()}</a>
 			</div>
 		{/if}
 
@@ -204,16 +215,16 @@ interface LogEntry {
 				<iconify-icon icon="mdi:text-box-remove-outline" class="text-4xl opacity-20 mb-3"  ></iconify-icon>
 				<div class="text-sm font-medium text-surface-500">
 					{#if searchTerm || filterLevel !== 'all' || startDate || endDate}
-						No logs match your filters
+						{widget_logs_no_match()}
 					{:else}
-						No logs recorded yet
+						{widget_logs_none()}
 					{/if}
 				</div>
 			</div>
 		{:else if isCompact}
 			<!-- Compact (h:1): horizontal scroll of log chips -->
 			<div class="flex h-full items-center gap-2 overflow-hidden">
-				<span class="shrink-0 text-xs font-semibold text-surface-500">{filtered.length} logs</span>
+				<span class="shrink-0 text-xs font-semibold text-surface-500">{widget_logs_count({ count: filtered.length })}</span>
 				<div class="h-5 w-px shrink-0 bg-surface-200 dark:bg-surface-700"></div>
 				<div class="flex flex-1 items-center gap-1.5 overflow-x-auto scrollbar-none">
 					{#each filtered.slice(0, 12) as log (log.timestamp + log.message)}

@@ -28,6 +28,14 @@ export const widgetMeta = {
 	import type { WidgetSize } from '@src/content/types';
 	import BaseWidget from '../../base-widget.svelte';
 	import { formatTime } from '@utils/format-date';
+	import {
+		dashboard_cpu_avg,
+		dashboard_cpu_chart_aria,
+		dashboard_cpu_cores,
+		dashboard_cpu_datapoint_aria,
+		dashboard_cpu_fetching,
+		dashboard_cpu_now
+	} from '@src/paraglide/messages';
 
 	const {
 		label = 'CPU Usage',
@@ -90,7 +98,7 @@ export const widgetMeta = {
 							<div class="h-2 w-2 rounded-full {cpu.level === 'high' ? 'bg-error-500' : cpu.level === 'medium' ? 'bg-warning-500' : 'bg-success-500'}"></div>
 							<span class="font-bold tabular-nums">{cpu.current.toFixed(1)}%</span>
 						</div>
-						<span class="text-[10px] text-gray-400 dark:text-gray-500 tabular-nums">avg: {cpu.average.toFixed(1)}%</span>
+						<span class="text-[10px] text-gray-400 dark:text-gray-500 tabular-nums">{dashboard_cpu_avg()} {cpu.average.toFixed(1)}%</span>
 					</div>
 				{:else}
 					<!-- Header Stats -->
@@ -101,11 +109,11 @@ export const widgetMeta = {
 								<div class="absolute inset-0 h-3 w-3 rounded-full {cpu.level === 'high' ? 'bg-error-500' : cpu.level === 'medium' ? 'bg-warning-500' : 'bg-success-500'} animate-ping opacity-75"></div>
 							</div>
 							<span class="text-xl font-semibold tabular-nums">{cpu.current.toFixed(1)}%</span>
-							<span class="text-sm {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">now</span>
+							<span class="text-sm {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">{dashboard_cpu_now()}</span>
 						</div>
 
 						<div class="text-end">
-							<div class="text-sm font-medium tabular-nums">{cpu.average.toFixed(1)}% <span class="text-xs {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">avg</span></div>
+							<div class="text-sm font-medium tabular-nums">{cpu.average.toFixed(1)}% <span class="text-xs {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">{dashboard_cpu_avg()}</span></div>
 						</div>
 					</div>
 
@@ -126,7 +134,7 @@ export const widgetMeta = {
 						viewBox="0 0 300 {chartHeight}"
 						class="w-full h-full overflow-visible"
 						preserveAspectRatio="none"
-						aria-label="CPU usage over time"
+						aria-label={dashboard_cpu_chart_aria()}
 					>
 						{#if size.h !== 1}
 							<!-- Grid -->
@@ -163,7 +171,7 @@ export const widgetMeta = {
 									r="12"
 									fill="transparent"
 									role="img"
-									aria-label="Data point"
+									aria-label={dashboard_cpu_datapoint_aria()}
 									onmouseenter={() => (activeIndex = i)}
 									onmouseleave={() => (activeIndex = null)}
 									class="cursor-crosshair animate-duration-100"
@@ -195,7 +203,7 @@ export const widgetMeta = {
 				<!-- Footer Info -->
 				{#if size.h !== 1 && (size.w >= 2 || size.h >= 2)}
 					<div class="flex justify-between text-xs pt-1 {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'} border-t border-gray-100/50 dark:border-gray-800/50">
-						<span>Cores: <span class="font-medium text-gray-700 dark:text-gray-300">{data?.cpuInfo?.cores?.count ?? '—'}</span></span>
+						<span>{dashboard_cpu_cores()} <span class="font-medium text-gray-700 dark:text-gray-300">{data?.cpuInfo?.cores?.count ?? '—'}</span></span>
 						<span class="text-end truncate max-w-85">
 							{data?.cpuInfo?.cores?.perCore?.[0]?.model?.split(' ').slice(0, 3).join(' ') ?? 'Unknown'}
 						</span>
@@ -207,7 +215,7 @@ export const widgetMeta = {
 			<div class="flex h-full items-center justify-center">
 				<div class="flex flex-col items-center gap-3">
 					<div class="h-8 w-8 animate-spin rounded-full border-2 border-tertiary-500 border-t-transparent"></div>
-					<p class="text-sm {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">Fetching CPU metrics...</p>
+					<p class="text-sm {theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}">{dashboard_cpu_fetching()}</p>
 				</div>
 			</div>
 		{/if}
